@@ -1,0 +1,10 @@
+# Dependency directories
+node_modules/
+
+# Production build
+dist/
+
+# Environment secrets
+.env
+.env.local
+.env.*.local
