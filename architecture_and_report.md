@@ -1,6 +1,6 @@
-# Operational System Report - Geospatial Hub (STRATCOM-ALPHA)
+# Operational System Report - Drishya
 
-This report details the system architecture, code organization, data ingestion pipeline, and runtime capabilities of the **Geospatial Hub (STRATCOM-ALPHA) India Border Intelligence Dashboard** (Current Version).
+This report details the system architecture, code organization, data ingestion pipeline, and runtime capabilities of the **Drishya** dashboard (Current Version).
 
 ---
 

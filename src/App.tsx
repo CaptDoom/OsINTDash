@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { WorldGeoMap, type WorldGeoMapMarker } from './components/WorldGeoMap';
 
 type TimeWindow = '1m' | '5m' | '1h' | '24h' | '7d';
 type Category = 'Political' | 'Social' | 'Tech' | 'Economic' | 'Military';
@@ -34,7 +35,16 @@ type Signal = {
   headline: string;
   summary: string;
   source: string;
+  source_chain?: string[];
+  source_links?: QuerySource[];
   timestamp: string;
+  url?: string;
+  image_url?: string | null;
+  youtube_url?: string;
+  verification_status?: string;
+  confidence_score?: number;
+  story_key?: string;
+  related_count?: number;
   relevance_score?: number;
   trust?: TrustIndicator;
   isNew?: boolean;
@@ -48,6 +58,75 @@ type CountryIntel = {
   operational_summary: string;
   signals: Signal[];
   source_status: 'normal' | 'degraded_mesh';
+};
+
+type RgbTheme = {
+  r: number;
+  g: number;
+  b: number;
+};
+
+type QuerySource = {
+  name: string;
+  url: string;
+};
+
+type QueryAnswer = {
+  summary: string;
+  sources: QuerySource[];
+  matchedCount: number;
+  generatedAt: string;
+  detectedCountry?: string;
+  queryMode?: string;
+  evidenceQuality?: string;
+  answerMode?: string;
+  modelUsed?: string;
+  safetyNotice?: string;
+};
+
+type WorldAlert = {
+  id: string;
+  location: string;
+  lat: number;
+  lon: number;
+  severity: 'high' | 'medium';
+  headline: string;
+  source: string;
+  url: string;
+  timestamp: string;
+};
+
+type PanelView = 'country' | 'worldMap';
+
+type WorldMapPan = {
+  x: number;
+  y: number;
+};
+
+const countryMapCoordinates: Record<string, { lat: number; lon: number }> = {
+  China: { lat: 35.8617, lon: 104.1954 },
+  Pakistan: { lat: 30.3753, lon: 69.3451 },
+  Afghanistan: { lat: 33.9391, lon: 67.71 },
+  Bangladesh: { lat: 23.685, lon: 90.3563 },
+  Myanmar: { lat: 21.9162, lon: 95.956 },
+  Nepal: { lat: 28.3949, lon: 84.124 },
+  Bhutan: { lat: 27.5142, lon: 90.4336 },
+  'Sri Lanka': { lat: 7.8731, lon: 80.7718 },
+  Maldives: { lat: 3.2028, lon: 73.2207 },
+};
+
+type StoredCredential = {
+  name: string;
+  role: string;
+  clearance: string;
+  passwordHash: string;
+};
+
+type CredentialSeed = {
+  name: string;
+  role: string;
+  clearance: string;
+  password: string;
 };
 
 const countries: Country[] = [
@@ -226,45 +305,66 @@ const countries: Country[] = [
 
 const categories: Category[] = ['Political', 'Social', 'Tech', 'Economic', 'Military'];
 const trustLevels: TrustIndicator[] = ['Verified Source', 'Developing', 'Unverified', 'Rumor'];
+const CREDENTIAL_STORE_KEY = 'drishya-auth-users-v1';
 
-const demoUsers = {
-  'analyst@intel.local': { password: 'Intel@2026', name: 'Asha Rao', role: 'analyst', clearance: 'Regional' },
+const defaultCredentialSeeds: Record<string, CredentialSeed> = {
+  'analyst@intel.local': { password: 'Intel@2026', name: 'Seekay', role: 'analyst', clearance: 'Regional' },
   'operator@intel.local': { password: 'Ops@2026', name: 'Ravi Menon', role: 'operator', clearance: 'Border' },
   'admin@intel.local': { password: 'Admin@2026', name: 'Ishaan Verma', role: 'admin', clearance: 'All' },
 };
 
-// Web Audio API double beep chime
-function playTerminalChime() {
-  try {
-    const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-    
-    // Pitch A5 (880Hz) followed by Pitch C6 (1046.50Hz)
-    const osc1 = ctx.createOscillator();
-    const gain1 = ctx.createGain();
-    osc1.connect(gain1);
-    gain1.connect(ctx.destination);
-    osc1.type = 'sine';
-    osc1.frequency.setValueAtTime(880, ctx.currentTime);
-    gain1.gain.setValueAtTime(0.04, ctx.currentTime);
-    gain1.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
-    osc1.start();
-    osc1.stop(ctx.currentTime + 0.3);
+function normalizeLoginId(value: string) {
+  return value.trim().toLowerCase();
+}
 
-    setTimeout(() => {
-      const osc2 = ctx.createOscillator();
-      const gain2 = ctx.createGain();
-      osc2.connect(gain2);
-      gain2.connect(ctx.destination);
-      osc2.type = 'sine';
-      osc2.frequency.setValueAtTime(1046.50, ctx.currentTime);
-      gain2.gain.setValueAtTime(0.04, ctx.currentTime);
-      gain2.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
-      osc2.start();
-      osc2.stop(ctx.currentTime + 0.3);
-    }, 100);
-  } catch (e) {
-    console.warn('Web Audio warning:', e);
+function clearanceForRole(role: string) {
+  if (role === 'admin') return 'SEC LEVEL 9-A';
+  if (role === 'operator') return 'SEC LEVEL 7-B';
+  return 'SEC LEVEL 5-C';
+}
+
+async function hashSecret(secret: string) {
+  if (!globalThis.crypto?.subtle) {
+    return `plain:${secret}`;
   }
+
+  const bytes = new TextEncoder().encode(secret);
+  const hashBuffer = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function buildDefaultCredentialStore(): Promise<Record<string, StoredCredential>> {
+  const entries = await Promise.all(
+    Object.entries(defaultCredentialSeeds).map(async ([id, seed]) => {
+      const passwordHash = await hashSecret(seed.password);
+      return [normalizeLoginId(id), { ...seed, passwordHash }] as const;
+    })
+  );
+  return Object.fromEntries(entries);
+}
+
+async function getOrCreateCredentialStore(): Promise<Record<string, StoredCredential>> {
+  const raw = window.localStorage.getItem(CREDENTIAL_STORE_KEY);
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw) as Record<string, StoredCredential>;
+      if (parsed && Object.keys(parsed).length > 0) {
+        return parsed;
+      }
+    } catch (err) {
+      // ignore malformed data and recreate
+    }
+  }
+
+  const seeded = await buildDefaultCredentialStore();
+  window.localStorage.setItem(CREDENTIAL_STORE_KEY, JSON.stringify(seeded));
+  return seeded;
+}
+
+// Sound effects disabled for a quieter experience.
+function playTerminalChime() {
+  return;
 }
 
 // In-headline key entities tooltips database
@@ -279,6 +379,9 @@ const entityContexts: Record<string, string> = {
 };
 
 function App() {
+  const newsAutoRefreshMs = 120000;
+  const newsAutoRefreshSeconds = 120;
+  const defaultTheme: RgbTheme = { r: 123, g: 208, b: 255 };
   const [selectedCountry, setSelectedCountry] = useState<Country>(countries[0]);
   const [timeWindow, setTimeWindow] = useState<TimeWindow>('24h');
   const [newsFeed, setNewsFeed] = useState<Record<string, CountryIntel>>({});
@@ -287,14 +390,19 @@ function App() {
   
   // Authentication State
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [pendingAuthUser, setPendingAuthUser] = useState<AuthUser | null>(null);
   const [loginForm, setLoginForm] = useState({ email: '', password: '' });
   const [loginError, setLoginError] = useState('');
   const [isWebAuthnSimulating, setIsWebAuthnSimulating] = useState(false);
   const [webauthnSuccess, setWebauthnSuccess] = useState(false);
+  const [securityForm, setSecurityForm] = useState({ currentPassword: '', newId: '', newPassword: '', confirmPassword: '' });
+  const [securityError, setSecurityError] = useState('');
+  const [securityNotice, setSecurityNotice] = useState('');
+  const [isUpdatingCredentials, setIsUpdatingCredentials] = useState(false);
 
-  // Polling states (60 seconds countdown)
+  // Polling states (2 minute countdown)
   const [refreshTrigger, setRefreshTrigger] = useState(0);
-  const [countdown, setCountdown] = useState(60);
+  const [countdown, setCountdown] = useState(newsAutoRefreshSeconds);
 
   // Fallback timeframe notification state
   const [isFallbackTimeframe, setIsFallbackTimeframe] = useState(false);
@@ -306,6 +414,13 @@ function App() {
 
   // Layout mode state
   const [layoutMode, setLayoutMode] = useState<LayoutMode>('split');
+  const [selectedCategory, setSelectedCategory] = useState<Category>('Political');
+  const [isCountrySelected, setIsCountrySelected] = useState(false);
+  const [panelView, setPanelView] = useState<PanelView>('country');
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isDarkMode, setIsDarkMode] = useState(true);
+  const [uiTheme, setUiTheme] = useState<RgbTheme>(defaultTheme);
+  const settingsMenuRef = useRef<HTMLDivElement>(null);
 
   // Keyboard navigation cursor state
   const [keyboardCursorIndex, setKeyboardCursorIndex] = useState(-1);
@@ -316,46 +431,171 @@ function App() {
   const [filterImpact, setFilterImpact] = useState<string>('All');
   const [filterTrust, setFilterTrust] = useState<string>('All');
   const [filterQuery, setFilterQuery] = useState<string>('');
+  const [newsView, setNewsView] = useState<'latest' | 'past'>('latest');
+  const [lastRefreshAt, setLastRefreshAt] = useState<Date | null>(null);
+  const [refreshLabelTick, setRefreshLabelTick] = useState(0);
+  const [isQueryOverlayOpen, setIsQueryOverlayOpen] = useState(false);
+  const [queryInput, setQueryInput] = useState('');
+  const [queryAnswer, setQueryAnswer] = useState<QueryAnswer | null>(null);
+  const [queryLoading, setQueryLoading] = useState(false);
+  const [queryError, setQueryError] = useState('');
+  const [queryHistory, setQueryHistory] = useState<string[]>([]);
+  const [worldAlerts, setWorldAlerts] = useState<WorldAlert[]>([]);
+  const [worldAlertsLoading, setWorldAlertsLoading] = useState(false);
+  const [worldAlertsUpdatedAt, setWorldAlertsUpdatedAt] = useState('');
+  const [worldMapZoom, setWorldMapZoom] = useState(1);
+  const [worldMapPan, setWorldMapPan] = useState<WorldMapPan>({ x: 0, y: 0 });
+  const [isWorldMapDragging, setIsWorldMapDragging] = useState(false);
+  const [isWorldMapFullscreen, setIsWorldMapFullscreen] = useState(false);
+  const worldMapDragRef = useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(null);
 
   // Active Tooltip entity state
   const [hoveredEntity, setHoveredEntity] = useState<{ text: string; x: number; y: number } | null>(null);
 
-  // Load session from local storage on mount
   useEffect(() => {
-    const cached = window.localStorage.getItem('intel-session');
-    if (cached) {
-      setAuthUser(JSON.parse(cached) as AuthUser);
+    if (!isSettingsOpen) return;
+
+    const handleDocumentClick = (event: MouseEvent) => {
+      const targetNode = event.target as Node;
+      if (settingsMenuRef.current && !settingsMenuRef.current.contains(targetNode)) {
+        setIsSettingsOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleDocumentClick);
+    return () => {
+      document.removeEventListener('mousedown', handleDocumentClick);
+    };
+  }, [isSettingsOpen]);
+
+  useEffect(() => {
+    window.localStorage.removeItem('intel-session');
+    void getOrCreateCredentialStore();
+  }, []);
+
+  useEffect(() => {
+    const cachedTheme = window.localStorage.getItem('drishya-ui-theme-rgb');
+    if (!cachedTheme) return;
+    try {
+      const parsed = JSON.parse(cachedTheme) as Partial<RgbTheme>;
+      const clamp = (value: number | undefined, fallback: number) => {
+        if (typeof value !== 'number' || Number.isNaN(value)) return fallback;
+        return Math.max(0, Math.min(255, Math.round(value)));
+      };
+      setUiTheme({
+        r: clamp(parsed.r, defaultTheme.r),
+        g: clamp(parsed.g, defaultTheme.g),
+        b: clamp(parsed.b, defaultTheme.b),
+      });
+    } catch (err) {
+      // ignore malformed cached theme
     }
   }, []);
 
-  // API Ingestion Loop (60s trigger, category-partitioned query router)
+  useEffect(() => {
+    window.localStorage.setItem('drishya-ui-theme-rgb', JSON.stringify(uiTheme));
+  }, [uiTheme]);
+
+  useEffect(() => {
+    const cachedHistory = window.localStorage.getItem('drishya-query-history-v1');
+    if (!cachedHistory) return;
+    try {
+      const parsed = JSON.parse(cachedHistory) as string[];
+      if (Array.isArray(parsed)) {
+        setQueryHistory(parsed.slice(0, 10));
+      }
+    } catch (err) {
+      // ignore malformed cache
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem('drishya-query-history-v1', JSON.stringify(queryHistory.slice(0, 10)));
+  }, [queryHistory]);
+
+  useEffect(() => {
+    if (!authUser) return;
+    let mounted = true;
+
+    const loadWorldAlerts = async (force: boolean) => {
+      if (force) setWorldAlertsLoading(true);
+      try {
+        const response = await fetch(`/api/world/alerts${force ? '?force=true' : ''}`);
+        if (!response.ok) {
+          throw new Error(`World alerts fetch failed ${response.status}`);
+        }
+
+        const payload = (await response.json()) as { alerts?: WorldAlert[]; updatedAt?: string };
+        if (!mounted) return;
+        if (Array.isArray(payload.alerts) && payload.alerts.length > 0) {
+          setWorldAlerts(payload.alerts);
+          setWorldAlertsUpdatedAt(payload.updatedAt || new Date().toISOString());
+        }
+      } catch (err) {
+        if (mounted) {
+          console.warn('World alerts loading failed:', err);
+        }
+      } finally {
+        if (force && mounted) {
+          setWorldAlertsLoading(false);
+        }
+      }
+    };
+
+    void loadWorldAlerts(true);
+    const interval = window.setInterval(() => {
+      void loadWorldAlerts(false);
+    }, newsAutoRefreshMs);
+
+    return () => {
+      mounted = false;
+      window.clearInterval(interval);
+    };
+  }, [authUser, refreshTrigger, newsAutoRefreshMs]);
+
+  // API Ingestion Loop (2 minute trigger, category-partitioned query router)
   useEffect(() => {
     async function loadFeed() {
       if (!authUser) return;
       setLoading(true);
       setError(null);
       try {
-        const response = await fetch(`/api/news/all?category=${filterCategory}`);
-        if (!response.ok) {
-          throw new Error(`Feed failure ${response.status}`);
-        }
-        const payload = (await response.json()) as Record<string, CountryIntel>;
-        
-        // Enrich signals with trust levels dynamically
-        const enriched: Record<string, CountryIntel> = {};
-        Object.entries(payload).forEach(([countryName, data]) => {
-          enriched[countryName] = {
-            ...data,
-            signals: (data.signals || []).map((s, idx) => ({
-              ...s,
-              id: `${countryName}-${idx}-${s.timestamp}`,
-              trust: trustLevels[idx % trustLevels.length],
-              country: countryName
-            }))
-          };
-        });
+        const hydrateFeed = async () => {
+          const response = await fetch(`/api/news/all?category=${filterCategory}`);
+          if (!response.ok) {
+            throw new Error(`Feed failure ${response.status}`);
+          }
 
-        setNewsFeed(enriched);
+          const payload = (await response.json()) as Record<string, CountryIntel>;
+          const enriched: Record<string, CountryIntel> = {};
+          Object.entries(payload).forEach(([countryName, data]) => {
+            enriched[countryName] = {
+              ...data,
+              signals: (data.signals || []).map((s, idx) => ({
+                ...s,
+                id: `${countryName}-${idx}-${s.timestamp}`,
+                trust: trustLevels[idx % trustLevels.length],
+                country: countryName
+              }))
+            };
+          });
+
+          setNewsFeed(enriched);
+        };
+
+        // Serve cached feed first for fast paint.
+        await hydrateFeed();
+        setLastRefreshAt(new Date());
+
+        // Refresh in background and then hydrate again with newer data.
+        const refreshResponse = await fetch('/api/news/refresh', { method: 'POST' });
+        if (!refreshResponse.ok) {
+          console.warn('Live refresh request failed, continuing with cached feed.');
+          return;
+        }
+
+        await hydrateFeed();
+        setLastRefreshAt(new Date());
       } catch (feedError) {
         setError('Mesh database offline. Using localized validated summaries.');
       } finally {
@@ -365,6 +605,27 @@ function App() {
 
     void loadFeed();
   }, [authUser, refreshTrigger, filterCategory]);
+
+  useEffect(() => {
+    if (!authUser) return;
+    const autoRefreshInterval = window.setInterval(() => {
+      setRefreshTrigger((prev) => prev + 1);
+    }, newsAutoRefreshMs);
+
+    return () => {
+      window.clearInterval(autoRefreshInterval);
+    };
+  }, [authUser, newsAutoRefreshMs]);
+
+  useEffect(() => {
+    const labelInterval = window.setInterval(() => {
+      setRefreshLabelTick((prev) => prev + 1);
+    }, 15000);
+
+    return () => {
+      window.clearInterval(labelInterval);
+    };
+  }, []);
 
   // SSE Stream Listener (category-specific)
   useEffect(() => {
@@ -383,6 +644,10 @@ function App() {
             id: `${data.country}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
             isNew: true
           };
+
+          if (!incomingSignal.url) {
+            return;
+          }
 
           // Play double chime if high-impact or triggers key entities
           const hasKeyEntity = /pla|taliban|uav|drone|clash|loc|lac/i.test(incomingSignal.headline);
@@ -454,31 +719,287 @@ function App() {
     }
   };
 
-  // Countdown timer (60 seconds)
+  const scrollToLatest = () => {
+    if (dossierScrollRef.current) {
+      dossierScrollRef.current.scrollTo({
+        top: dossierScrollRef.current.scrollHeight,
+        behavior: 'smooth'
+      });
+    }
+  };
+
+  // Countdown timer (2 minutes)
   useEffect(() => {
     if (!authUser) return;
     const interval = setInterval(() => {
       setCountdown((prev) => {
         if (prev <= 1) {
           setRefreshTrigger((r) => r + 1);
-          return 60;
+          return newsAutoRefreshSeconds;
         }
         return prev - 1;
       });
     }, 1000);
     return () => clearInterval(interval);
-  }, [authUser]);
+  }, [authUser, newsAutoRefreshSeconds]);
 
   // Reset countdown on shifts
   useEffect(() => {
-    setCountdown(60);
+    setCountdown(newsAutoRefreshSeconds);
     setKeyboardCursorIndex(-1);
-  }, [selectedCountry.id, timeWindow, refreshTrigger]);
+  }, [selectedCountry.id, timeWindow, refreshTrigger, newsAutoRefreshSeconds]);
 
   // Current selected country live intelligence info
   const selectedIntel = newsFeed[selectedCountry.name];
   const selectedSummary = selectedIntel?.operational_summary || selectedCountry.summary;
   const isSelectedDegraded = selectedIntel?.source_status === 'degraded_mesh';
+
+  const categoryNewsSignals = useMemo(() => {
+    const raw = selectedIntel?.signals ?? [];
+    const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    return [...raw]
+      .filter((signal) => Boolean(signal.url))
+      .filter((signal) => signal.category === selectedCategory)
+      .filter((signal) => new Date(signal.timestamp).getTime() >= cutoff)
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+  }, [selectedIntel, selectedCategory]);
+
+  const latestNewsSignal = categoryNewsSignals[0] ?? null;
+
+  const latestSignalKey = latestNewsSignal ? (latestNewsSignal.id || latestNewsSignal.timestamp) : '';
+  const pastNewsSignals = categoryNewsSignals.filter((signal) => {
+    const signalKey = signal.id || signal.timestamp;
+    if (latestSignalKey && signalKey === latestSignalKey) return false;
+    return signal.impact === 'High';
+  });
+
+  const selectedSignalTimeline = useMemo(() => {
+    if (!selectedDossierSignal) return [];
+
+    const sourceSignals = selectedIntel?.signals ?? [];
+    const storyKey = selectedDossierSignal.story_key;
+    const matches = storyKey
+      ? sourceSignals.filter((signal) => signal.story_key === storyKey)
+      : sourceSignals.filter((signal) => signal.headline === selectedDossierSignal.headline);
+
+    return [...matches]
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+      .slice(0, 8);
+  }, [selectedDossierSignal, selectedIntel]);
+
+  const buildDetailedNewsText = (signal: Signal | null) => {
+    if (!signal) {
+      return 'No fresh signal is available yet. The intelligence mesh is refreshing from live RSS, NewsAPI, and global wire sources so the latest report will appear here automatically.';
+    }
+
+    return signal.summary?.trim() || signal.headline;
+  };
+
+  const latestNewsDetail = buildDetailedNewsText(latestNewsSignal);
+  const latestNewsAvailable = latestNewsSignal !== null;
+
+  const getRefreshStatusLabel = () => {
+    if (!lastRefreshAt) return 'Refreshing now...';
+    const elapsedMs = Date.now() - lastRefreshAt.getTime();
+    const elapsedMinutes = Math.floor(elapsedMs / 60000);
+
+    if (elapsedMinutes <= 0) return 'Refreshed just now';
+    if (elapsedMinutes === 1) return 'Refreshed 1 minute ago';
+    return `Refreshed ${elapsedMinutes} minutes ago`;
+  };
+
+  const refreshStatusLabel = getRefreshStatusLabel();
+  void refreshLabelTick;
+
+  const buildSourceSearchUrl = (headline: string, countryName?: string, sourceName?: string) => {
+    const query = [headline, countryName, sourceName].filter(Boolean).join(' ');
+    return `https://news.google.com/search?q=${encodeURIComponent(query)}`;
+  };
+
+  const getSignalSourceUrl = (signal: Signal) => {
+    return signal.url || buildSourceSearchUrl(signal.headline, signal.country, signal.source);
+  };
+
+  const getSignalImageStyle = (signal?: Signal | null) => {
+    if (!signal?.image_url) return undefined;
+    return {
+      backgroundImage: `linear-gradient(180deg, rgba(5,20,36,0.18), rgba(5,20,36,0.92)), url(${signal.image_url})`,
+      backgroundSize: 'cover',
+      backgroundPosition: 'center'
+    } as const;
+  };
+
+  const getSignalSourceKind = (signal?: Signal | null) => {
+    if (!signal) return 'Source';
+    return signal.url ? 'Direct source' : 'Search fallback';
+  };
+
+  const getLatestCountrySignal = (countryName: string) => {
+    const signals = newsFeed[countryName]?.signals ?? [];
+    return [...signals]
+      .filter((signal) => Boolean(signal.url))
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0] ?? null;
+  };
+
+  const worldMapMarkers = useMemo<WorldGeoMapMarker[]>(() => {
+    const deduped = new Map<string, WorldAlert>();
+    worldAlerts.forEach((alert) => {
+      const existing = deduped.get(alert.location);
+      if (!existing) {
+        deduped.set(alert.location, alert);
+        return;
+      }
+
+      if (existing.severity !== 'high' && alert.severity === 'high') {
+        deduped.set(alert.location, alert);
+        return;
+      }
+
+      if (new Date(alert.timestamp).getTime() > new Date(existing.timestamp).getTime()) {
+        deduped.set(alert.location, alert);
+      }
+    });
+
+    return Array.from(deduped.values()).slice(0, 180);
+  }, [worldAlerts]);
+
+  const fallbackWorldMapMarkers = useMemo<WorldGeoMapMarker[]>(() => {
+    const markers: WorldGeoMapMarker[] = [];
+
+    Object.entries(newsFeed).forEach(([countryName, intel]) => {
+      const coordinates = countryMapCoordinates[countryName];
+      if (!coordinates) return;
+
+      const latestHigh = (intel.signals || [])
+        .filter((signal) => Boolean(signal.url) && signal.impact === 'High')
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
+
+      const latestMedium = (intel.signals || [])
+        .filter((signal) => Boolean(signal.url) && signal.impact === 'Medium')
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
+
+      if (latestHigh?.url) {
+        markers.push({
+          id: `fallback-${countryName}-high-${latestHigh.id || latestHigh.timestamp}`,
+          location: countryName,
+          lat: coordinates.lat,
+          lon: coordinates.lon,
+          severity: 'high',
+          headline: latestHigh.headline,
+          source: latestHigh.source,
+          url: latestHigh.url,
+        });
+      }
+
+      if (latestMedium?.url) {
+        markers.push({
+          id: `fallback-${countryName}-medium-${latestMedium.id || latestMedium.timestamp}`,
+          location: countryName,
+          lat: coordinates.lat,
+          lon: coordinates.lon,
+          severity: 'medium',
+          headline: latestMedium.headline,
+          source: latestMedium.source,
+          url: latestMedium.url,
+        });
+      }
+    });
+
+    return markers;
+  }, [newsFeed]);
+
+  const effectiveWorldMapMarkers = useMemo<WorldGeoMapMarker[]>(() => {
+    const merged = new Map<string, WorldGeoMapMarker>();
+
+    [...worldMapMarkers, ...fallbackWorldMapMarkers].forEach((marker) => {
+      const key = `${marker.location}-${marker.severity}`;
+      if (!merged.has(key)) {
+        merged.set(key, marker);
+      }
+    });
+
+    return Array.from(merged.values());
+  }, [worldMapMarkers, fallbackWorldMapMarkers]);
+
+  const clampPan = (x: number, y: number, zoom: number): WorldMapPan => {
+    const maxX = 500 * Math.max(0, zoom - 1);
+    const maxY = 280 * Math.max(0, zoom - 1);
+    return {
+      x: Math.max(-maxX, Math.min(maxX, x)),
+      y: Math.max(-maxY, Math.min(maxY, y)),
+    };
+  };
+
+  const setClampedWorldMapZoom = (value: number) => {
+    const clamped = Math.max(1, Math.min(4, Number(value.toFixed(2))));
+    setWorldMapZoom(clamped);
+    setWorldMapPan((prev) => clampPan(prev.x, prev.y, clamped));
+  };
+
+  const accentColor = `rgb(${uiTheme.r}, ${uiTheme.g}, ${uiTheme.b})`;
+  const accentSoftBg = `rgba(${uiTheme.r}, ${uiTheme.g}, ${uiTheme.b}, 0.12)`;
+  const accentBorder = `rgba(${uiTheme.r}, ${uiTheme.g}, ${uiTheme.b}, 0.42)`;
+
+  const setThemeChannel = (channel: keyof RgbTheme, value: number) => {
+    const clamped = Math.max(0, Math.min(255, value));
+    setUiTheme((prev) => ({
+      ...prev,
+      [channel]: clamped,
+    }));
+  };
+
+  const renderWorldMapBackdrop = (opacity: number) => (
+    <div className="drishya-world-map-layer" style={{ opacity }}>
+      <div className="drishya-world-map-image" aria-hidden="true">
+        <WorldGeoMap markers={[]} showMarkers={false} interactive={false} fitMode="slice" className="h-full w-full" />
+      </div>
+      <div className="drishya-world-map-vignette" />
+    </div>
+  );
+
+  const runNewsQuery = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const query = queryInput.trim();
+    if (!query) {
+      setQueryError('Type a question first.');
+      return;
+    }
+
+    setQueryLoading(true);
+    setQueryError('');
+    setQueryHistory((prev) => {
+      const next = [query, ...prev.filter((item) => item !== query)];
+      return next.slice(0, 10);
+    });
+    try {
+      const response = await fetch('/api/news/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, country: selectedCountry.name }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Query failed ${response.status}`);
+      }
+
+      const payload = (await response.json()) as QueryAnswer;
+      setQueryAnswer(payload);
+    } catch (err) {
+      setQueryError('Could not answer right now. Please try again in a moment.');
+    } finally {
+      setQueryLoading(false);
+    }
+  };
+
+  const copySummaryToClipboard = async () => {
+    if (!queryAnswer?.summary) return;
+    try {
+      await navigator.clipboard.writeText(queryAnswer.summary);
+      setQueryError('Summary copied to clipboard.');
+    } catch (err) {
+      setQueryError('Unable to copy summary automatically. Please copy manually.');
+    }
+  };
 
   // Filter selected signals based on timeWindow, Matrix filters, and relevance score
   const selectedSignalsFiltered = useMemo(() => {
@@ -551,6 +1072,13 @@ function App() {
         e.preventDefault();
         const searchInput = document.getElementById('coords-search-input');
         if (searchInput) searchInput.focus();
+      } else if (e.key === 'End' || (e.key && e.key.toLowerCase() === 'g' && e.shiftKey)) {
+        // Scroll to latest feed when pressing End or Shift+G
+        try {
+          if (dossierScrollRef && dossierScrollRef.current) dossierScrollRef.current.scrollTo({ top: dossierScrollRef.current.scrollHeight, behavior: 'smooth' });
+        } catch (err) {
+          // ignore
+        }
       }
     };
 
@@ -558,45 +1086,883 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [authUser, selectedSignalsFiltered, keyboardCursorIndex, layoutMode]);
 
-  const handleLogin = (event: React.FormEvent<HTMLFormElement>) => {
+  const handleLogin = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setLoginError('');
-    const seed = demoUsers[loginForm.email as keyof typeof demoUsers];
-    if (!seed) {
-      setLoginError('Unknown coordinate key. Use: analyst@intel.local');
+
+    const loginId = normalizeLoginId(loginForm.email);
+    if (!loginId || !loginForm.password) {
+      setLoginError('ID and password are required.');
       return;
     }
-    if (loginForm.password !== seed.password) {
-      setLoginError('MFA Credentials mismatch.');
+
+    const credentialStore = await getOrCreateCredentialStore();
+    const record = credentialStore[loginId];
+    if (!record) {
+      setLoginError('Invalid ID or password.');
       return;
     }
+
+    const inputHash = await hashSecret(loginForm.password);
+    if (inputHash !== record.passwordHash) {
+      setLoginError('Invalid ID or password.');
+      return;
+    }
+
+    const user: AuthUser = {
+      id: loginId,
+      name: record.name,
+      role: record.role.toUpperCase(),
+      clearance: clearanceForRole(record.role),
+    };
+    setPendingAuthUser(user);
     
     // Simulate Fingerprint / Security Key MFA
     setIsWebAuthnSimulating(true);
   };
 
   const executeMfaSuccess = () => {
+    if (!pendingAuthUser) {
+      setLoginError('Authentication context expired. Please login again.');
+      setIsWebAuthnSimulating(false);
+      return;
+    }
+
     setWebauthnSuccess(true);
     setTimeout(() => {
-      const seed = demoUsers[loginForm.email as keyof typeof demoUsers];
-      const user: AuthUser = {
-        id: loginForm.email,
-        name: seed.name,
-        role: seed.role.toUpperCase(),
-        clearance: seed.role === 'admin' ? 'SEC LEVEL 9-A' : seed.role === 'operator' ? 'SEC LEVEL 7-B' : 'SEC LEVEL 5-C',
-      };
-      window.localStorage.setItem('intel-session', JSON.stringify(user));
-      setAuthUser(user);
+      setAuthUser(pendingAuthUser);
+      setPendingAuthUser(null);
       setIsWebAuthnSimulating(false);
       setWebauthnSuccess(false);
     }, 800);
   };
 
-  const handleLogout = () => {
-    window.localStorage.removeItem('intel-session');
-    setAuthUser(null);
-    setLoginForm({ email: '', password: '' });
+  const handleCredentialUpdate = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!authUser) return;
+
+    setSecurityError('');
+    setSecurityNotice('');
+
+    const currentPassword = securityForm.currentPassword;
+    const newId = normalizeLoginId(securityForm.newId);
+    const newPassword = securityForm.newPassword;
+    const confirmPassword = securityForm.confirmPassword;
+
+    if (!currentPassword || !newId || !newPassword || !confirmPassword) {
+      setSecurityError('All fields are required to update credentials.');
+      return;
+    }
+    if (newPassword.length < 8) {
+      setSecurityError('New password must be at least 8 characters long.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setSecurityError('New password and confirmation do not match.');
+      return;
+    }
+
+    setIsUpdatingCredentials(true);
+    try {
+      const credentialStore = await getOrCreateCredentialStore();
+      const currentId = normalizeLoginId(authUser.id);
+      const currentRecord = credentialStore[currentId];
+      if (!currentRecord) {
+        setSecurityError('Current account was not found. Please login again.');
+        return;
+      }
+
+      const currentHash = await hashSecret(currentPassword);
+      if (currentHash !== currentRecord.passwordHash) {
+        setSecurityError('Current password is incorrect.');
+        return;
+      }
+
+      if (newId !== currentId && credentialStore[newId]) {
+        setSecurityError('That new ID is already in use. Choose a different one.');
+        return;
+      }
+
+      const newHash = await hashSecret(newPassword);
+      const updatedStore: Record<string, StoredCredential> = { ...credentialStore };
+      delete updatedStore[currentId];
+      updatedStore[newId] = {
+        ...currentRecord,
+        passwordHash: newHash,
+      };
+
+      window.localStorage.setItem(CREDENTIAL_STORE_KEY, JSON.stringify(updatedStore));
+      setAuthUser((prev) => (prev ? { ...prev, id: newId } : prev));
+      setSecurityForm({ currentPassword: '', newId: '', newPassword: '', confirmPassword: '' });
+      setSecurityNotice('Credentials updated successfully. Use the new ID/password on next login.');
+    } finally {
+      setIsUpdatingCredentials(false);
+    }
   };
+
+  const handleLogout = () => {
+    setAuthUser(null);
+    setPendingAuthUser(null);
+    setLoginForm({ email: '', password: '' });
+    setIsWebAuthnSimulating(false);
+    setWebauthnSuccess(false);
+  };
+
+  if (authUser) {
+    const categoriesForView: Category[] = ['Political', 'Social', 'Military', 'Economic'];
+    const currentCategoryData = selectedCountry.categories[selectedCategory];
+    const latestCountrySignal = latestNewsSignal;
+    const sourceLabel = latestCountrySignal?.headline || `${selectedCountry.name} ${selectedCategory} news`;
+    const sourceUrl = latestCountrySignal
+      ? getSignalSourceUrl(latestCountrySignal)
+      : buildSourceSearchUrl(sourceLabel, selectedCountry.name);
+
+    return (
+      <div
+        className={`theme-rgb-all drishya-scroll-shell p-6 font-sans transition-colors relative ${isDarkMode ? 'bg-black text-white' : 'bg-white text-black'}`}
+        style={{
+          ['--theme-rgb' as string]: `${uiTheme.r}, ${uiTheme.g}, ${uiTheme.b}`,
+          backgroundImage: isDarkMode
+            ? `radial-gradient(circle at 12% 8%, ${accentSoftBg}, transparent 45%)`
+            : `radial-gradient(circle at 12% 8%, ${accentSoftBg}, transparent 55%)`
+        }}
+      >
+        {isQueryOverlayOpen && (
+          <div className={`fixed inset-0 z-50 ${isDarkMode ? 'bg-black/95' : 'bg-white/95'} backdrop-blur-sm p-6 md:p-10`}>
+            <div className="max-w-4xl mx-auto h-full flex flex-col">
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="text-2xl font-semibold tracking-[0.2em] uppercase">News Search</h2>
+                <button
+                  onClick={() => setIsQueryOverlayOpen(false)}
+                  className={`border px-3 py-2 text-xs uppercase tracking-[0.2em] ${isDarkMode ? 'border-white/40 hover:bg-white/10' : 'border-black/30 hover:bg-black/10'}`}
+                >
+                  Close
+                </button>
+              </div>
+
+              <form className="mt-6" onSubmit={runNewsQuery}>
+                <div className="flex gap-3">
+                  <input
+                    type="text"
+                    value={queryInput}
+                    onChange={(event) => setQueryInput(event.target.value)}
+                    placeholder="Ask anything: latest news from this country, summarize this update, impact on India..."
+                    className={`flex-1 border px-4 py-3 text-sm ${isDarkMode ? 'bg-black border-white/25' : 'bg-white border-black/25'} focus:outline-none`}
+                  />
+                  <button
+                    type="submit"
+                    disabled={queryLoading}
+                    className={`border px-4 py-3 text-xs uppercase tracking-[0.2em] ${isDarkMode ? 'border-white/40 hover:bg-white/10' : 'border-black/30 hover:bg-black/10'} ${queryLoading ? 'opacity-60 cursor-not-allowed' : ''}`}
+                  >
+                    {queryLoading ? 'Searching...' : 'Search'}
+                  </button>
+                </div>
+              </form>
+
+              {queryHistory.length > 0 && (
+                <div className="mt-3">
+                  <p className={`text-[11px] uppercase tracking-[0.2em] ${isDarkMode ? 'text-white/60' : 'text-black/60'}`}>
+                    Recent searches (last 10)
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {queryHistory.map((item) => (
+                      <button
+                        key={item}
+                        onClick={() => setQueryInput(item)}
+                        className={`border rounded px-2 py-1 text-xs ${isDarkMode ? 'border-white/25 hover:bg-white/10' : 'border-black/25 hover:bg-black/10'}`}
+                      >
+                        {item}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {queryError && <p className="mt-3 text-sm text-[#ffb4ab]">{queryError}</p>}
+
+              <div className={`mt-6 flex-1 overflow-y-auto border p-4 ${isDarkMode ? 'border-white/20 bg-white/5' : 'border-black/20 bg-black/5'}`}>
+                {!queryAnswer ? (
+                  <p className={`text-sm leading-relaxed ${isDarkMode ? 'text-white/70' : 'text-black/70'}`}>
+                    Ask a question and Drishya will search trusted sources and generate a concise answer with links for verification.
+                  </p>
+                ) : (
+                  <div className="space-y-4">
+                    <div>
+                      <p className={`text-xs uppercase tracking-[0.2em] ${isDarkMode ? 'text-white/60' : 'text-black/60'}`}>
+                        Generated {new Date(queryAnswer.generatedAt).toLocaleString()} • {queryAnswer.matchedCount} matched reports
+                      </p>
+                      <p className={`mt-1 text-xs uppercase tracking-[0.2em] ${isDarkMode ? 'text-white/60' : 'text-black/60'}`}>
+                        Country: {queryAnswer.detectedCountry || selectedCountry.name} • Mode: {queryAnswer.queryMode || 'general'}
+                      </p>
+                      <p className={`mt-1 text-xs uppercase tracking-[0.2em] ${isDarkMode ? 'text-white/60' : 'text-black/60'}`}>
+                        Answer mode: {queryAnswer.answerMode || 'extractive-fallback'}{queryAnswer.modelUsed ? ` • Model: ${queryAnswer.modelUsed}` : ''}
+                      </p>
+                      <p className={`mt-1 text-xs uppercase tracking-[0.2em] ${isDarkMode ? 'text-white/60' : 'text-black/60'}`}>
+                        Evidence quality: {queryAnswer.evidenceQuality || 'unknown'}
+                      </p>
+                      {queryAnswer.safetyNotice && (
+                        <p className={`mt-2 text-xs leading-relaxed ${isDarkMode ? 'text-white/65' : 'text-black/65'}`}>
+                          {queryAnswer.safetyNotice}
+                        </p>
+                      )}
+                      <p className="mt-2 text-sm leading-relaxed">{queryAnswer.summary}</p>
+                      <button
+                        onClick={copySummaryToClipboard}
+                        className={`mt-3 border px-3 py-1 text-xs uppercase tracking-[0.2em] ${isDarkMode ? 'border-white/30 hover:bg-white/10' : 'border-black/30 hover:bg-black/10'}`}
+                      >
+                        Copy summary
+                      </button>
+                    </div>
+                    <div>
+                      <p className={`text-xs uppercase tracking-[0.2em] ${isDarkMode ? 'text-white/60' : 'text-black/60'}`}>Sources</p>
+                      <div className="mt-2 space-y-2">
+                        {queryAnswer.sources.map((source, index) => (
+                          <a
+                            key={`${source.url}-${index}`}
+                            href={source.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className={`block border rounded px-3 py-2 text-sm break-all ${isDarkMode ? 'border-white/20 hover:bg-white/10' : 'border-black/20 hover:bg-black/10'}`}
+                          >
+                            <div className="font-semibold">{source.name}</div>
+                            <div className={`mt-1 text-xs ${isDarkMode ? 'text-white/70' : 'text-black/70'}`}>{source.url}</div>
+                          </a>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+        {renderWorldMapBackdrop(isDarkMode ? 0.24 : 0.16)}
+        <div className="relative z-10 max-w-5xl mx-auto">
+          <div className="flex items-center justify-between border-b pb-4 mb-6 ${isDarkMode ? 'border-white/20' : 'border-black/20'}">
+            <div>
+              <h1 className="text-3xl font-semibold tracking-[0.3em]">DRISHYA</h1>
+            </div>
+            <div className="flex items-center gap-2 relative">
+              <button
+                onClick={() => {
+                  setIsQueryOverlayOpen(true);
+                  setQueryError('');
+                }}
+                className={`border px-3 py-2 text-sm uppercase tracking-[0.2em] transition-colors ${isDarkMode ? 'border-white hover:bg-white hover:text-black' : 'border-black hover:bg-black hover:text-white'}`}
+                style={{ borderColor: accentBorder, color: accentColor }}
+                title="Open news search"
+              >
+                🔍
+              </button>
+              <button
+                onClick={() => setRefreshTrigger((prev) => prev + 1)}
+                className={`border px-3 py-2 text-sm uppercase tracking-[0.2em] transition-colors ${isDarkMode ? 'border-white hover:bg-white hover:text-black' : 'border-black hover:bg-black hover:text-white'}`}
+                style={{ borderColor: accentBorder, color: accentColor }}
+                title="Refresh live news now"
+              >
+                Refresh
+              </button>
+              <div className="relative" ref={settingsMenuRef}>
+                <button
+                  onClick={() => setIsSettingsOpen((prev) => !prev)}
+                  className={`border px-3 py-2 text-sm uppercase tracking-[0.2em] transition-colors ${isDarkMode ? 'border-white hover:bg-white hover:text-black' : 'border-black hover:bg-black hover:text-white'}`}
+                  style={{ borderColor: accentBorder, color: accentColor }}
+                >
+                  Settings
+                </button>
+                {isSettingsOpen && (
+                  <div className={`absolute right-0 top-full mt-2 w-[320px] border z-10 shadow-lg ${isDarkMode ? 'border-white/20 bg-black text-white' : 'border-black/20 bg-white text-black'}`}>
+                    <button
+                      onClick={() => setIsDarkMode((prev) => !prev)}
+                      className={`w-full text-left px-3 py-2 text-sm hover:${isDarkMode ? 'bg-white/10' : 'bg-black/10'} transition-colors`}
+                    >
+                      {isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+                    </button>
+                    <div className={`border-t px-3 py-3 space-y-2 ${isDarkMode ? 'border-white/20' : 'border-black/20'}`}>
+                      <p className="text-xs uppercase tracking-[0.3em] opacity-70">RGB Theme</p>
+                      <div className="space-y-2">
+                        <label className="block text-xs">
+                          R: {uiTheme.r}
+                          <input
+                            type="range"
+                            min={0}
+                            max={255}
+                            value={uiTheme.r}
+                            onChange={(event) => setThemeChannel('r', Number(event.target.value))}
+                            className="mt-1 w-full"
+                          />
+                        </label>
+                        <label className="block text-xs">
+                          G: {uiTheme.g}
+                          <input
+                            type="range"
+                            min={0}
+                            max={255}
+                            value={uiTheme.g}
+                            onChange={(event) => setThemeChannel('g', Number(event.target.value))}
+                            className="mt-1 w-full"
+                          />
+                        </label>
+                        <label className="block text-xs">
+                          B: {uiTheme.b}
+                          <input
+                            type="range"
+                            min={0}
+                            max={255}
+                            value={uiTheme.b}
+                            onChange={(event) => setThemeChannel('b', Number(event.target.value))}
+                            className="mt-1 w-full"
+                          />
+                        </label>
+                      </div>
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="h-7 w-16 rounded border" style={{ backgroundColor: accentColor, borderColor: accentBorder }} />
+                        <button
+                          onClick={() => setUiTheme(defaultTheme)}
+                          className={`text-xs uppercase tracking-[0.2em] border px-2 py-1 ${isDarkMode ? 'border-white/30 hover:bg-white/10' : 'border-black/30 hover:bg-black/10'}`}
+                        >
+                          Reset
+                        </button>
+                      </div>
+                    </div>
+                    <div className={`border-t px-3 py-3 ${isDarkMode ? 'border-white/20' : 'border-black/20'}`}>
+                      <p className="text-xs uppercase tracking-[0.3em] opacity-70">Account Security</p>
+                      <form className="mt-2 space-y-2" onSubmit={handleCredentialUpdate}>
+                        <input
+                          type="password"
+                          value={securityForm.currentPassword}
+                          onChange={(event) => setSecurityForm((prev) => ({ ...prev, currentPassword: event.target.value }))}
+                          placeholder="Current password"
+                          className={`w-full border px-2 py-1 text-xs bg-transparent ${isDarkMode ? 'border-white/25' : 'border-black/25'}`}
+                        />
+                        <input
+                          type="text"
+                          value={securityForm.newId}
+                          onChange={(event) => setSecurityForm((prev) => ({ ...prev, newId: event.target.value }))}
+                          placeholder="New ID (email/username)"
+                          className={`w-full border px-2 py-1 text-xs bg-transparent ${isDarkMode ? 'border-white/25' : 'border-black/25'}`}
+                        />
+                        <input
+                          type="password"
+                          value={securityForm.newPassword}
+                          onChange={(event) => setSecurityForm((prev) => ({ ...prev, newPassword: event.target.value }))}
+                          placeholder="New password"
+                          className={`w-full border px-2 py-1 text-xs bg-transparent ${isDarkMode ? 'border-white/25' : 'border-black/25'}`}
+                        />
+                        <input
+                          type="password"
+                          value={securityForm.confirmPassword}
+                          onChange={(event) => setSecurityForm((prev) => ({ ...prev, confirmPassword: event.target.value }))}
+                          placeholder="Confirm new password"
+                          className={`w-full border px-2 py-1 text-xs bg-transparent ${isDarkMode ? 'border-white/25' : 'border-black/25'}`}
+                        />
+                        {securityError && <p className="text-[10px] text-[#ffb4ab]">{securityError}</p>}
+                        {securityNotice && <p className="text-[10px] text-[#4edea3]">{securityNotice}</p>}
+                        <button
+                          type="submit"
+                          disabled={isUpdatingCredentials}
+                          className={`w-full text-xs uppercase tracking-[0.2em] border px-2 py-1 ${isDarkMode ? 'border-white/30 hover:bg-white/10' : 'border-black/30 hover:bg-black/10'} ${isUpdatingCredentials ? 'opacity-60 cursor-not-allowed' : ''}`}
+                        >
+                          {isUpdatingCredentials ? 'Updating...' : 'Update ID / Password'}
+                        </button>
+                      </form>
+                    </div>
+                    <div className={`border-t px-3 py-2 ${isDarkMode ? 'border-white/20' : 'border-black/20'}`}>
+                      <p className="text-xs uppercase tracking-[0.3em] opacity-70">Developer</p>
+                      <p className="mt-1 text-sm">Seekay</p>
+                    </div>
+                  </div>
+                )}
+              </div>
+              <button
+                onClick={handleLogout}
+                className={`border px-3 py-2 text-sm uppercase tracking-[0.2em] transition-colors ${isDarkMode ? 'border-white hover:bg-white hover:text-black' : 'border-black hover:bg-black hover:text-white'}`}
+                style={{ borderColor: accentBorder, color: accentColor }}
+              >
+                Logout
+              </button>
+            </div>
+          </div>
+
+          <div className="grid gap-6 md:grid-cols-[280px_minmax(0,1fr)]">
+            <div className="border border-white/20 rounded p-4">
+              <h2 className={`text-xs uppercase tracking-[0.3em] mb-4 ${isDarkMode ? 'text-white/60' : 'text-black/60'}`}>Countries</h2>
+              <div className="space-y-2">
+                {countries.map((country) => {
+                  const isActive = selectedCountry.id === country.id;
+                  return (
+                    <button
+                      key={country.id}
+                      onClick={() => {
+                        setPanelView('country');
+                        setSelectedCountry(country);
+                        setSelectedCategory('Political');
+                        setIsCountrySelected(true);
+                      }}
+                      className={`w-full text-left px-3 py-2 border transition-colors ${
+                        isActive
+                          ? isDarkMode
+                            ? 'bg-white text-black border-white'
+                            : 'bg-black text-white border-black'
+                          : isDarkMode
+                            ? 'border-white/20 hover:bg-white/10'
+                            : 'border-black/20 hover:bg-black/10'
+                      }`}
+                    >
+                      {country.name}
+                    </button>
+                  );
+                })}
+                <button
+                  onClick={() => {
+                    setPanelView('worldMap');
+                    setIsCountrySelected(false);
+                    setIsWorldMapFullscreen(true);
+                  }}
+                  className={`w-full text-left px-3 py-2 border transition-colors ${
+                    panelView === 'worldMap'
+                      ? isDarkMode
+                        ? 'bg-white text-black border-white'
+                        : 'bg-black text-white border-black'
+                      : isDarkMode
+                        ? 'border-white/20 hover:bg-white/10'
+                        : 'border-black/20 hover:bg-black/10'
+                  }`}
+                >
+                  Live World Map
+                </button>
+              </div>
+            </div>
+
+            {isWorldMapFullscreen && (
+              <div className={`fixed inset-0 z-50 ${isDarkMode ? 'bg-black/95' : 'bg-white/95'} backdrop-blur-sm p-4 md:p-6`}>
+                <div className="mx-auto flex h-full max-w-7xl flex-col">
+                  <div className="flex items-center justify-between border-b border-white/20 pb-3">
+                    <div>
+                      <h2 className="text-2xl font-semibold">Live World Map</h2>
+                      <p className={`text-sm mt-1 ${isDarkMode ? 'text-white/60' : 'text-black/60'}`}>
+                        Superpower and India-neighbour high-priority alerts. Hover countries for country and capital. Click dots for source links.
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => setIsWorldMapFullscreen(false)}
+                      className={`border px-3 py-2 text-xs uppercase tracking-[0.2em] ${isDarkMode ? 'border-white/40 hover:bg-white/10' : 'border-black/30 hover:bg-black/10'}`}
+                    >
+                      Close
+                    </button>
+                  </div>
+
+                  <div className="mt-4 flex items-center gap-3 text-[11px] uppercase tracking-[0.2em]">
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="h-2.5 w-2.5 rounded-full bg-red-500" /> High alert
+                    </span>
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="h-2.5 w-2.5 rounded-full bg-yellow-400" /> Medium alert
+                    </span>
+                    <span className={`${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>
+                      Updated: {worldAlertsUpdatedAt ? new Date(worldAlertsUpdatedAt).toLocaleTimeString() : 'pending'}
+                    </span>
+                    <span className={`${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>
+                      Zoom: {worldMapZoom.toFixed(1)}x
+                    </span>
+                  </div>
+
+                  <div
+                    className={`mt-4 relative min-h-0 flex-1 overflow-hidden rounded border ${isDarkMode ? 'border-white/20 bg-black/50' : 'border-black/20 bg-white/40'}`}
+                    onWheel={(event) => {
+                      event.preventDefault();
+                      const step = event.deltaY < 0 ? 0.14 : -0.14;
+                      setClampedWorldMapZoom(worldMapZoom + step);
+                    }}
+                    onMouseDown={(event) => {
+                      if (event.button !== 0) return;
+                      event.preventDefault();
+                      worldMapDragRef.current = {
+                        startX: event.clientX,
+                        startY: event.clientY,
+                        panX: worldMapPan.x,
+                        panY: worldMapPan.y,
+                      };
+                      setIsWorldMapDragging(true);
+                    }}
+                    onMouseMove={(event) => {
+                      if (!isWorldMapDragging || !worldMapDragRef.current) return;
+                      const container = event.currentTarget.getBoundingClientRect();
+                      const dxPx = event.clientX - worldMapDragRef.current.startX;
+                      const dyPx = event.clientY - worldMapDragRef.current.startY;
+                      const scaleFactor = 1200 / Math.max(container.width, 1);
+                      const nextPanX = worldMapDragRef.current.panX + dxPx * scaleFactor;
+                      const nextPanY = worldMapDragRef.current.panY + dyPx * scaleFactor;
+                      setWorldMapPan(clampPan(nextPanX, nextPanY, worldMapZoom));
+                    }}
+                    onMouseUp={() => {
+                      setIsWorldMapDragging(false);
+                      worldMapDragRef.current = null;
+                    }}
+                    onMouseLeave={() => {
+                      setIsWorldMapDragging(false);
+                      worldMapDragRef.current = null;
+                    }}
+                    style={{ cursor: isWorldMapDragging ? 'grabbing' : 'grab' }}
+                  >
+                    <div className="absolute right-3 top-3 z-20 flex gap-1">
+                      <button
+                        onClick={() => setClampedWorldMapZoom(worldMapZoom + 0.2)}
+                        className={`h-8 w-8 rounded border text-sm ${isDarkMode ? 'border-white/30 bg-black/70' : 'border-black/30 bg-white/80'}`}
+                        title="Zoom in"
+                      >
+                        +
+                      </button>
+                      <button
+                        onClick={() => setClampedWorldMapZoom(worldMapZoom - 0.2)}
+                        className={`h-8 w-8 rounded border text-sm ${isDarkMode ? 'border-white/30 bg-black/70' : 'border-black/30 bg-white/80'}`}
+                        title="Zoom out"
+                      >
+                        -
+                      </button>
+                      <button
+                        onClick={() => {
+                          setClampedWorldMapZoom(1);
+                          setWorldMapPan({ x: 0, y: 0 });
+                        }}
+                        className={`rounded border px-2 text-[10px] uppercase tracking-[0.2em] ${isDarkMode ? 'border-white/30 bg-black/70' : 'border-black/30 bg-white/80'}`}
+                        title="Reset zoom"
+                      >
+                        Reset
+                      </button>
+                    </div>
+
+                    <WorldGeoMap
+                      markers={effectiveWorldMapMarkers}
+                      interactive
+                      showMarkers
+                      fitMode="meet"
+                      zoom={worldMapZoom}
+                      panX={worldMapPan.x}
+                      panY={worldMapPan.y}
+                      className="absolute inset-0 h-full w-full opacity-95"
+                    />
+
+                    {worldAlertsLoading && (
+                      <div className="absolute inset-0 flex items-center justify-center text-sm">
+                        Updating world alerts...
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="border border-white/20 rounded p-4 min-h-[360px] drishya-scroll-panel">
+              {panelView === 'worldMap' ? (
+                <>
+                  <div className="flex items-center justify-between border-b border-white/20 pb-3">
+                    <div>
+                      <h2 className="text-xl font-semibold">Live World Map</h2>
+                      <p className={`text-sm mt-1 ${isDarkMode ? 'text-white/60' : 'text-black/60'}`}>
+                        Live alerts from trusted global reporting. Red = high alert, yellow = medium alert.
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => setRefreshTrigger((prev) => prev + 1)}
+                      className={`border px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] ${isDarkMode ? 'border-white/30 hover:bg-white/10' : 'border-black/30 hover:bg-black/10'}`}
+                    >
+                      Refresh map
+                    </button>
+                  </div>
+
+                  <div className="mt-4 flex items-center gap-3 text-[11px] uppercase tracking-[0.2em]">
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="h-2.5 w-2.5 rounded-full bg-red-500" /> High alert
+                    </span>
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="h-2.5 w-2.5 rounded-full bg-yellow-400" /> Medium alert
+                    </span>
+                    <span className={`${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>
+                      Updated: {worldAlertsUpdatedAt ? new Date(worldAlertsUpdatedAt).toLocaleTimeString() : 'pending'}
+                    </span>
+                    <span className={`${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>
+                      Zoom: {worldMapZoom.toFixed(1)}x
+                    </span>
+                  </div>
+
+                  <div
+                    className={`mt-4 relative h-[380px] overflow-hidden rounded border ${isDarkMode ? 'border-white/20 bg-black/50' : 'border-black/20 bg-white/40'}`}
+                    onWheel={(event) => {
+                      event.preventDefault();
+                      const step = event.deltaY < 0 ? 0.14 : -0.14;
+                      setClampedWorldMapZoom(worldMapZoom + step);
+                    }}
+                    onMouseDown={(event) => {
+                      if (event.button !== 0) return;
+                      event.preventDefault();
+                      worldMapDragRef.current = {
+                        startX: event.clientX,
+                        startY: event.clientY,
+                        panX: worldMapPan.x,
+                        panY: worldMapPan.y,
+                      };
+                      setIsWorldMapDragging(true);
+                    }}
+                    onMouseMove={(event) => {
+                      if (!isWorldMapDragging || !worldMapDragRef.current) return;
+                      const container = event.currentTarget.getBoundingClientRect();
+                      const dxPx = event.clientX - worldMapDragRef.current.startX;
+                      const dyPx = event.clientY - worldMapDragRef.current.startY;
+                      const scaleFactor = 1200 / Math.max(container.width, 1);
+                      const nextPanX = worldMapDragRef.current.panX + dxPx * scaleFactor;
+                      const nextPanY = worldMapDragRef.current.panY + dyPx * scaleFactor;
+                      setWorldMapPan(clampPan(nextPanX, nextPanY, worldMapZoom));
+                    }}
+                    onMouseUp={() => {
+                      setIsWorldMapDragging(false);
+                      worldMapDragRef.current = null;
+                    }}
+                    onMouseLeave={() => {
+                      setIsWorldMapDragging(false);
+                      worldMapDragRef.current = null;
+                    }}
+                    style={{ cursor: isWorldMapDragging ? 'grabbing' : 'grab' }}
+                  >
+                    <div className="absolute right-2 top-2 z-20 flex gap-1">
+                      <button
+                        onClick={() => setClampedWorldMapZoom(worldMapZoom + 0.2)}
+                        className={`h-7 w-7 rounded border text-sm ${isDarkMode ? 'border-white/30 bg-black/70' : 'border-black/30 bg-white/80'}`}
+                        title="Zoom in"
+                      >
+                        +
+                      </button>
+                      <button
+                        onClick={() => setClampedWorldMapZoom(worldMapZoom - 0.2)}
+                        className={`h-7 w-7 rounded border text-sm ${isDarkMode ? 'border-white/30 bg-black/70' : 'border-black/30 bg-white/80'}`}
+                        title="Zoom out"
+                      >
+                        -
+                      </button>
+                      <button
+                        onClick={() => {
+                          setClampedWorldMapZoom(1);
+                          setWorldMapPan({ x: 0, y: 0 });
+                        }}
+                        className={`rounded border px-2 text-[10px] uppercase tracking-[0.2em] ${isDarkMode ? 'border-white/30 bg-black/70' : 'border-black/30 bg-white/80'}`}
+                        title="Reset zoom"
+                      >
+                        Reset
+                      </button>
+                    </div>
+
+                    <WorldGeoMap
+                      markers={effectiveWorldMapMarkers}
+                      interactive
+                      showMarkers
+                      zoom={worldMapZoom}
+                      panX={worldMapPan.x}
+                      panY={worldMapPan.y}
+                      className="absolute inset-0 h-full w-full opacity-95"
+                    />
+                    {worldAlertsLoading && (
+                      <div className="absolute inset-0 flex items-center justify-center text-sm">
+                        Updating world alerts...
+                      </div>
+                    )}
+                  </div>
+
+                  <div className={`mt-4 rounded border p-3 ${isDarkMode ? 'border-white/20 bg-white/5' : 'border-black/20 bg-black/5'}`}>
+                    <p className={`text-xs uppercase tracking-[0.2em] ${isDarkMode ? 'text-white/60' : 'text-black/60'}`}>
+                      Latest world alerts
+                    </p>
+                    <div className="mt-2 max-h-[180px] space-y-2 overflow-y-auto">
+                      {effectiveWorldMapMarkers.slice(0, 12).map((alert) => (
+                        <a
+                          key={`${alert.id}-list`}
+                          href={alert.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className={`block rounded border px-3 py-2 text-sm ${isDarkMode ? 'border-white/20 hover:bg-white/10' : 'border-black/20 hover:bg-black/10'}`}
+                        >
+                          <div className="font-medium">{alert.headline}</div>
+                          <div className={`mt-1 text-xs uppercase tracking-[0.2em] ${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>
+                            {alert.location} • {alert.source} • {alert.severity === 'high' ? 'HIGH' : 'MEDIUM'}
+                          </div>
+                        </a>
+                      ))}
+                      {effectiveWorldMapMarkers.length === 0 && (
+                        <p className={`text-xs ${isDarkMode ? 'text-white/60' : 'text-black/60'}`}>
+                          No live world alerts found right now. Try refresh map.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </>
+              ) : !isCountrySelected ? (
+                <div className="h-full flex items-center justify-center text-center text-white/70">
+                  <p className={isDarkMode ? 'text-white/70' : 'text-black/70'}>Select a country to view its latest news categories.</p>
+                </div>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between border-b border-white/20 pb-3">
+                    <div>
+                      <h2 className="text-xl font-semibold">{selectedCountry.name}</h2>
+                      <p className={`text-sm mt-1 ${isDarkMode ? 'text-white/60' : 'text-black/60'}`}>{selectedCountry.capital}</p>
+                    </div>
+                    <span className={`text-xs uppercase tracking-[0.3em] ${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>News</span>
+                  </div>
+
+                  <div className="mt-4">
+                    <label className={`block text-xs uppercase tracking-[0.3em] mb-2 ${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>News type</label>
+                    <select
+                      value={selectedCategory}
+                      onChange={(event) => setSelectedCategory(event.target.value as Category)}
+                      className={`w-full border px-3 py-2 focus:outline-none ${isDarkMode ? 'border-white/20 bg-black text-white' : 'border-black/20 bg-white text-black'}`}
+                    >
+                      {categoriesForView.map((option) => (
+                        <option key={option} value={option} className="bg-black text-white">
+                          {option} News
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className={`mt-4 border p-4 ${isDarkMode ? 'border-white/20' : 'border-black/20'}`}>
+                    <p className={`text-xs uppercase tracking-[0.3em] ${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>{selectedCategory}</p>
+                    <h3 className="text-lg font-semibold mt-2">{currentCategoryData.title}</h3>
+                    <p className={`text-sm mt-2 leading-relaxed ${isDarkMode ? 'text-white/70' : 'text-black/70'}`}>{currentCategoryData.summary}</p>
+                    <div className={`mt-4 flex items-center justify-between text-xs uppercase tracking-[0.3em] ${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>
+                      <span>Impact: {currentCategoryData.impact}</span>
+                      <span>Signal: {currentCategoryData.signal}</span>
+                    </div>
+                    <div className={`mt-4 border-t pt-3 ${isDarkMode ? 'border-white/10' : 'border-black/10'}`}>
+                      <p className="text-xs uppercase tracking-[0.3em] text-white/50">Source</p>
+                      <a
+                        href={sourceUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className={`mt-2 inline-block text-sm underline underline-offset-4 break-all ${isDarkMode ? 'text-white' : 'text-black'}`}
+                      >
+                        {sourceLabel}
+                      </a>
+                    </div>
+                  </div>
+
+                  <div className={`mt-4 border p-4 ${isDarkMode ? 'border-white/20' : 'border-black/20'}`} style={getSignalImageStyle(latestNewsSignal)}>
+                    <div className="flex items-center justify-between gap-3 mb-3">
+                      <div>
+                        <p className={`text-xs uppercase tracking-[0.3em] ${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>Latest live report</p>
+                        <h4 className="text-base font-semibold mt-1">{latestNewsSignal?.headline || 'Refreshing from live sources...'}</h4>
+                        <p className={`mt-1 text-xs ${isDarkMode ? 'text-white/60' : 'text-black/60'}`}>{refreshStatusLabel} • auto-check every 2 min</p>
+                      </div>
+                      <div className={`flex rounded border overflow-hidden ${isDarkMode ? 'border-white/20' : 'border-black/20'}`}>
+                        <button
+                          onClick={() => setNewsView('latest')}
+                          className={`px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] ${newsView === 'latest' ? (isDarkMode ? 'bg-white text-black' : 'bg-black text-white') : (isDarkMode ? 'text-white/70' : 'text-black/70')}`}
+                        >
+                          Latest
+                        </button>
+                        <button
+                          onClick={() => setNewsView('past')}
+                          className={`px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] ${newsView === 'past' ? (isDarkMode ? 'bg-white text-black' : 'bg-black text-white') : (isDarkMode ? 'text-white/70' : 'text-black/70')}`}
+                        >
+                          High impact archives
+                        </button>
+                      </div>
+                    </div>
+
+                    {newsView === 'latest' ? (
+                      <div className="space-y-3">
+                        {!latestNewsAvailable ? (
+                          <p className={`text-sm leading-relaxed ${isDarkMode ? 'text-white/70' : 'text-black/70'}`}>you are upto date with latest news</p>
+                        ) : (
+                          <p className={`text-sm leading-relaxed ${isDarkMode ? 'text-white/70' : 'text-black/70'}`}>{latestNewsDetail}</p>
+                        )}
+                        {latestNewsSignal && (
+                          <div className="flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.2em]">
+                            <span className={`rounded border px-2 py-1 ${isDarkMode ? 'border-white/20 bg-black/35 text-white/80' : 'border-black/20 bg-white/60 text-black/80'}`}>
+                              {latestNewsSignal.verification_status || 'Single-source'}
+                            </span>
+                            <span className={`rounded border px-2 py-1 ${isDarkMode ? 'border-white/20 bg-black/35 text-white/80' : 'border-black/20 bg-white/60 text-black/80'}`}>
+                              Confidence {latestNewsSignal.confidence_score ?? 0}/100
+                            </span>
+                            {latestNewsSignal.related_count && latestNewsSignal.related_count > 1 && (
+                              <span className={`rounded border px-2 py-1 ${isDarkMode ? 'border-white/20 bg-black/35 text-white/80' : 'border-black/20 bg-white/60 text-black/80'}`}>
+                                Timeline {latestNewsSignal.related_count} updates
+                              </span>
+                            )}
+                          </div>
+                        )}
+                        <div className={`flex flex-wrap items-center gap-2 text-xs uppercase tracking-[0.2em] ${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>
+                          <span>Primary source: {latestNewsSignal?.source || 'Live ingestion mesh'}</span>
+                          {latestNewsSignal && latestNewsSignal.url && (
+                            <a
+                              href={getSignalSourceUrl(latestNewsSignal)}
+                              target="_blank"
+                              rel="noreferrer"
+                              className={`underline underline-offset-4 ${isDarkMode ? 'text-white' : 'text-black'}`}
+                            >
+                              Open source link
+                            </a>
+                          )}
+                          {latestNewsSignal?.youtube_url && (
+                            <a
+                              href={latestNewsSignal.youtube_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className={`underline underline-offset-4 ${isDarkMode ? 'text-white' : 'text-black'}`}
+                            >
+                              Watch coverage
+                            </a>
+                          )}
+                          <span>{getSignalSourceKind(latestNewsSignal)}</span>
+                        </div>
+                        {latestNewsSignal?.source_links && latestNewsSignal.source_links.length > 0 && (
+                          <div className={`rounded border p-3 ${isDarkMode ? 'border-white/20 bg-white/5' : 'border-black/20 bg-black/5'}`}>
+                            <p className={`text-[10px] uppercase tracking-[0.3em] ${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>Sources used for this summary</p>
+                            <div className="mt-2 flex flex-wrap gap-2">
+                              {latestNewsSignal.source_links.map((source) => (
+                                <a
+                                  key={`${source.name}-${source.url}`}
+                                  href={source.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className={`rounded px-2 py-1 text-xs underline underline-offset-2 ${isDarkMode ? 'bg-white/10 text-white' : 'bg-black/10 text-black'}`}
+                                >
+                                  {source.name}
+                                </a>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="space-y-2">
+                        {pastNewsSignals.length === 0 ? (
+                          <p className={`text-sm ${isDarkMode ? 'text-white/70' : 'text-black/70'}`}>No high-impact past news from the last seven days is available yet for this country and category.</p>
+                        ) : (
+                          pastNewsSignals.map((signal) => (
+                            <a
+                              key={signal.id || signal.timestamp}
+                              href={getSignalSourceUrl(signal)}
+                              target="_blank"
+                              rel="noreferrer"
+                              className={`block rounded border px-3 py-2 text-sm ${isDarkMode ? 'border-white/20 bg-white/5 hover:bg-white/10' : 'border-black/20 bg-black/5 hover:bg-black/10'}`}
+                            >
+                              <div className="font-medium">{signal.headline}</div>
+                              <div className={`mt-1 text-xs uppercase tracking-[0.2em] ${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>{signal.source}</div>
+                            </a>
+                          ))
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const currentUser = authUser ?? { id: '', name: '', role: '', clearance: '' };
 
   // Highlight key entities inside headlines and create tooltips triggers using dynamic NER parser
   const renderHeadlineWithEntityTooltips = (text: string) => {
@@ -674,7 +2040,11 @@ function App() {
   // Login MFA Screen
   if (!authUser) {
     return (
-      <div className="min-h-screen flex flex-col font-mono relative overflow-hidden tactical-gradient">
+      <div
+        className="theme-rgb-all min-h-screen flex flex-col font-mono relative z-10 overflow-hidden tactical-gradient"
+        style={{ ['--theme-rgb' as string]: `${uiTheme.r}, ${uiTheme.g}, ${uiTheme.b}` }}
+      >
+        {renderWorldMapBackdrop(0.18)}
         {/* Subtle dot backdrop */}
         <div className="fixed inset-0 pointer-events-none opacity-20">
           <div className="absolute top-0 left-0 w-full h-full" style={{ backgroundImage: 'radial-gradient(#1e293b 1px, transparent 1px)', backgroundSize: '32px 32px' }} />
@@ -684,7 +2054,7 @@ function App() {
         <header className="w-full flex justify-between items-center px-6 py-4 z-10">
           <div className="flex items-center gap-2">
             <span className="material-symbols-outlined text-[#7bd0ff]" style={{ fontVariationSettings: "'FILL' 1" }}>security</span>
-            <h1 className="text-xl font-bold tracking-wider text-[#7bd0ff]">GEOSPATIAL HUB</h1>
+            <h1 className="text-xl font-bold tracking-wider text-[#7bd0ff]">DRISHYA</h1>
           </div>
           <div>
             <span className="text-xs text-[#ffb4ab] border border-[#ffb4ab]/30 px-2 py-0.5 bg-[#93000a]/10">SECURE SHELL GATE</span>
@@ -709,12 +2079,12 @@ function App() {
                     <div>
                       <label className="block text-xs uppercase tracking-wider text-[#c6c6cd] mb-1">Email</label>
                       <input
-                        type="email"
+                        type="text"
                         required
                         className="w-full bg-[#051424] border border-[#45464d] px-3 py-2 text-sm text-[#d4e4fa] focus:border-[#7bd0ff] focus:ring-0 focus:outline-none rounded"
                         value={loginForm.email}
                         onChange={(e) => setLoginForm((prev) => ({ ...prev, email: e.target.value }))}
-                        placeholder="analyst@intel.local"
+                        placeholder="Enter your ID"
                       />
                     </div>
                     <div>
@@ -739,11 +2109,6 @@ function App() {
                     Initiate Authentication
                   </button>
 
-                  <div className="border-t border-[#45464d] pt-4 text-[10px] text-[#c6c6cd]/60 space-y-1">
-                    <p>Demo profiles:</p>
-                    <p>• analyst@intel.local / Intel@2026 (Analyst)</p>
-                    <p>• operator@intel.local / Ops@2026 (Operator)</p>
-                  </div>
                 </form>
               ) : (
                 /* Stage 2: WebAuthn verification simulation */
@@ -814,7 +2179,11 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#051424] text-[#d4e4fa] flex flex-col font-sans overflow-hidden select-none relative">
+    <div
+      className="theme-rgb-all min-h-screen bg-[#051424] text-[#d4e4fa] flex flex-col font-sans overflow-hidden select-none relative z-10"
+      style={{ ['--theme-rgb' as string]: `${uiTheme.r}, ${uiTheme.g}, ${uiTheme.b}` }}
+    >
+      {renderWorldMapBackdrop(0.16)}
       {/* Global Backdrop Tooltip Element */}
       {hoveredEntity && (
         <div
@@ -839,7 +2208,7 @@ function App() {
         <div className="flex items-center gap-6">
           <div className="flex items-center gap-2">
             <span className="material-symbols-outlined text-[#7bd0ff] text-2xl" style={{ fontVariationSettings: "'FILL' 1" }}>security</span>
-            <span className="font-mono text-base font-bold tracking-widest text-[#7bd0ff]">GEOSPATIAL HUB</span>
+            <span className="font-mono text-base font-bold tracking-widest text-[#7bd0ff]">DRISHYA</span>
           </div>
           <div className="h-4 w-px bg-[#45464d]/60" />
           <div className="px-3 py-1.5 text-xs font-mono text-[#7bd0ff] font-bold border border-[#7bd0ff]/30 bg-[#1c2b3c] rounded">
@@ -869,8 +2238,8 @@ function App() {
 
           <div className="flex items-center gap-2 border-l border-[#45464d]/60 pl-4">
             <div className="text-right font-mono">
-              <p className="text-[10px] text-[#7bd0ff] font-bold">{authUser.name}</p>
-              <p className="text-[9px] text-[#c6c6cd] opacity-60">{authUser.role}</p>
+              <p className="text-[10px] text-[#7bd0ff] font-bold">{currentUser.name}</p>
+              <p className="text-[9px] text-[#c6c6cd] opacity-60">{currentUser.role}</p>
             </div>
             <button
               onClick={handleLogout}
@@ -896,7 +2265,7 @@ function App() {
               <p className="text-[10px] font-bold text-[#c6c6cd] uppercase tracking-wider">STRATCOM-ALPHA</p>
               <p className="text-[9px] text-[#4edea3] flex items-center gap-1 mt-1">
                 <span className="w-1.5 h-1.5 bg-[#4edea3] rounded-full pulse-soft" />
-                {authUser.clearance}
+                {currentUser.clearance}
               </p>
               <button
                 onClick={() => setRefreshTrigger((r) => r + 1)}
@@ -914,22 +2283,41 @@ function App() {
                   const intel = newsFeed[c.name];
                   const hasSignals = (intel?.signals?.length || 0) > 0;
                   const isSelected = selectedCountry.id === c.id;
+                  const countrySignal = getLatestCountrySignal(c.name);
+                  const countrySignalUrl = countrySignal?.url || buildSourceSearchUrl(countrySignal?.headline || `${c.name} latest news`, c.name, countrySignal?.source);
 
                   return (
-                    <button
+                    <div
                       key={c.id}
-                      onClick={() => setSelectedCountry(c)}
                       className={`w-full text-left px-3 py-2 text-xs transition-colors border rounded flex justify-between items-center ${
                         isSelected
                           ? 'bg-[#1c2b3c] text-[#7bd0ff] border-[#7bd0ff]/50 font-bold'
                           : 'text-[#c6c6cd] hover:text-[#d4e4fa] hover:bg-[#122131]/30 border-transparent'
                       }`}
                     >
-                      <span className="truncate">{c.name}</span>
-                      {hasSignals && (
-                        <span className="w-1.5 h-1.5 bg-[#4edea3] rounded-full pulse-soft shrink-0 ml-1" />
-                      )}
-                    </button>
+                      <button onClick={() => setSelectedCountry(c)} className="flex-1 text-left truncate pr-2">
+                        {c.name}
+                      </button>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {hasSignals && (
+                          <span className="w-1.5 h-1.5 bg-[#4edea3] rounded-full pulse-soft shrink-0" />
+                        )}
+                        {hasSignals ? (
+                          <a
+                            href={countrySignalUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="underline underline-offset-2 text-[#7bd0ff]"
+                            onClick={(event) => event.stopPropagation()}
+                            title={`Open latest article for ${c.name}`}
+                          >
+                            Open
+                          </a>
+                        ) : (
+                          <span className="text-[#7bd0ff]/60">No link</span>
+                        )}
+                      </div>
+                    </div>
                   );
                 })}
               </div>
@@ -1061,6 +2449,13 @@ function App() {
                 </div>
 
                 <div className="flex items-center gap-2">
+                  <button
+                    onClick={scrollToLatest}
+                    className="px-2.5 py-1 text-[10px] font-mono uppercase rounded border border-[#7bd0ff]/30 bg-[#1c2b3c] text-[#7bd0ff] hover:bg-[#7bd0ff]/10 transition-colors"
+                    title="Scroll to latest feed"
+                  >
+                    Scroll Latest
+                  </button>
                   <div className="bg-[#122131] border border-[#45464d] flex rounded p-0.5">
                     {(['1m', '5m', '1h', '24h', '7d'] as TimeWindow[]).map((t) => (
                       <button
@@ -1095,6 +2490,79 @@ function App() {
                 </p>
                 {loading && <p className="text-[10px] text-[#7bd0ff] mt-2 font-mono flex items-center gap-1.5"><span className="w-1.5 h-1.5 bg-[#7bd0ff] rounded-full animate-ping" /> Re-evaluating secure channels...</p>}
                 {error && <p className="text-[10px] text-[#ffb4ab] mt-2 font-mono">{error}</p>}
+              </div>
+
+              <div className="grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
+                <div className="bg-[#122131] border border-[#45464d] p-4 rounded">
+                  <div className="flex items-center justify-between gap-3 mb-3">
+                    <div>
+                      <p className="text-[10px] font-mono uppercase tracking-widest text-[#7bd0ff]">Latest live report</p>
+                      <h3 className="text-sm font-bold text-[#d4e4fa] mt-1">{latestNewsSignal?.headline || 'Refreshing from live sources...'}</h3>
+                    </div>
+                    <div className="flex rounded border border-[#45464d] overflow-hidden">
+                      <button
+                        onClick={() => setNewsView('latest')}
+                        className={`px-2.5 py-1 text-[10px] font-mono uppercase ${newsView === 'latest' ? 'bg-[#1c2b3c] text-[#7bd0ff]' : 'text-[#c6c6cd]'}`}
+                      >
+                        Latest
+                      </button>
+                      <button
+                        onClick={() => setNewsView('past')}
+                        className={`px-2.5 py-1 text-[10px] font-mono uppercase ${newsView === 'past' ? 'bg-[#1c2b3c] text-[#7bd0ff]' : 'text-[#c6c6cd]'}`}
+                      >
+                        High impact archives
+                      </button>
+                    </div>
+                  </div>
+
+                  {newsView === 'latest' ? (
+                    <div className="space-y-3">
+                      <p className="text-xs leading-relaxed text-[#c6c6cd]">{latestNewsDetail}</p>
+                      <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono uppercase">
+                        <span className="text-[#4edea3]">Source: {latestNewsSignal?.source || 'Live ingestion mesh'}</span>
+                        {latestNewsSignal && (
+                          <a
+                            href={getSignalSourceUrl(latestNewsSignal)}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-[#7bd0ff] underline underline-offset-2"
+                          >
+                            Open source link
+                          </a>
+                        )}
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {pastNewsSignals.length === 0 ? (
+                        <p className="text-xs text-[#c6c6cd]">No high-impact past news from the last seven days is available yet for this country and category.</p>
+                      ) : (
+                        pastNewsSignals.map((signal) => (
+                          <a
+                            key={signal.id || signal.timestamp}
+                            href={getSignalSourceUrl(signal)}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="block rounded border border-[#45464d]/50 bg-[#0d1c2d] px-3 py-2 text-xs text-[#d4e4fa] hover:border-[#7bd0ff]/40 hover:bg-[#1c2b3c]"
+                          >
+                            <div className="font-semibold">{signal.headline}</div>
+                            <div className="mt-1 text-[10px] uppercase tracking-wider text-[#7bd0ff]">{signal.source}</div>
+                          </a>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-[#122131] border border-[#45464d] p-4 rounded">
+                  <p className="text-[10px] font-mono uppercase tracking-widest text-[#7bd0ff]">Refresh status</p>
+                  <p className="mt-2 text-xs leading-relaxed text-[#c6c6cd]">
+                    The app now requests a fresh live refresh when it opens and pulls updates from RSS feeds, NewsAPI, and global wire sources for the selected country.
+                  </p>
+                  <div className="mt-4 border-t border-[#45464d]/40 pt-3 text-[10px] font-mono uppercase text-[#4edea3]">
+                    <p>Latest refresh: {lastRefreshAt ? lastRefreshAt.toLocaleString() : 'pending'}</p>
+                  </div>
+                </div>
               </div>
 
               {/* LAYOUT RENDER MODES */}
@@ -1191,6 +2659,7 @@ function App() {
                         className={`bg-[#122131] border border-[#45464d] p-4 hover:border-[#7bd0ff]/30 transition-colors cursor-pointer rounded flex flex-col gap-2 relative news-card-container ${
                           isFocused ? 'keyboard-focus border border-[#7bd0ff]' : ''
                         } ${sig.isNew ? 'stream-slide-in delta-update-glow-green' : ''}`}
+                        style={getSignalImageStyle(sig)}
                       >
                         <div className="flex justify-between items-center text-[10px] font-mono">
                           <span className="text-[#7bd0ff] font-bold uppercase">{sig.category} - {sig.source}</span>
@@ -1208,6 +2677,10 @@ function App() {
                         <div className="flex justify-between items-center text-[9px] font-mono">
                           <span className="bg-[#1c2b3c] text-[#7bd0ff] px-2 py-0.5 rounded border border-[#7bd0ff]/20 font-bold uppercase">{sig.trust}</span>
                           <span className="text-[#ffb4ab] font-bold">IMPACT: {sig.impact} (Score: {Math.round(sig.relevance_score ?? 0)})</span>
+                        </div>
+                        <div className="flex flex-wrap gap-2 text-[9px] font-mono uppercase">
+                          <span className="text-[#4edea3]">{sig.verification_status || 'Single-source'}</span>
+                          <span className="text-[#c6c6cd]">Confidence {sig.confidence_score ?? 0}</span>
                         </div>
                       </div>
                     );
@@ -1227,6 +2700,7 @@ function App() {
                         className={`bg-[#122131] border border-[#45464d] p-4 hover:border-[#7bd0ff]/30 transition-colors cursor-pointer rounded flex flex-col justify-between min-h-[180px] news-card-container ${
                           isFocused ? 'keyboard-focus border border-[#7bd0ff]' : ''
                         } ${sig.isNew ? 'stream-slide-in delta-update-glow-green' : ''}`}
+                        style={getSignalImageStyle(sig)}
                       >
                         <div>
                           <div className="flex justify-between items-center text-[9px] font-mono mb-2 border-b border-[#45464d]/30 pb-1">
@@ -1246,6 +2720,9 @@ function App() {
                         <div className="flex justify-between items-center text-[9px] font-mono mt-3 pt-2 border-t border-[#45464d]/20">
                           <span className="text-[#4edea3] font-bold uppercase">{sig.trust}</span>
                           <span className="text-[#ffb4ab] font-bold">Score: {Math.round(sig.relevance_score ?? 0)}</span>
+                        </div>
+                        <div className="mt-1 text-[9px] font-mono uppercase text-[#c6c6cd]">
+                          {sig.verification_status || 'Single-source'} • Confidence {sig.confidence_score ?? 0}
                         </div>
                       </div>
                     );
@@ -1267,6 +2744,16 @@ function App() {
                   </button>
                 </div>
                 <div className="p-6 space-y-6 flex-grow overflow-y-auto">
+                  {selectedDossierSignal.image_url && (
+                    <div
+                      className="h-44 rounded border border-[#45464d]/50 bg-[#122131]"
+                      style={{
+                        backgroundImage: `linear-gradient(180deg, rgba(5,20,36,0.12), rgba(5,20,36,0.88)), url(${selectedDossierSignal.image_url})`,
+                        backgroundSize: 'cover',
+                        backgroundPosition: 'center'
+                      }}
+                    />
+                  )}
                   <div className="space-y-2">
                     <span className="bg-[#93000a]/20 border border-[#ffb4ab]/30 text-[#ffb4ab] text-[9px] font-bold px-2 py-0.5 rounded">
                       CLASSIFIED TARGET
@@ -1309,7 +2796,47 @@ function App() {
                         <p className="text-[9px] text-[#c6c6cd] uppercase">Relevance Index</p>
                         <p className="text-[#ffb4ab] font-bold mt-0.5">{Math.round(selectedDossierSignal.relevance_score ?? 0)}</p>
                       </div>
+                      <div>
+                        <p className="text-[9px] text-[#c6c6cd] uppercase">Verification</p>
+                        <p className="text-[#4edea3] font-bold mt-0.5">{selectedDossierSignal.verification_status || 'Single-source'}</p>
+                      </div>
+                      <div>
+                        <p className="text-[9px] text-[#c6c6cd] uppercase">Confidence</p>
+                        <p className="text-[#bec6e0] font-bold mt-0.5">{selectedDossierSignal.confidence_score ?? 0}/100</p>
+                      </div>
                     </div>
+                    <div className="flex flex-wrap gap-3 text-[11px] font-mono uppercase">
+                      <a href={getSignalSourceUrl(selectedDossierSignal)} target="_blank" rel="noreferrer" className="text-[#7bd0ff] underline underline-offset-2">
+                        Open source
+                      </a>
+                      {selectedDossierSignal.youtube_url && (
+                        <a href={selectedDossierSignal.youtube_url} target="_blank" rel="noreferrer" className="text-[#ffb4ab] underline underline-offset-2">
+                          Watch coverage
+                        </a>
+                      )}
+                    </div>
+                    {selectedSignalTimeline.length > 1 && (
+                      <div className="border-t border-[#45464d]/40 pt-4">
+                        <h4 className="text-[10px] text-[#7bd0ff] font-bold uppercase mb-2">Story timeline</h4>
+                        <div className="space-y-2">
+                          {selectedSignalTimeline.map((timelineSignal) => (
+                            <a
+                              key={timelineSignal.id || timelineSignal.timestamp}
+                              href={getSignalSourceUrl(timelineSignal)}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="block rounded border border-[#45464d]/40 bg-[#122131]/30 px-3 py-2 hover:border-[#7bd0ff]/40"
+                            >
+                              <div className="flex items-center justify-between gap-3 text-[10px] font-mono uppercase">
+                                <span className="text-[#7bd0ff]">{timelineSignal.source}</span>
+                                <span className="text-[#c6c6cd]">{new Date(timelineSignal.timestamp).toLocaleString()}</span>
+                              </div>
+                              <div className="mt-1 text-xs text-[#d4e4fa] leading-relaxed">{timelineSignal.headline}</div>
+                            </a>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
