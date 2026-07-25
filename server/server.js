@@ -161,6 +161,339 @@ const worldVeryHighImpactPatterns = {
 
 let worldAlertStore = [];
 let lastWorldAlertRefresh = 0;
+const llmEnrichmentCache = new Map();
+let llmBackoffUntil = 0;
+
+const llmIntelCategories = new Set(['Military', 'Terrorism', 'Cyber', 'Diplomacy', 'Economy', 'Maritime', 'Space', 'Border']);
+const llmThreatLevels = new Set(['Low', 'Medium', 'High', 'Critical']);
+
+const regionCoordinateIndex = {
+  China: { lat: 35.8617, lon: 104.1954 },
+  Pakistan: { lat: 30.3753, lon: 69.3451 },
+  Afghanistan: { lat: 33.9391, lon: 67.71 },
+  Bangladesh: { lat: 23.685, lon: 90.3563 },
+  Myanmar: { lat: 21.9162, lon: 95.956 },
+  Nepal: { lat: 28.3949, lon: 84.124 },
+  Bhutan: { lat: 27.5142, lon: 90.4336 },
+  'Sri Lanka': { lat: 7.8731, lon: 80.7718 },
+  Maldives: { lat: 3.2028, lon: 73.2207 },
+};
+
+function safeJsonParse(value) {
+  if (!value || typeof value !== 'string') return null;
+  try {
+    return JSON.parse(value);
+  } catch (err) {
+    const start = value.indexOf('{');
+    const end = value.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(value.slice(start, end + 1));
+      } catch (innerErr) {
+        return null;
+      }
+    }
+    return null;
+  }
+}
+
+function toShortSummary(text) {
+  const clean = (text || '').replace(/\s+/g, ' ').trim();
+  if (!clean) return 'No concise summary available from the source text.';
+  const chunks = clean.split(/(?<=[.!?])\s+/).filter(Boolean);
+  if (chunks.length >= 2) {
+    return chunks.slice(0, 3).join(' ').trim();
+  }
+  const words = clean.split(' ');
+  return words.slice(0, 42).join(' ').trim();
+}
+
+function normalizeThreatLevel(value) {
+  const normalized = (value || '').toString().trim().toLowerCase();
+  if (normalized.includes('critical')) return 'Critical';
+  if (normalized.includes('high')) return 'High';
+  if (normalized.includes('medium')) return 'Medium';
+  if (normalized.includes('low')) return 'Low';
+  return null;
+}
+
+function getThreatEmoji(level) {
+  if (level === 'Critical') return '🔴 Critical';
+  if (level === 'High') return '🟠 High';
+  if (level === 'Medium') return '🟡 Medium';
+  return '🟢 Low';
+}
+
+function impactFromThreat(level) {
+  if (level === 'Critical' || level === 'High') return 'High';
+  if (level === 'Medium') return 'Medium';
+  return 'Low';
+}
+
+function normalizeIntelCategory(value) {
+  const raw = (value || '').toString().trim();
+  if (!raw) return null;
+  const titleCase = raw.charAt(0).toUpperCase() + raw.slice(1).toLowerCase();
+  return llmIntelCategories.has(titleCase) ? titleCase : null;
+}
+
+function mapIntelCategoryToDashboardCategory(intelCategory) {
+  if (intelCategory === 'Military' || intelCategory === 'Border' || intelCategory === 'Terrorism' || intelCategory === 'Maritime') return 'Military';
+  if (intelCategory === 'Cyber' || intelCategory === 'Space') return 'Tech';
+  if (intelCategory === 'Diplomacy') return 'Political';
+  if (intelCategory === 'Economy') return 'Economic';
+  return null;
+}
+
+function dedupeList(values = [], max = 8) {
+  const out = [];
+  const seen = new Set();
+  for (const value of values) {
+    const cleaned = (value || '').toString().trim();
+    if (!cleaned) continue;
+    const key = cleaned.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(cleaned);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+function extractEntitiesHeuristic(article) {
+  const text = `${article.title || ''} ${article.description || ''}`;
+  const lower = text.toLowerCase();
+
+  const countries = Object.keys(countryKeywords).filter((country) => {
+    const aliases = countryKeywords[country] || [];
+    return aliases.some((alias) => lower.includes(alias));
+  });
+
+  const organizations = dedupeList((text.match(/\b(UN|NATO|EU|ASEAN|PLA|ISI|CIA|MSS|MoD|Ministry of Defence|Pentagon|Taliban)\b/gi) || []));
+  const militaryUnits = dedupeList((text.match(/\b(brigade|division|battalion|regiment|navy|air force|coast guard|special forces|militia)\b/gi) || []));
+  const weapons = dedupeList((text.match(/\b(missile|drone|uav|artillery|fighter jet|warship|frigate|submarine|radar|rocket)\b/gi) || []));
+  const people = dedupeList((text.match(/\b([A-Z][a-z]+\s[A-Z][a-z]+)\b/g) || []).slice(0, 8));
+
+  return {
+    countries: dedupeList(countries, 6),
+    organizations,
+    militaryUnits,
+    weapons,
+    people,
+  };
+}
+
+function inferArticleLocation(article, countryHint = '') {
+  const text = `${article.title || ''} ${article.description || ''}`;
+  const worldMatch = inferWorldLocationFromText(text);
+  if (worldMatch) {
+    return {
+      name: worldMatch.location,
+      lat: worldMatch.lat,
+      lon: worldMatch.lon,
+    };
+  }
+
+  if (countryHint && regionCoordinateIndex[countryHint]) {
+    return {
+      name: countryHint,
+      lat: regionCoordinateIndex[countryHint].lat,
+      lon: regionCoordinateIndex[countryHint].lon,
+    };
+  }
+
+  const inferredCountry = inferCountryFromText(text);
+  if (inferredCountry && regionCoordinateIndex[inferredCountry]) {
+    return {
+      name: inferredCountry,
+      lat: regionCoordinateIndex[inferredCountry].lat,
+      lon: regionCoordinateIndex[inferredCountry].lon,
+    };
+  }
+
+  return null;
+}
+
+function fallbackIntelEnrichment(article, countryHint = '') {
+  const summary = toShortSummary(`${cleanHeadline(article.title || '')}. ${article.description || ''}`);
+  const impact = determineImpact(article);
+  const threatLevel = impact === 'High' ? 'High' : impact === 'Medium' ? 'Medium' : 'Low';
+  const dashboardCategory = determineCategory(article);
+  const mappedIntelCategory = dashboardCategory === 'Tech'
+    ? 'Cyber'
+    : dashboardCategory === 'Political'
+      ? 'Diplomacy'
+      : dashboardCategory === 'Economic'
+        ? 'Economy'
+        : /border|lac|loc|frontier/i.test(`${article.title || ''} ${article.description || ''}`)
+          ? 'Border'
+          : 'Military';
+
+  return {
+    summary,
+    threatLevel,
+    threatLabel: getThreatEmoji(threatLevel),
+    intelCategory: mappedIntelCategory,
+    dashboardCategory,
+    impact: impactFromThreat(threatLevel),
+    entities: extractEntitiesHeuristic(article),
+    location: inferArticleLocation(article, countryHint),
+    llmProvider: 'heuristic',
+    llmModel: 'rule-based-fallback'
+  };
+}
+
+async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 10000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    return response;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function runLlmIntelEnrichment(article, countryHint = '') {
+  if (Date.now() < llmBackoffUntil) {
+    return null;
+  }
+
+  const provider = (process.env.LLM_PROVIDER || (process.env.HF_API_KEY ? 'huggingface' : 'ollama')).toLowerCase();
+  const text = `${article.title || ''}\n${article.description || ''}`.slice(0, 2000);
+  if (!text.trim()) return null;
+
+  const schemaHint = '{"summary":"2-3 lines","threat_level":"Low|Medium|High|Critical","category":"Military|Terrorism|Cyber|Diplomacy|Economy|Maritime|Space|Border","entities":{"countries":[],"organizations":[],"military_units":[],"weapons":[],"people":[]},"location":{"name":"", "lat":0, "lon":0}}';
+  const prompt = [
+    'You are a geopolitical intelligence extractor.',
+    'Return only valid JSON with no markdown.',
+    'Use this exact schema:',
+    schemaHint,
+    'Rules:',
+    '- summary must be 2-3 short lines in plain English',
+    '- choose exactly one threat_level from Low, Medium, High, Critical',
+    '- choose exactly one category from Military, Terrorism, Cyber, Diplomacy, Economy, Maritime, Space, Border',
+    '- entities must be arrays of strings',
+    '- if no precise location is found, set location to null',
+    `country_hint: ${countryHint || 'unknown'}`,
+    'article:',
+    text
+  ].join('\n');
+
+  let rawOutput = '';
+  let modelUsed = '';
+
+  try {
+    if (provider === 'ollama') {
+      const model = process.env.LLM_MODEL || 'llama3.1:8b-instruct';
+      const baseUrl = process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434';
+      const response = await fetchJsonWithTimeout(`${baseUrl}/api/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          prompt,
+          stream: false,
+          format: 'json',
+          options: { temperature: 0.2 }
+        })
+      }, 12000);
+
+      if (!response.ok) throw new Error(`Ollama status ${response.status}`);
+      const data = await response.json();
+      rawOutput = data.response || '';
+      modelUsed = model;
+    } else {
+      const token = process.env.HF_API_KEY || process.env.HUGGINGFACE_API_KEY;
+      if (!token) return null;
+      const model = process.env.HF_MODEL || process.env.LLM_MODEL || 'google/flan-t5-large';
+      const response = await fetchJsonWithTimeout(`https://api-inference.huggingface.co/models/${encodeURIComponent(model)}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          inputs: prompt,
+          parameters: {
+            max_new_tokens: 350,
+            temperature: 0.2,
+            return_full_text: false
+          }
+        })
+      }, 15000);
+
+      if (!response.ok) throw new Error(`HF status ${response.status}`);
+      const data = await response.json();
+      rawOutput = Array.isArray(data) ? (data[0]?.generated_text || '') : (data?.generated_text || '');
+      modelUsed = model;
+    }
+  } catch (err) {
+    llmBackoffUntil = Date.now() + 5 * 60 * 1000;
+    return null;
+  }
+
+  const parsed = safeJsonParse(rawOutput);
+  if (!parsed || typeof parsed !== 'object') {
+    return null;
+  }
+
+  const summary = toShortSummary(parsed.summary || parsed.brief || '');
+  const threatLevel = normalizeThreatLevel(parsed.threat_level || parsed.threatLevel || parsed.threat) || 'Medium';
+  const intelCategory = normalizeIntelCategory(parsed.category || parsed.domain || parsed.type) || 'Military';
+  const dashboardCategory = mapIntelCategoryToDashboardCategory(intelCategory) || determineCategory(article);
+
+  const entities = parsed.entities || {};
+  const normalizedEntities = {
+    countries: dedupeList(entities.countries || entities.Countries || []),
+    organizations: dedupeList(entities.organizations || entities.orgs || []),
+    militaryUnits: dedupeList(entities.military_units || entities.militaryUnits || []),
+    weapons: dedupeList(entities.weapons || []),
+    people: dedupeList(entities.people || [])
+  };
+
+  let location = null;
+  if (parsed.location && typeof parsed.location === 'object') {
+    const maybeLat = Number(parsed.location.lat);
+    const maybeLon = Number(parsed.location.lon);
+    if (Number.isFinite(maybeLat) && Number.isFinite(maybeLon)) {
+      location = {
+        name: parsed.location.name || countryHint || 'Detected location',
+        lat: maybeLat,
+        lon: maybeLon
+      };
+    }
+  }
+
+  if (!location) {
+    location = inferArticleLocation(article, countryHint);
+  }
+
+  return {
+    summary,
+    threatLevel,
+    threatLabel: getThreatEmoji(threatLevel),
+    intelCategory,
+    dashboardCategory,
+    impact: impactFromThreat(threatLevel),
+    entities: normalizedEntities,
+    location,
+    llmProvider: provider,
+    llmModel: modelUsed || 'unknown-model'
+  };
+}
+
+async function enrichArticleIntelligence(article, countryHint = '') {
+  const cacheKey = (article.url || cleanHeadline(article.title || '')).toLowerCase();
+  if (llmEnrichmentCache.has(cacheKey)) {
+    return llmEnrichmentCache.get(cacheKey);
+  }
+
+  const llmResult = await runLlmIntelEnrichment(article, countryHint);
+  const enriched = llmResult || fallbackIntelEnrichment(article, countryHint);
+  llmEnrichmentCache.set(cacheKey, enriched);
+  return enriched;
+}
 
 function inferWorldLocationFromText(text) {
   const normalized = (text || '').toLowerCase();
@@ -275,8 +608,17 @@ async function runWorldAlertRefresh(force = false) {
     }
   }
 
+  let addedFromGdelt = 0;
+  try {
+    const gdeltQuery = '(war OR conflict OR strike OR missile OR military OR attack OR sanctions OR election OR coup OR summit) AND (india OR china OR pakistan OR afghanistan OR bangladesh OR myanmar OR nepal OR bhutan OR "sri lanka" OR maldives)';
+    const gdeltItems = await fetchGDELT(gdeltQuery, { maxRecords: 30, timespan: '24h' });
+    addedFromGdelt = mergeWorldAlerts(gdeltItems);
+  } catch (err) {
+    console.warn('[World Alerts] GDELT fetch failed:', err.message);
+  }
+
   lastWorldAlertRefresh = now;
-  return { added: addedFromRss + addedFromApi + addedFromGNews, alerts: worldAlertStore };
+  return { added: addedFromRss + addedFromApi + addedFromGNews + addedFromGdelt, alerts: worldAlertStore };
 }
 
 function inferCountryFromText(text) {
@@ -468,6 +810,10 @@ function translateToEnglish(text, lang) {
 // Strict Category Screening
 function determineCategory(item) {
   const text = `${item.title || ''} ${item.description || ''}`.toLowerCase();
+  const hasStrongTechSignal = /(cyber|malware|zero-day|satellite|space|uav|drone|radar|sensor|electronic warfare|ewar|air defense system|missile system|hypersonic|guidance system|surveillance system|autonomous|ai model|defense tech|defence tech|military tech)/.test(text);
+  if (hasStrongTechSignal) {
+    return 'Tech';
+  }
   if (text.includes('military') || text.includes('strike') || text.includes('defence') || text.includes('conflict') || text.includes('forces') || text.includes('border') || text.includes('army') || text.includes('clash') || text.includes('airstrikes') || text.includes('troop') || text.includes('pla') || text.includes('naval') || text.includes('fleet') || text.includes('loc') || text.includes('lac') || text.includes('skirmish')) {
     return 'Military';
   }
@@ -584,8 +930,8 @@ async function addArticlesToStore(newArticles) {
     if (!isTrustedSource(art)) continue;
     if (!isGeopoliticalSignal(art)) continue;
 
-    const category = art.category || determineCategory(art);
-    const impact = art.impact || determineImpact(art);
+    const baselineCategory = art.category || determineCategory(art);
+    const baselineImpact = art.impact || determineImpact(art);
 
     const normTitle = art.title.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 35);
     
@@ -596,6 +942,9 @@ async function addArticlesToStore(newArticles) {
     });
 
     if (!exists) {
+      const intel = await enrichArticleIntelligence(art, art.country);
+      const category = intel.dashboardCategory || baselineCategory;
+      const impact = intel.impact || baselineImpact;
       const score = calculateRelevanceScore(art.title, art.description, art.publishedAt || art.timestamp, impact);
       const hours = art.publishedAt ? (Date.now() - new Date(art.publishedAt).getTime()) / (1000 * 60 * 60) : 0;
       const isBreaking = hours <= 1.0;
@@ -608,7 +957,7 @@ async function addArticlesToStore(newArticles) {
           .filter((item) => item.url)
           .map((item) => [item.source || item.url, { name: item.source || 'Trusted Source', url: item.url }])
       ).values()).slice(0, 6);
-      const summary = buildTrustedSourceSummary(art, relatedArticles);
+      const summary = intel.summary || buildTrustedSourceSummary(art, relatedArticles);
       const storyKey = buildStoryKey(art.title, art.country);
       const relatedCount = articleStore.filter((existing) => existing.story_key === storyKey).length + 1;
       const verificationStatus = getVerificationStatus(sourceLinks);
@@ -638,7 +987,16 @@ async function addArticlesToStore(newArticles) {
         verification_status: verificationStatus,
         confidence_score: confidenceScore,
         story_key: storyKey,
-        related_count: relatedCount
+        related_count: relatedCount,
+        threat_level: intel.threatLevel,
+        threat_label: intel.threatLabel,
+        intel_category: intel.intelCategory,
+        entities: intel.entities,
+        location_name: intel.location?.name || null,
+        lat: intel.location?.lat || null,
+        lon: intel.location?.lon || null,
+        llm_provider: intel.llmProvider,
+        llm_model: intel.llmModel
       };
 
       await articleDb.insert(enriched);
@@ -680,6 +1038,51 @@ async function fetchGNews(query, apiKey) {
     source: article.source?.name || 'GNews',
     publishedAt: article.publishedAt,
     imageUrl: article.image || null
+  }));
+}
+
+function parseGdeltSeenDate(value) {
+  if (!value || typeof value !== 'string' || value.length < 14) return null;
+  const year = value.slice(0, 4);
+  const month = value.slice(4, 6);
+  const day = value.slice(6, 8);
+  const hour = value.slice(8, 10);
+  const minute = value.slice(10, 12);
+  const second = value.slice(12, 14);
+  const iso = `${year}-${month}-${day}T${hour}:${minute}:${second}Z`;
+  const parsed = new Date(iso);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+}
+
+async function fetchGDELT(query, options = {}) {
+  const maxRecords = Math.max(1, Math.min(100, options.maxRecords || 25));
+  const timespan = options.timespan || '24h';
+  const url = `https://api.gdeltproject.org/api/v2/doc/doc?query=${encodeURIComponent(query)}&mode=ArtList&format=json&sort=HybridRel&maxrecords=${maxRecords}&timespan=${encodeURIComponent(timespan)}`;
+  const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+  if (!response.ok) throw new Error(`GDELT status ${response.status}`);
+  const data = await response.json();
+  return (data.articles || []).map((article) => ({
+    title: article.title,
+    description: article.seendate ? `GDELT signal seen at ${article.seendate}.` : '',
+    url: article.url,
+    source: article.domain || article.sourcecountry || 'GDELT',
+    publishedAt: parseGdeltSeenDate(article.seendate),
+    imageUrl: article.socialimage || null
+  }));
+}
+
+async function fetchTheNewsAPI(query, apiKey) {
+  const url = `https://api.thenewsapi.com/v1/news/all?api_token=${encodeURIComponent(apiKey)}&search=${encodeURIComponent(query)}&language=en&sort=published_at&limit=10`;
+  const response = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+  if (!response.ok) throw new Error(`TheNewsAPI status ${response.status}`);
+  const data = await response.json();
+  return (data.data || []).map((article) => ({
+    title: article.title,
+    description: article.description || article.snippet || article.summary,
+    url: article.url,
+    source: article.source || article.source_name || 'TheNewsAPI',
+    publishedAt: article.published_at,
+    imageUrl: article.image_url || null
   }));
 }
 
@@ -984,6 +1387,19 @@ async function runQueryResearch(query, requestedCountry) {
     }
   }
 
+  try {
+    const gdeltQuery = `${query} ${detectedCountry || ''} (military OR defence OR border OR conflict OR diplomacy OR sanctions)`.trim();
+    const gdeltItems = await fetchGDELT(gdeltQuery, { maxRecords: 20, timespan: '24h' });
+    gdeltItems.forEach((item) => {
+      const score = scoreQueryMatch(item, tokens, detectedCountry);
+      if (score > 0 && isTrustedSource(item)) {
+        extraArticles.push({ ...item, score });
+      }
+    });
+  } catch (err) {
+    console.warn('[Query Research] GDELT fetch failed:', err.message);
+  }
+
   const merged = [...storeCandidates, ...extraArticles]
     .filter((item) => item.url)
     .sort((a, b) => b.score - a.score);
@@ -1097,8 +1513,72 @@ async function runBackgroundIngestion() {
 
         const added = await addArticlesToStore(mappedArticles);
         newlyAdded = newlyAdded.concat(added);
+
+        const techQuery = `(China OR Pakistan OR Afghanistan OR Bangladesh OR Myanmar OR Nepal OR Bhutan OR "Sri Lanka" OR Maldives) AND (defense technology OR defence technology OR military technology OR weapons system OR missile system OR air defense radar OR drone fleet OR uav program OR cyber warfare OR electronic warfare OR satellite surveillance OR hypersonic)${negativeGuardrails}`;
+        const techArticles = await fetchNewsAPI(techQuery, apiKey);
+        const mappedTechArticles = [];
+        techArticles.forEach((art) => {
+          const text = `${art.title || ''} ${art.description || ''}`.toLowerCase();
+          const inferredCountry = inferCountryFromText(text);
+          if (inferredCountry) {
+            mappedTechArticles.push({ ...art, country: inferredCountry, category: 'Tech' });
+          }
+        });
+        const addedTech = await addArticlesToStore(mappedTechArticles);
+        newlyAdded = newlyAdded.concat(addedTech);
       } catch (err) {
         console.warn('NewsAPI Ingestion background loop failed:', err.message);
+      }
+    }
+
+    try {
+      const gdeltQuery = '(China OR Pakistan OR Afghanistan OR Bangladesh OR Myanmar OR Nepal OR Bhutan OR "Sri Lanka" OR Maldives) AND (military OR defence OR troops OR army OR clash OR standoff OR border OR security OR geopolitical OR sanctions OR diplomacy)';
+      const gdeltItems = await fetchGDELT(gdeltQuery, { maxRecords: 35, timespan: '24h' });
+      const mappedGdelt = [];
+      gdeltItems.forEach((art) => {
+        const text = `${art.title || ''} ${art.description || ''}`.toLowerCase();
+        const inferredCountry = inferCountryFromText(text);
+        if (inferredCountry) {
+          mappedGdelt.push({ ...art, country: inferredCountry });
+        }
+      });
+
+      const addedFromGdelt = await addArticlesToStore(mappedGdelt);
+      newlyAdded = newlyAdded.concat(addedFromGdelt);
+
+      const gdeltTechQuery = '(China OR Pakistan OR Afghanistan OR Bangladesh OR Myanmar OR Nepal OR Bhutan OR "Sri Lanka" OR Maldives) AND (defense technology OR weapons system OR missile system OR radar system OR drone program OR cyber warfare OR satellite surveillance OR hypersonic)';
+      const gdeltTechItems = await fetchGDELT(gdeltTechQuery, { maxRecords: 35, timespan: '24h' });
+      const mappedGdeltTech = [];
+      gdeltTechItems.forEach((art) => {
+        const text = `${art.title || ''} ${art.description || ''}`.toLowerCase();
+        const inferredCountry = inferCountryFromText(text);
+        if (inferredCountry) {
+          mappedGdeltTech.push({ ...art, country: inferredCountry, category: 'Tech' });
+        }
+      });
+      const addedFromGdeltTech = await addArticlesToStore(mappedGdeltTech);
+      newlyAdded = newlyAdded.concat(addedFromGdeltTech);
+    } catch (err) {
+      console.warn('GDELT Ingestion background loop failed:', err.message);
+    }
+
+    const theNewsApiKey = process.env.THENEWS_API_KEY;
+    if (theNewsApiKey) {
+      try {
+        const techWireQuery = 'defense technology OR military equipment OR missile system OR drone warfare OR cyber defense OR satellite surveillance';
+        const theNewsItems = await fetchTheNewsAPI(techWireQuery, theNewsApiKey);
+        const mappedTheNews = [];
+        theNewsItems.forEach((art) => {
+          const text = `${art.title || ''} ${art.description || ''}`.toLowerCase();
+          const inferredCountry = inferCountryFromText(text);
+          if (inferredCountry) {
+            mappedTheNews.push({ ...art, country: inferredCountry, category: 'Tech' });
+          }
+        });
+        const addedFromTheNews = await addArticlesToStore(mappedTheNews);
+        newlyAdded = newlyAdded.concat(addedFromTheNews);
+      } catch (err) {
+        console.warn('TheNewsAPI tech ingestion failed:', err.message);
       }
     }
   }
@@ -1233,6 +1713,7 @@ async function runLiveRefresh() {
 
   const apiKey = process.env.NEWS_API_KEY;
   let addedApi = [];
+  let addedTechApi = [];
   if (apiKey) {
     try {
       const unifiedQuery = `(China OR Pakistan OR Afghanistan OR Bangladesh OR Myanmar OR Nepal OR Bhutan OR "Sri Lanka" OR Maldives) AND (military OR PLA OR defence OR troops OR army OR clash OR standoff OR LAC OR LOC OR naval OR fleet OR drone OR UAV OR border OR security OR geopolitical)${negativeGuardrails}`;
@@ -1246,8 +1727,70 @@ async function runLiveRefresh() {
         }
       });
       addedApi = await addArticlesToStore(mappedArticles);
+
+      const techQuery = `(China OR Pakistan OR Afghanistan OR Bangladesh OR Myanmar OR Nepal OR Bhutan OR "Sri Lanka" OR Maldives) AND (defense technology OR defence technology OR military technology OR weapons system OR missile system OR air defense radar OR drone fleet OR uav program OR cyber warfare OR electronic warfare OR satellite surveillance OR hypersonic)${negativeGuardrails}`;
+      const techArticles = await fetchNewsAPI(techQuery, apiKey);
+      const mappedTechArticles = [];
+      techArticles.forEach((art) => {
+        const text = `${art.title || ''} ${art.description || ''}`.toLowerCase();
+        const inferredCountry = inferCountryFromText(text);
+        if (inferredCountry) {
+          mappedTechArticles.push({ ...art, country: inferredCountry, category: 'Tech' });
+        }
+      });
+      addedTechApi = await addArticlesToStore(mappedTechArticles);
     } catch (err) {
       console.warn('[Live Refresh] NewsAPI fetch failed:', err.message);
+    }
+  }
+
+  let addedGdelt = [];
+  let addedGdeltTech = [];
+  try {
+    const gdeltQuery = '(China OR Pakistan OR Afghanistan OR Bangladesh OR Myanmar OR Nepal OR Bhutan OR "Sri Lanka" OR Maldives) AND (military OR defence OR troops OR army OR clash OR standoff OR border OR security OR geopolitical OR sanctions OR diplomacy)';
+    const gdeltItems = await fetchGDELT(gdeltQuery, { maxRecords: 35, timespan: '24h' });
+    const mappedGdelt = [];
+    gdeltItems.forEach((art) => {
+      const text = `${art.title || ''} ${art.description || ''}`.toLowerCase();
+      const inferredCountry = inferCountryFromText(text);
+      if (inferredCountry) {
+        mappedGdelt.push({ ...art, country: inferredCountry });
+      }
+    });
+    addedGdelt = await addArticlesToStore(mappedGdelt);
+
+    const gdeltTechQuery = '(China OR Pakistan OR Afghanistan OR Bangladesh OR Myanmar OR Nepal OR Bhutan OR "Sri Lanka" OR Maldives) AND (defense technology OR weapons system OR missile system OR radar system OR drone program OR cyber warfare OR satellite surveillance OR hypersonic)';
+    const gdeltTechItems = await fetchGDELT(gdeltTechQuery, { maxRecords: 35, timespan: '24h' });
+    const mappedGdeltTech = [];
+    gdeltTechItems.forEach((art) => {
+      const text = `${art.title || ''} ${art.description || ''}`.toLowerCase();
+      const inferredCountry = inferCountryFromText(text);
+      if (inferredCountry) {
+        mappedGdeltTech.push({ ...art, country: inferredCountry, category: 'Tech' });
+      }
+    });
+    addedGdeltTech = await addArticlesToStore(mappedGdeltTech);
+  } catch (err) {
+    console.warn('[Live Refresh] GDELT fetch failed:', err.message);
+  }
+
+  let addedTheNewsTech = [];
+  const theNewsApiKey = process.env.THENEWS_API_KEY;
+  if (theNewsApiKey) {
+    try {
+      const techWireQuery = 'defense technology OR military equipment OR missile system OR drone warfare OR cyber defense OR satellite surveillance';
+      const theNewsItems = await fetchTheNewsAPI(techWireQuery, theNewsApiKey);
+      const mappedTheNews = [];
+      theNewsItems.forEach((art) => {
+        const text = `${art.title || ''} ${art.description || ''}`.toLowerCase();
+        const inferredCountry = inferCountryFromText(text);
+        if (inferredCountry) {
+          mappedTheNews.push({ ...art, country: inferredCountry, category: 'Tech' });
+        }
+      });
+      addedTheNewsTech = await addArticlesToStore(mappedTheNews);
+    } catch (err) {
+      console.warn('[Live Refresh] TheNewsAPI tech fetch failed:', err.message);
     }
   }
 
@@ -1279,7 +1822,14 @@ async function runLiveRefresh() {
     console.warn('[Live Refresh] World wires fetch failed:', err.message);
   }
 
-  return { rssAdded: addedRss.length, apiAdded: addedApi.length };
+  return {
+    rssAdded: addedRss.length,
+    apiAdded: addedApi.length,
+    techApiAdded: addedTechApi.length,
+    gdeltAdded: addedGdelt.length,
+    gdeltTechAdded: addedGdeltTech.length,
+    theNewsTechAdded: addedTheNewsTech.length
+  };
 }
 
 app.post('/api/news/refresh', async (req, res) => {
@@ -1446,7 +1996,13 @@ setTimeout(() => {
   lastNewsAPIPoll = Date.now();
   lastWirePoll = Date.now();
   runLiveRefresh().then((result) => {
-    console.log(`[Startup Ingestion] Seeded ${result.rssAdded + result.apiAdded} real articles from live sources.`);
+    const seededTotal = (result.rssAdded || 0)
+      + (result.apiAdded || 0)
+      + (result.techApiAdded || 0)
+      + (result.gdeltAdded || 0)
+      + (result.gdeltTechAdded || 0)
+      + (result.theNewsTechAdded || 0);
+    console.log(`[Startup Ingestion] Seeded ${seededTotal} real articles from live sources.`);
   }).catch((err) => {
     console.warn('[Startup Ingestion] Initial live refresh failed:', err.message);
   });

@@ -7,7 +7,7 @@ A high-performance news and tactical telemetry intelligence dashboard monitoring
 ## 1. System Architecture
 
 The application is structured as a decoupled web application comprising:
-1. **Express Ingestion Backend**: A background caching poller that aggregates geopolitical border signals from NewsAPI and multilingual Google News RSS feeds, serving them via REST and Server-Sent Events (SSE).
+1. **Express Ingestion Backend**: A background caching poller that aggregates geopolitical border signals from NewsAPI, GDELT, and multilingual RSS feeds, serving them via REST and Server-Sent Events (SSE).
 2. **React/TypeScript Frontend**: A visual telemetry dashboard styled with CSS and Material Symbols, displaying dossiers, interactive gauges, and real-time alerts.
 
 ```mermaid
@@ -37,6 +37,7 @@ graph TD
 - **Lazy Session Polling**: Automatically pauses NewsAPI scraper calls when there is no active client activity, preventing rate-limit exhaustion.
 - **Multilingual RSS Ingestion**: Parses English, Chinese, and Urdu RSS feeds for all 9 borders concurrently using parallel promises.
 - **Local Classification Engine**: Maps, scores, and categorizes articles into `Military`, `Tech`, `Political`, `Economic`, and `Social` categories.
+- **LLM Article Enrichment**: Each ingested article is enriched with a 2-3 line summary, threat level, intelligence domain category, extracted entities, and map-ready location metadata.
 - **Grounded AI Search**: Optional online model-backed query answers that summarize trusted public reporting and return cited source links.
 - **SSE Real-Time Stream**: Streams breaking geopolitical signals instantly. Interleaves high-fidelity simulated telemetry sweeps to maintain operational visual flow during silent periods.
 - **Tactical Keyboard Navigation**: Fully keyboard-navigable (`j`/`k` cursors, `Enter` to open split preview, `Esc` to close, `/` to focus search coordinates).
@@ -63,9 +64,25 @@ graph TD
 3. Set up credentials in the `.env` file at the project root:
    ```env
    NEWS_API_KEY=your_news_api_key_here
+   GNEWS_API_KEY=your_gnews_api_key_here
+   LLM_PROVIDER=ollama
+   LLM_MODEL=llama3.1:8b-instruct
+   OLLAMA_BASE_URL=http://127.0.0.1:11434
+
+   # Optional hosted model fallback
    HF_API_KEY=your_huggingface_api_key_here
    HF_MODEL=google/flan-t5-large
    ```
+
+### Free LLM Setup (Ollama)
+1. Install Ollama locally from https://ollama.com.
+2. Pull a free open-weight model:
+   ```bash
+   ollama pull llama3.1:8b-instruct
+   ```
+3. Keep Ollama running locally (default endpoint: `http://127.0.0.1:11434`).
+
+If Ollama is unavailable, the backend automatically falls back to deterministic rule-based enrichment so ingestion remains stable.
 
 ### AI Search Notes
 - The search overlay can use an optional Hugging Face hosted model for source-grounded news answers.

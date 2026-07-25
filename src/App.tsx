@@ -32,6 +32,9 @@ type Signal = {
   country: string;
   category: Category;
   impact: 'High' | 'Medium' | 'Low';
+  threat_level?: 'Low' | 'Medium' | 'High' | 'Critical';
+  threat_label?: string;
+  intel_category?: 'Military' | 'Terrorism' | 'Cyber' | 'Diplomacy' | 'Economy' | 'Maritime' | 'Space' | 'Border';
   headline: string;
   summary: string;
   source: string;
@@ -46,6 +49,18 @@ type Signal = {
   story_key?: string;
   related_count?: number;
   relevance_score?: number;
+  entities?: {
+    countries?: string[];
+    organizations?: string[];
+    militaryUnits?: string[];
+    weapons?: string[];
+    people?: string[];
+  };
+  location_name?: string | null;
+  lat?: number | null;
+  lon?: number | null;
+  llm_provider?: string;
+  llm_model?: string;
   trust?: TrustIndicator;
   isNew?: boolean;
   is_breaking?: boolean;
@@ -766,7 +781,18 @@ function App() {
 
   const latestNewsSignal = categoryNewsSignals[0] ?? null;
 
-  const latestSignalKey = latestNewsSignal ? (latestNewsSignal.id || latestNewsSignal.timestamp) : '';
+  const latestCategoryFallbackSignal = useMemo(() => {
+    const raw = selectedIntel?.signals ?? [];
+    return [...raw]
+      .filter((signal) => Boolean(signal.url))
+      .filter((signal) => signal.category === selectedCategory)
+      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0] ?? null;
+  }, [selectedCategory, selectedIntel]);
+
+  const isUsingCategoryFallback = !latestNewsSignal && Boolean(latestCategoryFallbackSignal);
+  const effectiveLatestSignal = latestNewsSignal ?? latestCategoryFallbackSignal;
+
+  const latestSignalKey = effectiveLatestSignal ? (effectiveLatestSignal.id || effectiveLatestSignal.timestamp) : '';
   const pastNewsSignals = categoryNewsSignals.filter((signal) => {
     const signalKey = signal.id || signal.timestamp;
     if (latestSignalKey && signalKey === latestSignalKey) return false;
@@ -795,8 +821,8 @@ function App() {
     return signal.summary?.trim() || signal.headline;
   };
 
-  const latestNewsDetail = buildDetailedNewsText(latestNewsSignal);
-  const latestNewsAvailable = latestNewsSignal !== null;
+  const latestNewsDetail = buildDetailedNewsText(effectiveLatestSignal);
+  const latestNewsAvailable = effectiveLatestSignal !== null;
 
   const getRefreshStatusLabel = () => {
     if (!lastRefreshAt) return 'Refreshing now...';
@@ -841,6 +867,54 @@ function App() {
       .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0] ?? null;
   };
 
+  const isTechEquipmentSignal = (signal: Signal) => {
+    const text = `${signal.headline || ''} ${signal.summary || ''}`.toLowerCase();
+    const hasTechCategory = signal.category === 'Tech' || ['Cyber', 'Space', 'Maritime'].includes(signal.intel_category || '');
+    const hasDefenseTech = /(missile|air defense|air-defence|drone|uav|radar|ewar|electronic warfare|fighter jet|frigate|destroyer|submarine|satellite|hypersonic|guided|weapon|artillery|munition|surveillance system)/.test(text);
+    return hasTechCategory || hasDefenseTech;
+  };
+
+  const techFocusWorldMapMarkers = useMemo<WorldGeoMapMarker[]>(() => {
+    const markers: WorldGeoMapMarker[] = [];
+
+    Object.entries(newsFeed).forEach(([countryName, intel]) => {
+      const coordinates = countryMapCoordinates[countryName];
+      if (!coordinates) return;
+
+      const bestTechSignal = [...(intel.signals || [])]
+        .filter((signal) => Boolean(signal.url))
+        .filter((signal) => isTechEquipmentSignal(signal))
+        .sort((a, b) => {
+          const textA = `${a.headline || ''} ${a.summary || ''}`.toLowerCase();
+          const textB = `${b.headline || ''} ${b.summary || ''}`.toLowerCase();
+          const weaponWeightA = /(missile|drone|uav|radar|fighter|submarine|frigate|artillery|weapon|air defense|hypersonic)/.test(textA) ? 2 : 0;
+          const weaponWeightB = /(missile|drone|uav|radar|fighter|submarine|frigate|artillery|weapon|air defense|hypersonic)/.test(textB) ? 2 : 0;
+          const impactWeight = (impact?: string) => (impact === 'High' ? 2 : impact === 'Medium' ? 1 : 0);
+          const scoreA = weaponWeightA + impactWeight(a.impact);
+          const scoreB = weaponWeightB + impactWeight(b.impact);
+          if (scoreA !== scoreB) return scoreB - scoreA;
+          return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+        })[0];
+
+      if (!bestTechSignal || !bestTechSignal.url) return;
+      const resolvedLat = typeof bestTechSignal.lat === 'number' ? bestTechSignal.lat : coordinates.lat;
+      const resolvedLon = typeof bestTechSignal.lon === 'number' ? bestTechSignal.lon : coordinates.lon;
+
+      markers.push({
+        id: `tech-${countryName}-${bestTechSignal.id || bestTechSignal.timestamp}`,
+        location: bestTechSignal.location_name || countryName,
+        lat: resolvedLat,
+        lon: resolvedLon,
+        severity: bestTechSignal.impact === 'High' ? 'high' : 'medium',
+        headline: `Tech: ${bestTechSignal.headline}`,
+        source: bestTechSignal.source,
+        url: bestTechSignal.url,
+      });
+    });
+
+    return markers;
+  }, [newsFeed]);
+
   const worldMapMarkers = useMemo<WorldGeoMapMarker[]>(() => {
     const deduped = new Map<string, WorldAlert>();
     worldAlerts.forEach((alert) => {
@@ -866,10 +940,16 @@ function App() {
   const fallbackWorldMapMarkers = useMemo<WorldGeoMapMarker[]>(() => {
     const markers: WorldGeoMapMarker[] = [];
 
-    Object.entries(newsFeed).forEach(([countryName, intel]) => {
-      const coordinates = countryMapCoordinates[countryName];
-      if (!coordinates) return;
+    const resolveCoordinates = (signal: Signal, countryName: string) => {
+      const lat = typeof signal.lat === 'number' ? signal.lat : null;
+      const lon = typeof signal.lon === 'number' ? signal.lon : null;
+      if (lat !== null && lon !== null) {
+        return { lat, lon };
+      }
+      return countryMapCoordinates[countryName] || null;
+    };
 
+    Object.entries(newsFeed).forEach(([countryName, intel]) => {
       const latestHigh = (intel.signals || [])
         .filter((signal) => Boolean(signal.url) && signal.impact === 'High')
         .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
@@ -879,9 +959,11 @@ function App() {
         .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
 
       if (latestHigh?.url) {
+        const coordinates = resolveCoordinates(latestHigh, countryName);
+        if (!coordinates) return;
         markers.push({
           id: `fallback-${countryName}-high-${latestHigh.id || latestHigh.timestamp}`,
-          location: countryName,
+          location: latestHigh.location_name || countryName,
           lat: coordinates.lat,
           lon: coordinates.lon,
           severity: 'high',
@@ -892,9 +974,11 @@ function App() {
       }
 
       if (latestMedium?.url) {
+        const coordinates = resolveCoordinates(latestMedium, countryName);
+        if (!coordinates) return;
         markers.push({
           id: `fallback-${countryName}-medium-${latestMedium.id || latestMedium.timestamp}`,
-          location: countryName,
+          location: latestMedium.location_name || countryName,
           lat: coordinates.lat,
           lon: coordinates.lon,
           severity: 'medium',
@@ -911,15 +995,26 @@ function App() {
   const effectiveWorldMapMarkers = useMemo<WorldGeoMapMarker[]>(() => {
     const merged = new Map<string, WorldGeoMapMarker>();
 
-    [...worldMapMarkers, ...fallbackWorldMapMarkers].forEach((marker) => {
+    // Prefer tech-defense markers first, then world alerts, then general fallbacks.
+    [...techFocusWorldMapMarkers, ...worldMapMarkers, ...fallbackWorldMapMarkers].forEach((marker) => {
       const key = `${marker.location}-${marker.severity}`;
       if (!merged.has(key)) {
         merged.set(key, marker);
       }
     });
 
-    return Array.from(merged.values());
-  }, [worldMapMarkers, fallbackWorldMapMarkers]);
+    const sorted = Array.from(merged.values()).sort((a, b) => {
+      if (a.severity !== b.severity) {
+        return a.severity === 'high' ? -1 : 1;
+      }
+      const techA = a.headline.toLowerCase().startsWith('tech:') ? 1 : 0;
+      const techB = b.headline.toLowerCase().startsWith('tech:') ? 1 : 0;
+      return techB - techA;
+    });
+
+    // Keep map approachable and avoid visual clutter.
+    return sorted.slice(0, 28);
+  }, [techFocusWorldMapMarkers, worldMapMarkers, fallbackWorldMapMarkers]);
 
   const clampPan = (x: number, y: number, zoom: number): WorldMapPan => {
     const maxX = 500 * Math.max(0, zoom - 1);
@@ -1209,9 +1304,9 @@ function App() {
   };
 
   if (authUser) {
-    const categoriesForView: Category[] = ['Political', 'Social', 'Military', 'Economic'];
+    const categoriesForView: Category[] = ['Political', 'Social', 'Tech', 'Military', 'Economic'];
     const currentCategoryData = selectedCountry.categories[selectedCategory];
-    const latestCountrySignal = latestNewsSignal;
+    const latestCountrySignal = effectiveLatestSignal;
     const sourceLabel = latestCountrySignal?.headline || `${selectedCountry.name} ${selectedCategory} news`;
     const sourceUrl = latestCountrySignal
       ? getSignalSourceUrl(latestCountrySignal)
@@ -1844,11 +1939,11 @@ function App() {
                     </div>
                   </div>
 
-                  <div className={`mt-4 border p-4 ${isDarkMode ? 'border-white/20' : 'border-black/20'}`} style={getSignalImageStyle(latestNewsSignal)}>
+                  <div className={`mt-4 border p-4 ${isDarkMode ? 'border-white/20' : 'border-black/20'}`} style={getSignalImageStyle(effectiveLatestSignal)}>
                     <div className="flex items-center justify-between gap-3 mb-3">
                       <div>
                         <p className={`text-xs uppercase tracking-[0.3em] ${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>Latest live report</p>
-                        <h4 className="text-base font-semibold mt-1">{latestNewsSignal?.headline || 'Refreshing from live sources...'}</h4>
+                        <h4 className="text-base font-semibold mt-1">{effectiveLatestSignal?.headline || 'Refreshing from live sources...'}</h4>
                         <p className={`mt-1 text-xs ${isDarkMode ? 'text-white/60' : 'text-black/60'}`}>{refreshStatusLabel} • auto-check every 2 min</p>
                       </div>
                       <div className={`flex rounded border overflow-hidden ${isDarkMode ? 'border-white/20' : 'border-black/20'}`}>
@@ -1872,28 +1967,35 @@ function App() {
                         {!latestNewsAvailable ? (
                           <p className={`text-sm leading-relaxed ${isDarkMode ? 'text-white/70' : 'text-black/70'}`}>you are upto date with latest news</p>
                         ) : (
-                          <p className={`text-sm leading-relaxed ${isDarkMode ? 'text-white/70' : 'text-black/70'}`}>{latestNewsDetail}</p>
+                          <>
+                            <p className={`text-sm leading-relaxed ${isDarkMode ? 'text-white/70' : 'text-black/70'}`}>{latestNewsDetail}</p>
+                            {isUsingCategoryFallback && (
+                              <p className={`text-xs leading-relaxed ${isDarkMode ? 'text-[#ffcf6e]' : 'text-[#8f5a00]'}`}>
+                                This is the last recorded {selectedCategory.toLowerCase()} update for this country. It will be updated soon when a new event is detected.
+                              </p>
+                            )}
+                          </>
                         )}
-                        {latestNewsSignal && (
+                        {effectiveLatestSignal && (
                           <div className="flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.2em]">
                             <span className={`rounded border px-2 py-1 ${isDarkMode ? 'border-white/20 bg-black/35 text-white/80' : 'border-black/20 bg-white/60 text-black/80'}`}>
-                              {latestNewsSignal.verification_status || 'Single-source'}
+                              {effectiveLatestSignal.verification_status || 'Single-source'}
                             </span>
                             <span className={`rounded border px-2 py-1 ${isDarkMode ? 'border-white/20 bg-black/35 text-white/80' : 'border-black/20 bg-white/60 text-black/80'}`}>
-                              Confidence {latestNewsSignal.confidence_score ?? 0}/100
+                              Confidence {effectiveLatestSignal.confidence_score ?? 0}/100
                             </span>
-                            {latestNewsSignal.related_count && latestNewsSignal.related_count > 1 && (
+                            {effectiveLatestSignal.related_count && effectiveLatestSignal.related_count > 1 && (
                               <span className={`rounded border px-2 py-1 ${isDarkMode ? 'border-white/20 bg-black/35 text-white/80' : 'border-black/20 bg-white/60 text-black/80'}`}>
-                                Timeline {latestNewsSignal.related_count} updates
+                                Timeline {effectiveLatestSignal.related_count} updates
                               </span>
                             )}
                           </div>
                         )}
                         <div className={`flex flex-wrap items-center gap-2 text-xs uppercase tracking-[0.2em] ${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>
-                          <span>Primary source: {latestNewsSignal?.source || 'Live ingestion mesh'}</span>
-                          {latestNewsSignal && latestNewsSignal.url && (
+                          <span>Primary source: {effectiveLatestSignal?.source || 'Live ingestion mesh'}</span>
+                          {effectiveLatestSignal && effectiveLatestSignal.url && (
                             <a
-                              href={getSignalSourceUrl(latestNewsSignal)}
+                              href={getSignalSourceUrl(effectiveLatestSignal)}
                               target="_blank"
                               rel="noreferrer"
                               className={`underline underline-offset-4 ${isDarkMode ? 'text-white' : 'text-black'}`}
@@ -1901,9 +2003,9 @@ function App() {
                               Open source link
                             </a>
                           )}
-                          {latestNewsSignal?.youtube_url && (
+                          {effectiveLatestSignal?.youtube_url && (
                             <a
-                              href={latestNewsSignal.youtube_url}
+                              href={effectiveLatestSignal.youtube_url}
                               target="_blank"
                               rel="noreferrer"
                               className={`underline underline-offset-4 ${isDarkMode ? 'text-white' : 'text-black'}`}
@@ -1911,13 +2013,13 @@ function App() {
                               Watch coverage
                             </a>
                           )}
-                          <span>{getSignalSourceKind(latestNewsSignal)}</span>
+                          <span>{getSignalSourceKind(effectiveLatestSignal)}</span>
                         </div>
-                        {latestNewsSignal?.source_links && latestNewsSignal.source_links.length > 0 && (
+                        {effectiveLatestSignal?.source_links && effectiveLatestSignal.source_links.length > 0 && (
                           <div className={`rounded border p-3 ${isDarkMode ? 'border-white/20 bg-white/5' : 'border-black/20 bg-black/5'}`}>
                             <p className={`text-[10px] uppercase tracking-[0.3em] ${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>Sources used for this summary</p>
                             <div className="mt-2 flex flex-wrap gap-2">
-                              {latestNewsSignal.source_links.map((source) => (
+                              {effectiveLatestSignal.source_links.map((source) => (
                                 <a
                                   key={`${source.name}-${source.url}`}
                                   href={source.url}
@@ -1935,7 +2037,22 @@ function App() {
                     ) : (
                       <div className="space-y-2">
                         {pastNewsSignals.length === 0 ? (
-                          <p className={`text-sm ${isDarkMode ? 'text-white/70' : 'text-black/70'}`}>No high-impact past news from the last seven days is available yet for this country and category.</p>
+                          <div className="space-y-2">
+                            <p className={`text-sm ${isDarkMode ? 'text-white/70' : 'text-black/70'}`}>No high-impact past news from the last seven days is available yet for this country and category.</p>
+                            {isUsingCategoryFallback && effectiveLatestSignal?.url && (
+                              <a
+                                href={getSignalSourceUrl(effectiveLatestSignal)}
+                                target="_blank"
+                                rel="noreferrer"
+                                className={`block rounded border px-3 py-2 text-sm ${isDarkMode ? 'border-[#ffcf6e]/50 bg-[#ffcf6e]/10 hover:bg-[#ffcf6e]/20' : 'border-[#8f5a00]/40 bg-[#fff1cc] hover:bg-[#ffe8b0]'}`}
+                              >
+                                <div className="font-medium">{effectiveLatestSignal.headline}</div>
+                                <div className={`mt-1 text-xs ${isDarkMode ? 'text-[#ffcf6e]' : 'text-[#8f5a00]'}`}>
+                                  Last recorded {selectedCategory.toLowerCase()} update. New signals will appear automatically when detected.
+                                </div>
+                              </a>
+                            )}
+                          </div>
                         ) : (
                           pastNewsSignals.map((signal) => (
                             <a
@@ -2497,7 +2614,7 @@ function App() {
                   <div className="flex items-center justify-between gap-3 mb-3">
                     <div>
                       <p className="text-[10px] font-mono uppercase tracking-widest text-[#7bd0ff]">Latest live report</p>
-                      <h3 className="text-sm font-bold text-[#d4e4fa] mt-1">{latestNewsSignal?.headline || 'Refreshing from live sources...'}</h3>
+                      <h3 className="text-sm font-bold text-[#d4e4fa] mt-1">{effectiveLatestSignal?.headline || 'Refreshing from live sources...'}</h3>
                     </div>
                     <div className="flex rounded border border-[#45464d] overflow-hidden">
                       <button
@@ -2518,11 +2635,16 @@ function App() {
                   {newsView === 'latest' ? (
                     <div className="space-y-3">
                       <p className="text-xs leading-relaxed text-[#c6c6cd]">{latestNewsDetail}</p>
+                      {isUsingCategoryFallback && (
+                        <p className="text-[10px] leading-relaxed text-[#fbbf24]">
+                          This is the last recorded {selectedCategory.toLowerCase()} update for this country. It will be updated soon when a new event is detected.
+                        </p>
+                      )}
                       <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono uppercase">
-                        <span className="text-[#4edea3]">Source: {latestNewsSignal?.source || 'Live ingestion mesh'}</span>
-                        {latestNewsSignal && (
+                        <span className="text-[#4edea3]">Source: {effectiveLatestSignal?.source || 'Live ingestion mesh'}</span>
+                        {effectiveLatestSignal && (
                           <a
-                            href={getSignalSourceUrl(latestNewsSignal)}
+                            href={getSignalSourceUrl(effectiveLatestSignal)}
                             target="_blank"
                             rel="noreferrer"
                             className="text-[#7bd0ff] underline underline-offset-2"
@@ -2535,7 +2657,20 @@ function App() {
                   ) : (
                     <div className="space-y-2">
                       {pastNewsSignals.length === 0 ? (
-                        <p className="text-xs text-[#c6c6cd]">No high-impact past news from the last seven days is available yet for this country and category.</p>
+                        <div className="space-y-2">
+                          <p className="text-xs text-[#c6c6cd]">No high-impact past news from the last seven days is available yet for this country and category.</p>
+                          {isUsingCategoryFallback && effectiveLatestSignal?.url && (
+                            <a
+                              href={getSignalSourceUrl(effectiveLatestSignal)}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="block rounded border border-[#fbbf24]/40 bg-[#fbbf24]/10 px-3 py-2 text-xs text-[#fbbf24] hover:border-[#fbbf24]/70"
+                            >
+                              <div className="font-semibold text-[#d4e4fa]">{effectiveLatestSignal.headline}</div>
+                              <div className="mt-1 text-[10px] uppercase tracking-wider">Last recorded {selectedCategory.toLowerCase()} update. New signals will appear automatically when detected.</div>
+                            </a>
+                          )}
+                        </div>
                       ) : (
                         pastNewsSignals.map((signal) => (
                           <a
@@ -2785,8 +2920,16 @@ function App() {
                         <p className="text-[#bec6e0] font-bold mt-0.5">{selectedDossierSignal.category}</p>
                       </div>
                       <div>
+                        <p className="text-[9px] text-[#c6c6cd] uppercase">Threat Level</p>
+                        <p className="text-[#ffcf6e] font-bold mt-0.5">{selectedDossierSignal.threat_label || selectedDossierSignal.impact}</p>
+                      </div>
+                      <div>
                         <p className="text-[9px] text-[#c6c6cd] uppercase">Source Wire</p>
                         <p className="text-[#bec6e0] font-bold mt-0.5">{selectedDossierSignal.source}</p>
+                      </div>
+                      <div>
+                        <p className="text-[9px] text-[#c6c6cd] uppercase">Intel Domain</p>
+                        <p className="text-[#7bd0ff] font-bold mt-0.5">{selectedDossierSignal.intel_category || 'Military'}</p>
                       </div>
                       <div>
                         <p className="text-[9px] text-[#c6c6cd] uppercase">Trust Rating</p>
@@ -2804,7 +2947,36 @@ function App() {
                         <p className="text-[9px] text-[#c6c6cd] uppercase">Confidence</p>
                         <p className="text-[#bec6e0] font-bold mt-0.5">{selectedDossierSignal.confidence_score ?? 0}/100</p>
                       </div>
+                      <div>
+                        <p className="text-[9px] text-[#c6c6cd] uppercase">LLM</p>
+                        <p className="text-[#bec6e0] font-bold mt-0.5">{selectedDossierSignal.llm_provider || 'heuristic'}{selectedDossierSignal.llm_model ? ` • ${selectedDossierSignal.llm_model}` : ''}</p>
+                      </div>
+                      <div>
+                        <p className="text-[9px] text-[#c6c6cd] uppercase">Map Location</p>
+                        <p className="text-[#bec6e0] font-bold mt-0.5">{selectedDossierSignal.location_name || selectedDossierSignal.country}</p>
+                      </div>
                     </div>
+
+                    {selectedDossierSignal.entities && (
+                      <div className="bg-[#122131]/30 border border-[#45464d]/40 p-4 text-[11px] space-y-2">
+                        <p className="text-[9px] text-[#c6c6cd] uppercase">Extracted entities</p>
+                        <p className="text-[#bec6e0]">
+                          Countries: {(selectedDossierSignal.entities.countries || []).slice(0, 6).join(', ') || 'None'}
+                        </p>
+                        <p className="text-[#bec6e0]">
+                          Organizations: {(selectedDossierSignal.entities.organizations || []).slice(0, 6).join(', ') || 'None'}
+                        </p>
+                        <p className="text-[#bec6e0]">
+                          Military units: {(selectedDossierSignal.entities.militaryUnits || []).slice(0, 6).join(', ') || 'None'}
+                        </p>
+                        <p className="text-[#bec6e0]">
+                          Weapons: {(selectedDossierSignal.entities.weapons || []).slice(0, 6).join(', ') || 'None'}
+                        </p>
+                        <p className="text-[#bec6e0]">
+                          People: {(selectedDossierSignal.entities.people || []).slice(0, 6).join(', ') || 'None'}
+                        </p>
+                      </div>
+                    )}
                     <div className="flex flex-wrap gap-3 text-[11px] font-mono uppercase">
                       <a href={getSignalSourceUrl(selectedDossierSignal)} target="_blank" rel="noreferrer" className="text-[#7bd0ff] underline underline-offset-2">
                         Open source
