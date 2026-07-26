@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { WorldGeoMap, type WorldGeoMapMarker } from './components/WorldGeoMap';
 
-type TimeWindow = '1m' | '5m' | '1h' | '24h' | '7d';
+type TimeWindow = '1h' | '1d' | '1w' | '1m';
 type Category = 'Political' | 'Social' | 'Tech' | 'Economic' | 'Military';
 type LayoutMode = 'single' | 'triple' | 'split';
 type TrustIndicator = 'Verified Source' | 'Developing' | 'Unverified' | 'Rumor';
@@ -316,6 +316,25 @@ const countries: Country[] = [
       Military: { title: 'Coast guard drills', summary: 'Patrol cutters conduct joint operations in southern channels.', impact: 'Medium', signal: 'Patrol exercises' },
     },
   },
+  {
+    id: 'global',
+    name: 'Global',
+    capital: 'OSINT Grid',
+    borderKm: 0,
+    region: 'Strategic Space',
+    coordinates: 'AI Ingest Mesh',
+    summary: 'Decentralized open-source intelligence stream from custom ingested sources.',
+    threatLevel: 'Low',
+    stabilityIndex: 0.99,
+    riskProbability: 5.00,
+    categories: {
+      Political: { title: 'Geopolitical context', summary: 'Factual assessment of custom ingested geopolitical reports.', impact: 'Low', signal: 'Decentralized signals' },
+      Social: { title: 'Social media', summary: 'Ingested social trends and sentiment checks.', impact: 'Low', signal: 'Decentralized signals' },
+      Tech: { title: 'Technology updates', summary: 'AI and tech innovation developments.', impact: 'Low', signal: 'Decentralized signals' },
+      Economic: { title: 'Economic indicator tracking', summary: 'Finance and corporate market summaries.', impact: 'Low', signal: 'Decentralized signals' },
+      Military: { title: 'Global military', summary: 'Defense updates outside of direct border lines.', impact: 'Low', signal: 'Decentralized signals' },
+    },
+  },
 ];
 
 const categories: Category[] = ['Political', 'Social', 'Tech', 'Economic', 'Military'];
@@ -394,16 +413,16 @@ const entityContexts: Record<string, string> = {
 };
 
 function App() {
-  const newsAutoRefreshMs = 120000;
-  const newsAutoRefreshSeconds = 120;
   const defaultTheme: RgbTheme = { r: 123, g: 208, b: 255 };
+
+  // 1. Core States
+  const [timeWindow, setTimeWindow] = useState<TimeWindow>('1d');
   const [selectedCountry, setSelectedCountry] = useState<Country>(countries[0]);
-  const [timeWindow, setTimeWindow] = useState<TimeWindow>('24h');
   const [newsFeed, setNewsFeed] = useState<Record<string, CountryIntel>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  
-  // Authentication State
+
+  // 2. Authentication States
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [pendingAuthUser, setPendingAuthUser] = useState<AuthUser | null>(null);
   const [loginForm, setLoginForm] = useState({ email: '', password: '' });
@@ -415,19 +434,21 @@ function App() {
   const [securityNotice, setSecurityNotice] = useState('');
   const [isUpdatingCredentials, setIsUpdatingCredentials] = useState(false);
 
-  // Polling states (2 minute countdown)
+  // 3. WebSocket and Scraper Job States
+  const [scrapeLinks, setScrapeLinks] = useState<string>('');
+  const [scrapePlatform, setScrapePlatform] = useState<string>('news');
+  const [scrapedJobs, setScrapedJobs] = useState<Record<string, { url: string, platform: string, status: string, progress: number, result?: any, error?: string }>>({});
+  const [selectedScrapeResult, setSelectedScrapeResult] = useState<any>(null);
+  const [isScraperOpen, setIsScraperOpen] = useState(false);
+
+  // 4. Polling & Streaming States
   const [refreshTrigger, setRefreshTrigger] = useState(0);
-  const [countdown, setCountdown] = useState(newsAutoRefreshSeconds);
-
-  // Fallback timeframe notification state
   const [isFallbackTimeframe, setIsFallbackTimeframe] = useState(false);
-
-  // Streaming mechanics states
   const [streamBuffer, setStreamBuffer] = useState<{ country: string; signal: Signal }[]>([]);
   const [isUserScrolledDown, setIsUserScrolledDown] = useState(false);
   const dossierScrollRef = useRef<HTMLDivElement>(null);
 
-  // Layout mode state
+  // 5. Layout & UI Theme States
   const [layoutMode, setLayoutMode] = useState<LayoutMode>('split');
   const [selectedCategory, setSelectedCategory] = useState<Category>('Political');
   const [isCountrySelected, setIsCountrySelected] = useState(false);
@@ -435,6 +456,119 @@ function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [uiTheme, setUiTheme] = useState<RgbTheme>(defaultTheme);
+
+  // 6. Derived Values
+  const newsAutoRefreshMs = timeWindow === '1h' ? 30000 : 120000;
+  const newsAutoRefreshSeconds = timeWindow === '1h' ? 30 : 120;
+  const [countdown, setCountdown] = useState(newsAutoRefreshSeconds);
+
+  // 7. WebSocket Listener Effect
+  useEffect(() => {
+    if (!authUser) return;
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${protocol}//${window.location.hostname}:3001`;
+    let socket: WebSocket;
+    
+    function connect() {
+      console.log('[WS] Establishing dashboard telemetry stream to:', wsUrl);
+      socket = new WebSocket(wsUrl);
+      socket.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'job_update') {
+            const { jobId, status, progress, result, error } = msg;
+            setScrapedJobs(prev => {
+              const current = prev[jobId];
+              if (current) {
+                const terminal = status === 'completed' || status === 'failed';
+                const significantProgress = Math.abs(progress - current.progress) >= 15;
+                if (!terminal && !significantProgress && current.status === status) {
+                  return prev; // Throttled: skip updating state to prevent rendering
+                }
+              }
+              const currentItem = current || { url: '', platform: '', status: '', progress: 0 };
+              return {
+                ...prev,
+                [jobId]: {
+                  ...currentItem,
+                  status,
+                  progress,
+                  result: result || currentItem.result,
+                  error: error || currentItem.error
+                }
+              };
+            });
+
+            if (status === 'completed' && result) {
+              const enrichedSignal = {
+                ...result,
+                id: `scraped-${result.url}-${Date.now()}`,
+                trust: 'Verified Source' as const,
+                country: result.country || 'Global'
+              };
+              
+              setNewsFeed(prev => {
+                const globalDossier = prev['Global'] || {
+                  region: 'Strategic Space',
+                  threat_level: 'Low' as const,
+                  last_synced: new Date().toISOString(),
+                  operational_summary: 'AI Scraped Signals mesh active.',
+                  signals: [],
+                  source_status: 'normal' as const
+                };
+                
+                const exists = globalDossier.signals.some((s: any) => s.url === result.url);
+                const updatedSignals = exists 
+                  ? globalDossier.signals 
+                  : [enrichedSignal, ...globalDossier.signals];
+                  
+                return {
+                  ...prev,
+                  'Global': {
+                    ...globalDossier,
+                    signals: updatedSignals
+                  }
+                };
+              });
+            }
+          }
+        } catch (e) {
+          console.warn('[WS] Telemetry parser error:', e);
+        }
+      };
+      socket.onclose = () => {
+        setTimeout(connect, 5000);
+      };
+    }
+    connect();
+    return () => { if (socket) socket.close(); };
+  }, [authUser]);
+
+  const handleScrapeSubmit = async () => {
+    const urls = scrapeLinks.split('\n').map(u => u.trim()).filter(u => u !== '');
+    if (urls.length === 0) return;
+    
+    try {
+      const response = await fetch('/api/scrape', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ urls, platform: scrapePlatform })
+      });
+      if (!response.ok) throw new Error(`Scraper submission failed: ${response.status}`);
+      const data = await response.json();
+      if (data.success && data.jobIds) {
+        setScrapeLinks('');
+        data.jobIds.forEach((id: string, idx: number) => {
+          setScrapedJobs(prev => ({
+            ...prev,
+            [id]: { url: urls[idx], platform: scrapePlatform, status: 'queued', progress: 10 }
+          }));
+        });
+      }
+    } catch (err: any) {
+      console.error(err);
+    }
+  };
   const settingsMenuRef = useRef<HTMLDivElement>(null);
 
   // Keyboard navigation cursor state
@@ -559,6 +693,7 @@ function App() {
 
     void loadWorldAlerts(true);
     const interval = window.setInterval(() => {
+      if (document.hidden) return;
       void loadWorldAlerts(false);
     }, newsAutoRefreshMs);
 
@@ -576,7 +711,7 @@ function App() {
       setError(null);
       try {
         const hydrateFeed = async () => {
-          const response = await fetch(`/api/news/all?category=${filterCategory}`);
+          const response = await fetch(`/api/news/all?category=${filterCategory}&timeframe=${timeWindow}&_cb=${Date.now()}`);
           if (!response.ok) {
             throw new Error(`Feed failure ${response.status}`);
           }
@@ -619,11 +754,12 @@ function App() {
     }
 
     void loadFeed();
-  }, [authUser, refreshTrigger, filterCategory]);
+  }, [authUser, refreshTrigger, filterCategory, timeWindow]);
 
   useEffect(() => {
     if (!authUser) return;
     const autoRefreshInterval = window.setInterval(() => {
+      if (document.hidden) return;
       setRefreshTrigger((prev) => prev + 1);
     }, newsAutoRefreshMs);
 
@@ -747,6 +883,7 @@ function App() {
   useEffect(() => {
     if (!authUser) return;
     const interval = setInterval(() => {
+      if (document.hidden) return;
       setCountdown((prev) => {
         if (prev <= 1) {
           setRefreshTrigger((r) => r + 1);
@@ -1102,12 +1239,11 @@ function App() {
     if (raw.length === 0) return [];
 
     const now = new Date();
-    let windowMs = 7 * 24 * 60 * 60 * 1000; // default 7 days
-    if (timeWindow === '1m') windowMs = 60 * 1000;
-    else if (timeWindow === '5m') windowMs = 5 * 60 * 1000;
-    else if (timeWindow === '1h') windowMs = 60 * 60 * 1000;
-    else if (timeWindow === '24h') windowMs = 24 * 60 * 60 * 1000;
-    else if (timeWindow === '7d') windowMs = 7 * 24 * 60 * 60 * 1000;
+    let windowMs = 24 * 60 * 60 * 1000; // default 24h
+    if (timeWindow === '1h') windowMs = 60 * 60 * 1000;
+    else if (timeWindow === '1d') windowMs = 24 * 60 * 60 * 1000;
+    else if (timeWindow === '1w') windowMs = 7 * 24 * 60 * 60 * 1000;
+    else if (timeWindow === '1m') windowMs = 30 * 24 * 60 * 60 * 1000;
 
     const threshold = new Date(now.getTime() - windowMs);
     let filtered = raw.filter(s => new Date(s.timestamp) >= threshold);
@@ -2441,6 +2577,76 @@ function App() {
             </div>
           </div>
 
+          {/* AI intelligence scraping hub */}
+          <div className="border-t border-[#45464d]/40 bg-[#051424]/20 p-3 shrink-0">
+            <button 
+              onClick={() => setIsScraperOpen(!isScraperOpen)}
+              className="w-full text-left font-mono font-bold text-[10px] text-[#7bd0ff] flex justify-between items-center uppercase tracking-wider focus:outline-none"
+            >
+              <span>🤖 AI OSINT Scraper</span>
+              <span>{isScraperOpen ? '▲' : '▼'}</span>
+            </button>
+            
+            {isScraperOpen && (
+              <div className="mt-3 space-y-2.5">
+                <div>
+                  <label className="text-[9px] text-[#c6c6cd] uppercase block mb-1">Target Platform</label>
+                  <select 
+                    value={scrapePlatform} 
+                    onChange={(e) => setScrapePlatform(e.target.value)}
+                    className="w-full bg-[#122131] border border-[#45464d] text-xs text-[#d4e4fa] px-2 py-1 rounded focus:outline-none focus:border-[#7bd0ff]"
+                  >
+                    <option value="news">News Website URL</option>
+                    <option value="x">Twitter / X Post</option>
+                    <option value="reddit">Reddit Thread</option>
+                    <option value="linkedin">LinkedIn Article</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[9px] text-[#c6c6cd] uppercase block mb-1">Paste Links (1 per line, max 5)</label>
+                  <textarea
+                    value={scrapeLinks}
+                    onChange={(e) => setScrapeLinks(e.target.value)}
+                    rows={3}
+                    placeholder="https://example.com/article"
+                    className="w-full bg-[#122131] border border-[#45464d] text-[11px] text-[#d4e4fa] p-1.5 rounded focus:outline-none focus:border-[#7bd0ff] font-mono leading-normal resize-none"
+                  />
+                </div>
+                <button 
+                  onClick={handleScrapeSubmit}
+                  className="w-full py-1 text-[9px] font-bold text-center bg-blue-600 hover:bg-blue-700 text-white transition-colors uppercase rounded font-mono shadow-[0_0_8px_rgba(37,99,235,0.2)]"
+                >
+                  Ingest & Enrich
+                </button>
+
+                {/* Scraped Jobs list */}
+                {Object.keys(scrapedJobs).length > 0 && (
+                  <div className="border-t border-[#45464d]/20 pt-2 space-y-1.5 max-h-36 overflow-y-auto pr-1">
+                    {Object.entries(scrapedJobs).map(([jobId, job]) => (
+                      <div key={jobId} className="flex justify-between items-center text-[10px] bg-[#122131]/60 p-1.5 rounded border border-[#45464d]/20">
+                        <span className="truncate w-1/2 font-mono text-[#bec6e0]" title={job.url}>{job.url}</span>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {job.status === 'completed' ? (
+                            <button
+                              onClick={() => setSelectedScrapeResult(job.result)}
+                              className="text-[9px] px-1 bg-green-950 border border-green-500/50 text-green-400 font-bold rounded"
+                            >
+                              View
+                            </button>
+                          ) : job.status === 'failed' ? (
+                            <span className="text-red-400 font-mono" title={job.error}>Error</span>
+                          ) : (
+                            <span className="text-[#fbbf24] animate-pulse font-mono uppercase">{job.status}</span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
           <div className="p-4 border-t border-[#45464d]/40 bg-[#051424]/40 space-y-2 shrink-0">
             <div className="flex justify-between items-center text-[10px] text-[#c6c6cd]">
               <span>MESH STATUS</span>
@@ -2574,15 +2780,19 @@ function App() {
                     Scroll Latest
                   </button>
                   <div className="bg-[#122131] border border-[#45464d] flex rounded p-0.5">
-                    {(['1m', '5m', '1h', '24h', '7d'] as TimeWindow[]).map((t) => (
+                    {(['1h', '1d', '1w', '1m'] as TimeWindow[]).map((t) => (
                       <button
                         key={t}
                         onClick={() => setTimeWindow(t)}
                         className={`px-2.5 py-1 text-[10px] font-mono uppercase rounded transition-colors ${
-                          timeWindow === t ? 'bg-[#1c2b3c] text-[#7bd0ff] font-bold' : 'text-[#c6c6cd] hover:text-[#d4e4fa]'
+                          timeWindow === t 
+                            ? t === '1h'
+                              ? 'bg-red-955/70 border border-red-500/50 text-red-400 font-bold shadow-[0_0_8px_rgba(239,68,68,0.3)] animate-pulse'
+                              : 'bg-[#1c2b3c] text-[#7bd0ff] font-bold'
+                            : 'text-[#c6c6cd] hover:text-[#d4e4fa]'
                         }`}
                       >
-                        {t === '1m' ? '1 MIN' : t === '5m' ? '5 MIN' : t === '1h' ? '1 HR' : t === '24h' ? '24 HR' : '7 DAY'}
+                        {t === '1h' ? '🔴 1 HR (BREAKING)' : t === '1d' ? '24 HR' : t === '1w' ? '7 DAY' : '30 DAY'}
                       </button>
                     ))}
                   </div>
@@ -3075,6 +3285,64 @@ function App() {
           <span className="text-[#4edea3] font-bold">SYSTEM STATUS: NOMINAL</span>
         </div>
       </footer>
+
+      {/* Scraped Result Detail Overlay */}
+      {selectedScrapeResult && (
+        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-[#0b1320] border border-[#7bd0ff]/40 max-w-2xl w-full rounded shadow-2xl overflow-hidden flex flex-col max-h-[85vh]">
+            <div className="bg-[#122131] px-5 py-3.5 border-b border-[#45464d]/60 flex justify-between items-center font-mono">
+              <span className="text-xs text-[#7bd0ff] font-bold tracking-widest uppercase">AI Ingestion Intelligence Report</span>
+              <button 
+                onClick={() => setSelectedScrapeResult(null)}
+                className="text-[#c6c6cd] hover:text-white font-bold"
+              >
+                ✕
+              </button>
+            </div>
+            <div className="p-6 overflow-y-auto space-y-4 text-[#d4e4fa]">
+              <div>
+                <span className="text-[9px] font-mono text-[#7bd0ff]/60 uppercase tracking-widest block">Original Source URL</span>
+                <a 
+                  href={selectedScrapeResult.url} 
+                  target="_blank" 
+                  rel="noreferrer" 
+                  className="text-xs text-[#7bd0ff] underline hover:text-[#bec6e0] font-mono truncate block"
+                >
+                  {selectedScrapeResult.url}
+                </a>
+              </div>
+              <div>
+                <span className="text-[9px] font-mono text-[#7bd0ff]/60 uppercase tracking-widest block">Headline</span>
+                <h2 className="text-base font-bold mt-0.5 text-[#d4e4fa]">{selectedScrapeResult.title}</h2>
+              </div>
+              <div className="grid grid-cols-2 gap-4 border-t border-b border-[#45464d]/20 py-3.5 font-mono text-xs">
+                <div>
+                  <span className="text-[9px] text-[#c6c6cd] uppercase block">AI Domain</span>
+                  <span className="text-green-400 font-bold">{selectedScrapeResult.intel_category || 'General'}</span>
+                </div>
+                <div>
+                  <span className="text-[9px] text-[#c6c6cd] uppercase block">Dashboard Category</span>
+                  <span className="text-[#7bd0ff] font-bold">{selectedScrapeResult.category}</span>
+                </div>
+              </div>
+              <div>
+                <span className="text-[9px] font-mono text-[#7bd0ff]/60 uppercase tracking-widest block">AI Specialized Intelligence Summary</span>
+                <p className="mt-2 text-xs leading-relaxed bg-[#122131]/30 border border-[#45464d]/30 p-4 rounded text-[#bec6e0] font-mono whitespace-pre-wrap">
+                  {selectedScrapeResult.summary}
+                </p>
+              </div>
+            </div>
+            <div className="bg-[#122131]/40 px-5 py-3 border-t border-[#45464d]/20 flex justify-end">
+              <button 
+                onClick={() => setSelectedScrapeResult(null)}
+                className="px-4 py-1.5 text-[10px] font-mono bg-[#1c2b3c] border border-[#45464d] rounded text-[#c6c6cd] hover:text-white transition-colors"
+              >
+                Close Report
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

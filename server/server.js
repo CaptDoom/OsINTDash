@@ -1,10 +1,14 @@
 import express from 'express';
 import cors from 'cors';
 import Parser from 'rss-parser';
-import { mkdirSync } from 'fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import Datastore from 'nedb-promises';
+import { setCache, getOrSetCacheSWR } from './cache.js';
+import { addScrapeJob, getJobStatus, setJobUpdateCallback } from './queue.js';
+import { initWebSocket, broadcastJobUpdate } from './websocket.js';
+import http from 'http';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -13,12 +17,61 @@ const dataDir = path.join(__dirname, '../data');
 mkdirSync(dataDir, { recursive: true });
 
 const app = express();
+const server = http.createServer(app);
 const port = 3001;
+
+initWebSocket(server);
+setJobUpdateCallback((jobId, status, progress, result, error) => {
+  broadcastJobUpdate(jobId, status, progress, result, error);
+});
+const dbFilePath = path.join(dataDir, 'articles.db');
+if (existsSync(dbFilePath)) {
+  try {
+    const content = readFileSync(dbFilePath, 'utf8');
+    const lines = content.split('\n');
+    const seenUrls = new Set();
+    const cleanLines = [];
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      
+      if (trimmed.includes('$$indexCreated')) {
+        cleanLines.push(trimmed);
+        continue;
+      }
+
+      try {
+        const doc = JSON.parse(trimmed);
+        if (doc.url) {
+          if (seenUrls.has(doc.url)) {
+            continue;
+          }
+          seenUrls.add(doc.url);
+        }
+        cleanLines.push(trimmed);
+      } catch (err) {
+        // Skip malformed lines
+      }
+    }
+
+    writeFileSync(dbFilePath, cleanLines.join('\n') + '\n', 'utf8');
+    console.log(`[Database Cleanup] Cleaned articles.db, removed duplicate URLs.`);
+  } catch (err) {
+    console.error('[Database Cleanup] Failed to clean database file:', err.message);
+  }
+}
+
 const parser = new Parser();
 const articleDb = Datastore.create({
-  filename: path.join(dataDir, 'articles.db'),
+  filename: dbFilePath,
   autoload: true,
 });
+
+// Ensure indexing for fast range queries and search operations
+articleDb.ensureIndex({ fieldName: 'timestamp' }).catch(err => console.warn('[NeDB] timestamp index error:', err.message));
+articleDb.ensureIndex({ fieldName: 'country' }).catch(err => console.warn('[NeDB] country index error:', err.message));
+articleDb.ensureIndex({ fieldName: 'url', unique: true, sparse: true }).catch(err => console.warn('[NeDB] url unique index error:', err.message));
 
 app.use(cors());
 app.use(express.json());
@@ -90,6 +143,7 @@ const feeds = {
     'https://www.aljazeera.com/xml/rss/all.xml',
     'https://rss.cnn.com/rss/edition_world.rss'
   ],
+  Global: [],
 };
 
 const countryMeta = {
@@ -102,6 +156,7 @@ const countryMeta = {
   Bhutan: { region: 'Northern Front', threatLevel: 'Moderate' },
   'Sri Lanka': { region: 'Indian Ocean', threatLevel: 'Moderate' },
   Maldives: { region: 'Indian Ocean', threatLevel: 'Moderate' },
+  Global: { region: 'Strategic Space', threatLevel: 'Low' }
 };
 
 // Geopolitical country keywords map for classification
@@ -177,6 +232,7 @@ const regionCoordinateIndex = {
   Bhutan: { lat: 27.5142, lon: 90.4336 },
   'Sri Lanka': { lat: 7.8731, lon: 80.7718 },
   Maldives: { lat: 3.2028, lon: 73.2207 },
+  Global: { lat: 20.0, lon: 0.0 }
 };
 
 function safeJsonParse(value) {
@@ -884,6 +940,15 @@ function calculateRelevanceScore(title, description, publishedAt, impact) {
 
 // In-memory Database of parsed Articles
 let articleStore = [];
+
+global.addArticleToInMemoryStore = (article) => {
+  if (!articleStore.some(existing => existing.url === article.url || existing.headline === article.headline)) {
+    articleStore.unshift(article);
+    if (articleStore.length > 500) {
+      articleStore = articleStore.slice(0, 500);
+    }
+  }
+};
 
 async function pruneArticleDb() {
   const docs = await articleDb.find({}).sort({ timestamp: -1 });
@@ -1903,31 +1968,60 @@ app.get('/api/news', async (req, res) => {
   try {
     const country = req.query.country || 'China';
     const category = req.query.category || 'All';
-    
-    const meta = countryMeta[country] || { region: 'Unknown', threatLevel: 'Low' };
-    let signals = articleStore.filter(art => art.country.toLowerCase() === country.toLowerCase());
-    
-    if (category !== 'All') {
-      signals = signals.filter(art => art.category === category);
+    const timeframe = req.query.timeframe || '24h';
+    const cacheKey = `news:${country.toLowerCase()}:${category.toLowerCase()}:${timeframe}`;
+
+    let windowMs = 24 * 60 * 60 * 1000;
+    let ttl = 1800;
+    if (timeframe === '1h') {
+      windowMs = 60 * 60 * 1000;
+      ttl = 300;
+    } else if (timeframe === '24h' || timeframe === '1d') {
+      windowMs = 24 * 60 * 60 * 1000;
+      ttl = 1800;
+    } else if (timeframe === '7d' || timeframe === '1w') {
+      windowMs = 7 * 24 * 60 * 60 * 1000;
+      ttl = 7200;
+    } else if (timeframe === '30d' || timeframe === '1m') {
+      windowMs = 30 * 24 * 60 * 60 * 1000;
+      ttl = 86400;
     }
 
-    signals.sort((a, b) => b.relevance_score - a.relevance_score);
+    const result = await getOrSetCacheSWR(cacheKey, async () => {
+      const meta = countryMeta[country] || { region: 'Unknown', threatLevel: 'Low' };
+      const cutoffTime = Date.now() - windowMs;
 
-    let operationalSummary = '';
-    if (signals.length === 0) {
-      operationalSummary = 'STATUS: STABLE // NO NEW SIGNAL IN DETECTED WINDOW';
-    } else {
-      operationalSummary = `Ingestion mesh verified. Detected ${signals.length} tactical and strategic border signals in historical monitoring window.`;
-    }
+      let signals = articleStore.filter(art => {
+        const matchCountry = art.country.toLowerCase() === country.toLowerCase();
+        if (!matchCountry) return false;
+        const artTime = new Date(art.timestamp).getTime();
+        return artTime >= cutoffTime;
+      });
+      
+      if (category !== 'All') {
+        signals = signals.filter(art => art.category === category);
+      }
 
-    res.json({
-      region: meta.region,
-      threat_level: meta.threatLevel,
-      last_synced: new Date().toISOString(),
-      operational_summary: operationalSummary,
-      signals: signals,
-      source_status: 'normal'
-    });
+      signals.sort((a, b) => b.relevance_score - a.relevance_score);
+
+      let operationalSummary = '';
+      if (signals.length === 0) {
+        operationalSummary = 'STATUS: STABLE // NO NEW SIGNAL IN DETECTED WINDOW';
+      } else {
+        operationalSummary = `Ingestion mesh verified. Detected ${signals.length} tactical and strategic border signals in the selected ${timeframe} monitoring window.`;
+      }
+
+      return {
+        region: meta.region,
+        threat_level: meta.threatLevel,
+        last_synced: new Date().toISOString(),
+        operational_summary: operationalSummary,
+        signals: signals,
+        source_status: 'normal'
+      };
+    }, ttl);
+
+    res.json(result);
   } catch (error) {
     console.error('Single news fetch failed:', error.message);
     res.status(500).json({ error: 'News ingestion failed' });
@@ -1939,41 +2033,101 @@ app.get('/api/news/all', async (req, res) => {
   updateActivity();
   try {
     const category = req.query.category || 'All';
-    const countriesList = Object.keys(feeds);
-    const results = {};
+    const timeframe = req.query.timeframe || '24h';
+    const cacheKey = `news:all:${category.toLowerCase()}:${timeframe}`;
+    
+    let windowMs = 24 * 60 * 60 * 1000;
+    let ttl = 1800;
+    if (timeframe === '1h') {
+      windowMs = 60 * 60 * 1000;
+      ttl = 300;
+    } else if (timeframe === '24h' || timeframe === '1d') {
+      windowMs = 24 * 60 * 60 * 1000;
+      ttl = 1800;
+    } else if (timeframe === '7d' || timeframe === '1w') {
+      windowMs = 7 * 24 * 60 * 60 * 1000;
+      ttl = 7200;
+    } else if (timeframe === '30d' || timeframe === '1m') {
+      windowMs = 30 * 24 * 60 * 60 * 1000;
+      ttl = 86400;
+    }
 
-    countriesList.forEach(country => {
-      const meta = countryMeta[country] || { region: 'Unknown', threatLevel: 'Low' };
-      
-      let signals = articleStore.filter(art => art.country.toLowerCase() === country.toLowerCase());
-      if (category !== 'All') {
-        signals = signals.filter(art => art.category === category);
-      }
+    const result = await getOrSetCacheSWR(cacheKey, async () => {
+      const cutoffTime = Date.now() - windowMs;
+      const countriesList = Object.keys(feeds);
+      const results = {};
 
-      signals.sort((a, b) => b.relevance_score - a.relevance_score);
+      countriesList.forEach(country => {
+        const meta = countryMeta[country] || { region: 'Unknown', threatLevel: 'Low' };
+        
+        let signals = articleStore.filter(art => {
+          const matchCountry = art.country.toLowerCase() === country.toLowerCase();
+          if (!matchCountry) return false;
+          const artTime = new Date(art.timestamp).getTime();
+          return artTime >= cutoffTime;
+        });
 
-      let operationalSummary = '';
-      if (signals.length === 0) {
-        operationalSummary = 'STATUS: STABLE // NO NEW SIGNAL IN DETECTED WINDOW';
-      } else {
-        operationalSummary = `Ingestion mesh verified. Detected ${signals.length} tactical and strategic border signals in historical monitoring window.`;
-      }
+        if (category !== 'All') {
+          signals = signals.filter(art => art.category === category);
+        }
 
-      results[country] = {
-        region: meta.region,
-        threat_level: meta.threatLevel,
-        last_synced: new Date().toISOString(),
-        operational_summary: operationalSummary,
-        signals: signals,
-        source_status: 'normal'
-      };
-    });
+        signals.sort((a, b) => b.relevance_score - a.relevance_score);
 
-    res.json(results);
+        let operationalSummary = '';
+        if (signals.length === 0) {
+          operationalSummary = 'STATUS: STABLE // NO NEW SIGNAL IN DETECTED WINDOW';
+        } else {
+          operationalSummary = `Ingestion mesh verified. Detected ${signals.length} tactical and strategic border signals in the selected ${timeframe} monitoring window.`;
+        }
+
+        results[country] = {
+          region: meta.region,
+          threat_level: meta.threatLevel,
+          last_synced: new Date().toISOString(),
+          operational_summary: operationalSummary,
+          signals: signals,
+          source_status: 'normal'
+        };
+      });
+
+      return results;
+    }, ttl);
+
+    res.json(result);
   } catch (error) {
     console.error('All countries ingestion failed:', error.message);
     res.status(500).json({ error: 'News ingestion failed' });
   }
+});
+
+// Submit URLs for scraping
+app.post('/api/scrape', async (req, res) => {
+  updateActivity();
+  const { urls, platform } = req.body;
+  
+  if (!urls || !Array.isArray(urls)) {
+    return res.status(400).json({ error: 'URLs array is required' });
+  }
+
+  const selectedPlatform = platform || 'news';
+  try {
+    const jobIds = [];
+    for (const url of urls.slice(0, 5)) {
+      if (url.trim()) {
+        const jobId = await addScrapeJob(url.trim(), selectedPlatform);
+        jobIds.push(jobId);
+      }
+    }
+    res.json({ success: true, jobIds });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Check status of job
+app.get('/api/scrape/status/:jobId', (req, res) => {
+  const status = getJobStatus(req.params.jobId);
+  res.json(status);
 });
 
 // Fallback to React app
@@ -2008,6 +2162,6 @@ setTimeout(() => {
   });
 }, 1000);
 
-app.listen(port, () => {
+server.listen(port, () => {
   console.log(`Secure news service running on http://localhost:${port}`);
 });

@@ -253,3 +253,13 @@ body {
     transform: scale(1.04) translate3d(-1%, 1%, 0);
   }
 }
+
+/* GPU Hardware Compositing Optimization */
+.drishya-world-map-layer,
+.drishya-world-map-image,
+canvas,
+svg {
+  will-change: transform;
+  transform: translate3d(0, 0, 0);
+  backface-visibility: hidden;
+}
