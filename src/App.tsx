@@ -111,7 +111,7 @@ type WorldAlert = {
   timestamp: string;
 };
 
-type PanelView = 'country' | 'worldMap';
+type PanelView = 'country' | 'worldMap' | 'archive' | 'chatFusion';
 
 type WorldMapPan = {
   x: number;
@@ -1762,6 +1762,42 @@ function App() {
                 >
                   Live World Map
                 </button>
+                <button
+                  onClick={() => {
+                    setPanelView('archive');
+                    setIsCountrySelected(false);
+                    setIsWorldMapFullscreen(false);
+                  }}
+                  className={`w-full text-left px-3 py-2 border transition-colors ${
+                    panelView === 'archive'
+                      ? isDarkMode
+                        ? 'bg-white text-black border-white'
+                        : 'bg-black text-white border-black'
+                      : isDarkMode
+                        ? 'border-white/20 hover:bg-white/10'
+                        : 'border-black/20 hover:bg-black/10'
+                  }`}
+                >
+                  OSINT Archives
+                </button>
+                <button
+                  onClick={() => {
+                    setPanelView('chatFusion');
+                    setIsCountrySelected(false);
+                    setIsWorldMapFullscreen(false);
+                  }}
+                  className={`w-full text-left px-3 py-2 border transition-colors ${
+                    panelView === 'chatFusion'
+                      ? isDarkMode
+                        ? 'bg-white text-black border-white'
+                        : 'bg-black text-white border-black'
+                      : isDarkMode
+                        ? 'border-white/20 hover:bg-white/10'
+                        : 'border-black/20 hover:bg-black/10'
+                  }`}
+                >
+                  RAG Chat Fusion
+                </button>
               </div>
             </div>
 
@@ -2025,6 +2061,10 @@ function App() {
                     </div>
                   </div>
                 </>
+              ) : panelView === 'archive' ? (
+                <ArchiveView isDarkMode={isDarkMode} />
+              ) : panelView === 'chatFusion' ? (
+                <LiveChatFusion isDarkMode={isDarkMode} />
               ) : !isCountrySelected ? (
                 <div className="h-full flex items-center justify-center text-center text-white/70">
                   <p className={isDarkMode ? 'text-white/70' : 'text-black/70'}>Select a country to view its latest news categories.</p>
@@ -3347,4 +3387,372 @@ function App() {
   );
 }
 
+// ==========================================
+// DRISHYA 2.0 SUB-COMPONENTS
+// ==========================================
+
+type ArchiveTimeframe = '1M' | '6M' | '1Y';
+
+function ArchiveView({ isDarkMode }: { isDarkMode: boolean }) {
+  const [timeframe, setTimeframe] = useState<ArchiveTimeframe>('1M');
+  const [dept, setDept] = useState<string>('All');
+  const [articles, setArticles] = useState<any[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [summary, setSummary] = useState<string>('');
+  const [summarizing, setSummarizing] = useState(false);
+
+  const depts = [
+    'All',
+    'Military & Defense',
+    'Economic & Financial',
+    'Social Affairs & Welfare',
+    'Political & Diplomatic'
+  ];
+
+  const fetchArchive = async () => {
+    setLoading(true);
+    try {
+      const url = `/api/archive/${timeframe}${dept !== 'All' ? `?department=${encodeURIComponent(dept)}` : ''}`;
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        setArticles(data);
+      }
+    } catch (err) {
+      console.error("[Archive] Fetch failed:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchArchive();
+  }, [timeframe, dept]);
+
+  const handleGenerateSummary = async () => {
+    setSummarizing(true);
+    setSummary('');
+    try {
+      const res = await fetch(`/api/archive/summary/${timeframe}`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        setSummary(data.summary);
+      } else {
+        setSummary("Failed to generate archive summary from the server. Check your LLM API configuration.");
+      }
+    } catch (err) {
+      setSummary("Error connecting to summarizer: " + String(err));
+    } finally {
+      setSummarizing(false);
+    }
+  };
+
+  return (
+    <div className="space-y-6 text-[#d4e4fa]">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-white/20 pb-3 gap-3">
+        <div>
+          <h2 className="text-xl font-bold uppercase tracking-wider text-[#7bd0ff]">OSINT Historical Archives</h2>
+          <p className="text-xs opacity-70 mt-1">Review classified intelligence records and trigger Map-Reduce LLM briefings.</p>
+        </div>
+        <button
+          onClick={handleGenerateSummary}
+          disabled={summarizing || loading}
+          className={`flex items-center gap-2 border px-4 py-2 text-xs font-mono uppercase tracking-wider rounded transition-colors ${
+            summarizing || loading
+              ? 'border-white/10 text-white/40 cursor-not-allowed'
+              : 'border-[#7bd0ff] bg-[#7bd0ff]/10 text-[#7bd0ff] hover:bg-[#7bd0ff]/20'
+          }`}
+        >
+          <span className="material-symbols-outlined text-sm">summarize</span>
+          {summarizing ? 'Analyzing...' : 'Generate Executive Briefing'}
+        </button>
+      </div>
+
+      {/* Timeframe Tabs */}
+      <div className="flex gap-2 border-b border-white/10 pb-2">
+        {(['1M', '6M', '1Y'] as ArchiveTimeframe[]).map((tab) => (
+          <button
+            key={tab}
+            onClick={() => setTimeframe(tab)}
+            className={`px-4 py-1.5 text-xs font-mono rounded border transition-colors ${
+              timeframe === tab
+                ? 'bg-white text-black border-white'
+                : 'border-white/10 hover:bg-white/5'
+            }`}
+          >
+            {tab === '1M' ? '1 Month' : tab === '6M' ? '6 Months' : '1 Year'}
+          </button>
+        ))}
+      </div>
+
+      {/* Department Filter Pills */}
+      <div className="flex flex-wrap gap-2">
+        {depts.map((d) => (
+          <button
+            key={d}
+            onClick={() => setDept(d)}
+            className={`px-3 py-1 text-xs rounded-full border transition-colors ${
+              dept === d
+                ? 'bg-[#7bd0ff] text-black border-[#7bd0ff]'
+                : 'border-white/20 text-[#bec6e0] hover:bg-white/5'
+            }`}
+          >
+            {d}
+          </button>
+        ))}
+      </div>
+
+      {/* Summary Box */}
+      {summary && (
+        <div className="border border-[#7bd0ff]/30 bg-[#122131]/20 p-5 rounded relative overflow-hidden">
+          <div className="scan-line" />
+          <h3 className="text-sm font-mono uppercase tracking-widest text-[#7bd0ff] border-b border-white/10 pb-2 mb-3 flex items-center gap-1.5">
+            <span className="material-symbols-outlined text-base">analytics</span>
+            Map-Reduce Executive Summary
+          </h3>
+          <div className="text-xs leading-relaxed font-mono whitespace-pre-wrap text-[#bec6e0]">
+            {summary}
+          </div>
+        </div>
+      )}
+
+      {/* Articles Feed */}
+      <div className="space-y-4">
+        <h3 className="text-xs uppercase font-mono tracking-widest text-[#7bd0ff]">Archived Incidents ({articles.length})</h3>
+        
+        {loading ? (
+          <div className="space-y-3">
+            {[1, 2, 3].map((n) => (
+              <div key={n} className="h-20 rounded border border-white/10 loading-shimmer-bg" />
+            ))}
+          </div>
+        ) : articles.length === 0 ? (
+          <div className="border border-white/10 p-8 text-center rounded">
+            <span className="material-symbols-outlined text-3xl opacity-50">folder_open</span>
+            <p className="text-sm mt-2 opacity-70">No high impact records match your search filters in this window.</p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {articles.map((art) => (
+              <div key={art.id} className="border border-white/10 bg-[#122131]/10 p-4 rounded hover:border-white/30 transition-colors">
+                <div className="flex justify-between items-start gap-4">
+                  <h4 className="text-sm font-bold text-white hover:text-[#7bd0ff]">
+                    <a href={art.url} target="_blank" rel="noreferrer">{art.title}</a>
+                  </h4>
+                  <span className="text-[10px] font-mono bg-red-950/60 text-red-400 border border-red-900/60 px-2 py-0.5 rounded uppercase">
+                    {art.impact_level}
+                  </span>
+                </div>
+                <p className="text-xs text-[#bec6e0] mt-2 leading-relaxed">{art.summary || art.content}</p>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-3 font-mono text-[10px] opacity-70">
+                  <span>Source: {art.source || 'OSINT'}</span>
+                  <span>Target: {art.country_code}</span>
+                  <span>Dept: {art.department}</span>
+                  <span>Published: {new Date(art.published_at).toLocaleString()}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function LiveChatFusion({ isDarkMode }: { isDarkMode: boolean }) {
+  const [dragOver, setDragOver] = useState(false);
+  const [file, setFile] = useState<File | null>(null);
+  const [progress, setProgress] = useState<'idle' | 'parsing' | 'searching' | 'synthesizing' | 'completed' | 'failed'>('idle');
+  const [result, setResult] = useState<any>(null);
+  const [errorMsg, setErrorMsg] = useState('');
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(true);
+  };
+
+  const handleDragLeave = () => {
+    setDragOver(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      processFile(e.dataTransfer.files[0]);
+    }
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      processFile(e.target.files[0]);
+    }
+  };
+
+  const processFile = async (targetFile: File) => {
+    setFile(targetFile);
+    setProgress('parsing');
+    setErrorMsg('');
+    setResult(null);
+
+    const formData = new FormData();
+    formData.append('file', targetFile);
+
+    try {
+      // Step interval simulation to offer beautiful client UI stepper animations
+      const steps: Array<'parsing' | 'searching' | 'synthesizing'> = ['parsing', 'searching', 'synthesizing'];
+      let current = 0;
+      const interval = setInterval(() => {
+        if (current < 2) {
+          current++;
+          setProgress(steps[current]);
+        } else {
+          clearInterval(interval);
+        }
+      }, 1500);
+
+      const res = await fetch('/api/chat/fusion', {
+        method: 'POST',
+        body: formData
+      });
+
+      clearInterval(interval);
+
+      if (!res.ok) {
+        throw new Error(`Server returned status code: ${res.status}`);
+      }
+
+      const data = await res.json();
+      setResult(data);
+      setProgress('completed');
+    } catch (err) {
+      console.error("[Fusion] Upload error:", err);
+      setErrorMsg(String(err));
+      setProgress('failed');
+    }
+  };
+
+  return (
+    <div className="space-y-6 text-[#d4e4fa]">
+      <div>
+        <h2 className="text-xl font-bold uppercase tracking-wider text-[#7bd0ff]">Interactive RAG Chat Fusion</h2>
+        <p className="text-xs opacity-70 mt-1">Upload reports (.pdf, .docx, .txt) to cross-reference user data with live intelligence channels.</p>
+      </div>
+
+      {/* Drag & Drop Area */}
+      <div
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+        className={`border-2 border-dashed rounded-lg p-8 text-center transition-all ${
+          dragOver
+            ? 'border-[#7bd0ff] bg-[#7bd0ff]/10'
+            : 'border-white/20 bg-[#122131]/10 hover:border-white/40'
+        }`}
+      >
+        <span className="material-symbols-outlined text-4xl text-[#7bd0ff] opacity-80">cloud_upload</span>
+        <p className="text-sm mt-3 font-semibold">Drag and drop document here</p>
+        <p className="text-xs opacity-60 mt-1">Supports PDF, DOCX, or Text up to 10MB</p>
+        
+        <div className="mt-4">
+          <label className="cursor-pointer border border-white/20 bg-white/5 hover:bg-white/10 px-4 py-2 rounded text-xs font-mono uppercase tracking-wider transition-colors inline-block">
+            Choose File
+            <input type="file" onChange={handleFileChange} className="hidden" accept=".pdf,.docx,.txt" />
+          </label>
+        </div>
+      </div>
+
+      {file && (
+        <div className="border border-white/10 p-4 rounded bg-[#122131]/5 flex justify-between items-center text-xs">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-base">description</span>
+            <span className="font-mono font-bold truncate max-w-xs">{file.name}</span>
+            <span className="opacity-60">({(file.size / 1024).toFixed(1)} KB)</span>
+          </div>
+          <span className="text-[10px] font-mono uppercase text-[#7bd0ff]">Loaded</span>
+        </div>
+      )}
+
+      {/* Multi-stage Progress Stepper */}
+      {progress !== 'idle' && (
+        <div className="border border-white/10 p-5 rounded space-y-4">
+          <h3 className="text-xs font-mono uppercase tracking-widest text-[#7bd0ff]">Fusion Pipeline Status</h3>
+          
+          <div className="grid grid-cols-3 gap-2 text-center text-[10px] font-mono tracking-wider">
+            {/* Step 1: Parsing */}
+            <div className={`p-2 rounded border transition-colors ${
+              progress === 'parsing' ? 'border-[#7bd0ff] bg-[#7bd0ff]/10 text-white' :
+              ['searching', 'synthesizing', 'completed'].includes(progress) ? 'border-green-500/30 text-green-400' : 'border-white/10 opacity-50'
+            }`}>
+              1. PARSING DOC
+            </div>
+
+            {/* Step 2: Searching */}
+            <div className={`p-2 rounded border transition-colors ${
+              progress === 'searching' ? 'border-[#7bd0ff] bg-[#7bd0ff]/10 text-white' :
+              ['synthesizing', 'completed'].includes(progress) ? 'border-green-500/30 text-green-400' : 'border-white/10 opacity-50'
+            }`}>
+              2. VECTOR MATCH
+            </div>
+
+            {/* Step 3: Synthesizing */}
+            <div className={`p-2 rounded border transition-colors ${
+              progress === 'synthesizing' ? 'border-[#7bd0ff] bg-[#7bd0ff]/10 text-white' :
+              progress === 'completed' ? 'border-green-500/30 text-green-400' : 'border-white/10 opacity-50'
+            }`}>
+              3. SYNTHESIZING
+            </div>
+          </div>
+
+          {progress === 'failed' && (
+            <div className="p-3 border border-red-500/30 bg-red-950/20 rounded text-xs text-red-400 font-mono">
+              Pipeline Error: {errorMsg}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Results Markdown Panel */}
+      {result && (
+        <div className="space-y-6">
+          <div className="border border-green-500/20 bg-[#122131]/30 p-5 rounded relative overflow-hidden">
+            <div className="scan-line" />
+            <h3 className="text-sm font-mono uppercase tracking-widest text-green-400 border-b border-white/10 pb-2 mb-3 flex items-center gap-1.5">
+              <span className="material-symbols-outlined text-base">check_circle</span>
+              Fused OSINT Intelligence Briefing
+            </h3>
+            
+            <div className="text-xs leading-relaxed font-mono whitespace-pre-wrap text-[#bec6e0]">
+              {result.summary}
+            </div>
+          </div>
+
+          {/* Connected Articles */}
+          <div className="space-y-3">
+            <h4 className="text-xs font-mono uppercase tracking-widest text-[#7bd0ff]">Retrieved Reference Feeds</h4>
+            {result.relevant_articles.map((art: any, index: number) => (
+              <a
+                key={art.id}
+                href={art.url}
+                target="_blank"
+                rel="noreferrer"
+                className="block border border-white/10 hover:border-white/30 bg-[#122131]/10 p-3 rounded text-xs transition-colors"
+              >
+                <div className="flex justify-between items-center">
+                  <span className="font-bold text-white">[{index + 1}] {art.title}</span>
+                  <span className="text-[9px] font-mono text-[#7bd0ff]">{art.department}</span>
+                </div>
+                <div className="mt-1 text-[10px] opacity-60 font-mono">
+                  Source: {art.source} • Target: {art.country_code} • Published: {new Date(art.published_at).toLocaleString()}
+                </div>
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default App;
+

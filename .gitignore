@@ -9,3 +9,14 @@ dist/
 .env.local
 .env.*.local
 nr.env
+
+# SQLite local databases
+data/
+*.db
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Temporary scratch directories
+scratch/
