@@ -1,0 +1,46 @@
+services:
+  - type: web_service
+    name: drishya-web
+    env: docker
+    branch: main
+    dockerfilePath: Dockerfile.backend
+    startCommand: sh -c "uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT:-3001}"
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: DATABASE_URL
+        value: ""
+      - key: REDIS_URL
+        value: ""
+      - key: OPENAI_API_KEY
+        value: ""
+      - key: GOOGLE_API_KEY
+        value: ""
+      - key: NEWSAPI_KEY
+        value: ""
+      - key: WORLD_NEWS_API_KEY
+        value: ""
+      - key: NEWSDATA_API_KEY
+        value: ""
+      - key: FINNHUB_API_KEY
+        value: ""
+      - key: GNEWS_API_KEY
+        value: ""
+      - key: CURRENTS_API_KEY
+        value: ""
+      - key: THENEWS_API_KEY
+        value: ""
+      - key: MEDIASTACK_API_KEY
+        value: ""
+      - key: NEWSCATCHER_API_KEY
+        value: ""
+      - key: BING_NEWS_API_KEY
+        value: ""
+      - key: OLLAMA_BASE_URL
+        value: ""
+      - key: LLM_PROVIDER
+        value: ""
+      - key: LLM_MODEL
+        value: ""
+      - key: S3_BUCKET_NAME
+        value: drishya-uploads

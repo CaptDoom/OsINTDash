@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { WorldGeoMap, type WorldGeoMapMarker } from './components/WorldGeoMap';
+import worldCountries from 'world-countries';
 
 type TimeWindow = '1h' | '1d' | '1w' | '1m';
 type Category = 'Political' | 'Social' | 'Tech' | 'Economic' | 'Military';
@@ -418,6 +419,8 @@ function App() {
   // 1. Core States
   const [timeWindow, setTimeWindow] = useState<TimeWindow>('1d');
   const [selectedCountry, setSelectedCountry] = useState<Country>(countries[0]);
+  const [customCountries, setCustomCountries] = useState<Country[]>([]);
+  const [countrySearchQuery, setCountrySearchQuery] = useState('');
   const [newsFeed, setNewsFeed] = useState<Record<string, CountryIntel>>({});
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -461,6 +464,102 @@ function App() {
   const newsAutoRefreshMs = timeWindow === '1h' ? 30000 : 120000;
   const newsAutoRefreshSeconds = timeWindow === '1h' ? 30 : 120;
   const [countdown, setCountdown] = useState(newsAutoRefreshSeconds);
+
+  const filteredSearchCountries = useMemo(() => {
+    if (!countrySearchQuery.trim()) return [];
+    const q = countrySearchQuery.toLowerCase();
+    return (worldCountries as any[])
+      .map((c) => ({
+        name: c.name.common,
+        cca2: c.cca2
+      }))
+      .filter((c) => c.name.toLowerCase().includes(q) || c.cca2.toLowerCase().includes(q))
+      .slice(0, 15);
+  }, [countrySearchQuery]);
+
+  const handleMapCountryClick = (countryName: string, countryCode: string) => {
+    const existing = countries.find(c => c.name.toLowerCase() === countryName.toLowerCase());
+    if (existing) {
+      setSelectedCountry(existing);
+      setPanelView('country');
+      setIsCountrySelected(true);
+      return;
+    }
+
+    const customExisting = customCountries.find(c => c.name.toLowerCase() === countryName.toLowerCase());
+    if (customExisting) {
+      setSelectedCountry(customExisting);
+      setPanelView('country');
+      setIsCountrySelected(true);
+      return;
+    }
+
+    const match = (worldCountries as any[]).find((c: any) => c.name.common.toLowerCase() === countryName.toLowerCase() || c.cca2.toLowerCase() === countryCode.toLowerCase());
+    
+    if (match) {
+      const lat = match.latlng?.[0] ?? 0;
+      const lon = match.latlng?.[1] ?? 0;
+      
+      const dynamicCountry: Country = {
+        id: match.cca2.toLowerCase(),
+        name: match.name.common,
+        capital: match.capital?.[0] || 'Unknown',
+        borderKm: Math.round(match.area),
+        region: match.region || 'Global',
+        coordinates: `${Math.abs(lat).toFixed(4)}° ${lat >= 0 ? 'N' : 'S'}, ${Math.abs(lon).toFixed(4)}° ${lon >= 0 ? 'E' : 'W'}`,
+        summary: `Real-time intelligence and telemetry for ${match.name.common}.`,
+        threatLevel: 'Moderate',
+        stabilityIndex: 0.80,
+        riskProbability: 20.00,
+        categories: {
+          Political: { title: 'Political status', summary: `Standard monitoring of political signals for ${match.name.common}.`, impact: 'Low', signal: 'Standard telemetry' },
+          Social: { title: 'Social conditions', summary: `Monitoring civilian and social indices for ${match.name.common}.`, impact: 'Low', signal: 'Standard telemetry' },
+          Tech: { title: 'Technology & Cyber', summary: `Cyber and digital infrastructure monitoring for ${match.name.common}.`, impact: 'Low', signal: 'Standard telemetry' },
+          Economic: { title: 'Economic indicator', summary: `Trade activity and economic monitoring for ${match.name.common}.`, impact: 'Low', signal: 'Standard telemetry' },
+          Military: { title: 'Security posture', summary: `Border security and defense monitoring for ${match.name.common}.`, impact: 'Low', signal: 'Standard telemetry' },
+        }
+      };
+
+      setCustomCountries(prev => [...prev, dynamicCountry]);
+      setSelectedCountry(dynamicCountry);
+      setPanelView('country');
+      setIsCountrySelected(true);
+    }
+  };
+
+  useEffect(() => {
+    if (!authUser || !selectedCountry) return;
+    
+    if (!newsFeed[selectedCountry.name]) {
+      async function fetchCountryNews() {
+        try {
+          const cca2 = selectedCountry.id.toUpperCase();
+          const response = await fetch(`/api/news/country?name=${encodeURIComponent(selectedCountry.name)}&code=${cca2}`);
+          if (response.ok) {
+            const data = await response.json();
+            const trustLevels = ['Verified Source', 'Developing', 'Unverified', 'Rumor'];
+            const formattedSignals = (data.signals || []).map((s: any, idx: number) => ({
+              ...s,
+              id: `${selectedCountry.name}-${idx}-${s.timestamp}`,
+              trust: trustLevels[idx % trustLevels.length],
+              country: selectedCountry.name
+            }));
+            
+            setNewsFeed(prev => ({
+              ...prev,
+              [selectedCountry.name]: {
+                ...data,
+                signals: formattedSignals
+              }
+            }));
+          }
+        } catch (err) {
+          console.error("Failed to fetch country news:", err);
+        }
+      }
+      void fetchCountryNews();
+    }
+  }, [authUser, selectedCountry, newsFeed]);
 
   // 7. WebSocket Listener Effect
   useEffect(() => {
@@ -1441,7 +1540,18 @@ function App() {
 
   if (authUser) {
     const categoriesForView: Category[] = ['Political', 'Social', 'Tech', 'Military', 'Economic'];
-    const currentCategoryData = selectedCountry.categories[selectedCategory];
+    const briefingSignals = (newsFeed[selectedCountry.name]?.signals || [])
+      .filter((s) => s.category === selectedCategory);
+    
+    const currentCategoryData = briefingSignals.length > 0
+      ? {
+          title: briefingSignals[0].headline,
+          summary: briefingSignals[0].summary,
+          impact: briefingSignals[0].impact,
+          signal: briefingSignals[0].source
+        }
+      : selectedCountry.categories[selectedCategory];
+
     const latestCountrySignal = effectiveLatestSignal;
     const sourceLabel = latestCountrySignal?.headline || `${selectedCountry.name} ${selectedCategory} news`;
     const sourceUrl = latestCountrySignal
@@ -1716,34 +1826,92 @@ function App() {
           </div>
 
           <div className="grid gap-6 md:grid-cols-[280px_minmax(0,1fr)]">
-            <div className="border border-white/20 rounded p-4">
-              <h2 className={`text-xs uppercase tracking-[0.3em] mb-4 ${isDarkMode ? 'text-white/60' : 'text-black/60'}`}>Countries</h2>
-              <div className="space-y-2">
-                {countries.map((country) => {
-                  const isActive = selectedCountry.id === country.id;
-                  return (
+            <div className="border border-white/20 rounded p-4 flex flex-col gap-4">
+              <div>
+                <h2 className={`text-xs uppercase tracking-[0.3em] mb-4 ${isDarkMode ? 'text-white/60' : 'text-black/60'}`}>Countries</h2>
+                
+                {/* Search box for any country */}
+                <div className="relative mb-4 z-50">
+                  <input
+                    type="text"
+                    placeholder="Search country..."
+                    value={countrySearchQuery}
+                    onChange={(e) => setCountrySearchQuery(e.target.value)}
+                    className={`w-full bg-[#071424] border hover:border-[#00e5ff]/50 focus:border-[#00e5ff] focus:outline-none px-3 py-2 text-xs font-mono tracking-wider rounded transition-colors ${
+                      isDarkMode ? 'border-white/20 text-white placeholder-white/40' : 'border-black/20 text-black placeholder-black/40'
+                    }`}
+                  />
+                  {countrySearchQuery && (
                     <button
-                      key={country.id}
-                      onClick={() => {
-                        setPanelView('country');
-                        setSelectedCountry(country);
-                        setSelectedCategory('Political');
-                        setIsCountrySelected(true);
-                      }}
-                      className={`w-full text-left px-3 py-2 border transition-colors ${
-                        isActive
-                          ? isDarkMode
-                            ? 'bg-white text-black border-white'
-                            : 'bg-black text-white border-black'
-                          : isDarkMode
-                            ? 'border-white/20 hover:bg-white/10'
-                            : 'border-black/20 hover:bg-black/10'
-                      }`}
+                      onClick={() => setCountrySearchQuery('')}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-white/60 hover:text-[#00e5ff] text-sm"
                     >
-                      {country.name}
+                      ×
                     </button>
-                  );
-                })}
+                  )}
+                  {/* Search Results Dropdown overlay */}
+                  {countrySearchQuery && filteredSearchCountries.length > 0 && (
+                    <div className={`absolute left-0 right-0 mt-1 border rounded max-h-48 overflow-y-auto z-[60] shadow-2xl ${
+                      isDarkMode ? 'bg-[#050e18] border-white/20' : 'bg-white border-black/20'
+                    }`}>
+                      {filteredSearchCountries.map((c) => (
+                        <button
+                          key={c.cca2}
+                          onClick={() => {
+                            handleMapCountryClick(c.name, c.cca2);
+                            setCountrySearchQuery('');
+                          }}
+                          className={`w-full text-left px-3 py-2 text-xs font-mono border-b transition-colors uppercase ${
+                            isDarkMode ? 'text-white/80 hover:text-white hover:bg-white/10 border-white/10' : 'text-black/80 hover:text-black hover:bg-black/10 border-black/10'
+                          }`}
+                        >
+                          {c.name} ({c.cca2})
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
+                  {[...countries, ...customCountries].map((country) => {
+                    const isActive = selectedCountry.id === country.id;
+                    const threat = newsFeed[country.name]?.threat_level || country.threatLevel;
+                    return (
+                      <button
+                        key={country.id}
+                        onClick={() => {
+                          setPanelView('country');
+                          setSelectedCountry(country);
+                          setSelectedCategory('Political');
+                          setIsCountrySelected(true);
+                        }}
+                        className={`w-full text-left px-3 py-2 border transition-colors flex justify-between items-center ${
+                          isActive
+                            ? isDarkMode
+                              ? 'bg-white text-black border-white'
+                              : 'bg-black text-white border-black'
+                            : isDarkMode
+                              ? 'border-white/20 hover:bg-white/10 text-white/85'
+                              : 'border-black/20 hover:bg-black/10 text-black/85'
+                        }`}
+                      >
+                        <span>{country.name}</span>
+                        <span className={`text-[9px] px-1 py-0.5 rounded font-mono font-bold ${
+                          threat === 'Critical' ? 'bg-red-500/20 text-red-400' :
+                          threat === 'High' ? 'bg-orange-500/20 text-orange-400' :
+                          threat === 'Moderate' ? 'bg-yellow-500/20 text-yellow-400' :
+                          'bg-green-500/20 text-green-400'
+                        }`}>
+                          {threat.toUpperCase()}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Navigation buttons */}
+              <div className="space-y-2 pt-4 border-t border-white/10">
                 <button
                   onClick={() => {
                     setPanelView('worldMap');
@@ -1907,6 +2075,8 @@ function App() {
                       zoom={worldMapZoom}
                       panX={worldMapPan.x}
                       panY={worldMapPan.y}
+                      selectedCountryName={selectedCountry.name}
+                      onCountryClick={handleMapCountryClick}
                       className="absolute inset-0 h-full w-full opacity-95"
                     />
 
@@ -2025,6 +2195,8 @@ function App() {
                       zoom={worldMapZoom}
                       panX={worldMapPan.x}
                       panY={worldMapPan.y}
+                      selectedCountryName={selectedCountry.name}
+                      onCountryClick={handleMapCountryClick}
                       className="absolute inset-0 h-full w-full opacity-95"
                     />
                     {worldAlertsLoading && (
@@ -2119,7 +2291,20 @@ function App() {
                     <div className="flex items-center justify-between gap-3 mb-3">
                       <div>
                         <p className={`text-xs uppercase tracking-[0.3em] ${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>Latest live report</p>
-                        <h4 className="text-base font-semibold mt-1">{effectiveLatestSignal?.headline || 'Refreshing from live sources...'}</h4>
+                        <h4 className="text-base font-semibold mt-1">
+                          {effectiveLatestSignal ? (
+                            <a
+                              href={effectiveLatestSignal.url || buildSourceSearchUrl(effectiveLatestSignal.headline, selectedCountry.name)}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="hover:underline hover:text-[#7bd0ff] transition-colors"
+                            >
+                              {effectiveLatestSignal.headline}
+                            </a>
+                          ) : (
+                            'Refreshing from live sources...'
+                          )}
+                        </h4>
                         <p className={`mt-1 text-xs ${isDarkMode ? 'text-white/60' : 'text-black/60'}`}>{refreshStatusLabel} • auto-check every 2 min</p>
                       </div>
                       <div className={`flex rounded border overflow-hidden ${isDarkMode ? 'border-white/20' : 'border-black/20'}`}>
@@ -2864,7 +3049,20 @@ function App() {
                   <div className="flex items-center justify-between gap-3 mb-3">
                     <div>
                       <p className="text-[10px] font-mono uppercase tracking-widest text-[#7bd0ff]">Latest live report</p>
-                      <h3 className="text-sm font-bold text-[#d4e4fa] mt-1">{effectiveLatestSignal?.headline || 'Refreshing from live sources...'}</h3>
+                      <h3 className="text-sm font-bold text-[#d4e4fa] mt-1">
+                        {effectiveLatestSignal ? (
+                          <a
+                            href={effectiveLatestSignal.url || buildSourceSearchUrl(effectiveLatestSignal.headline, selectedCountry.name)}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="hover:underline hover:text-[#7bd0ff] transition-colors"
+                          >
+                            {effectiveLatestSignal.headline}
+                          </a>
+                        ) : (
+                          'Refreshing from live sources...'
+                        )}
+                      </h3>
                     </div>
                     <div className="flex rounded border border-[#45464d] overflow-hidden">
                       <button
@@ -2989,7 +3187,15 @@ function App() {
                                           [BREAKING]
                                         </span>
                                       )}
-                                      {renderHeadlineWithEntityTooltips(sig.headline)}
+                                      <a
+                                        href={sig.url || buildSourceSearchUrl(sig.headline, selectedCountry.name)}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="hover:underline"
+                                      >
+                                        {renderHeadlineWithEntityTooltips(sig.headline)}
+                                      </a>
                                     </h4>
                                     <div className="flex justify-between items-center text-[9px] font-mono uppercase">
                                       <span className="text-[#4edea3] font-bold">{sig.trust}</span>
@@ -3056,7 +3262,14 @@ function App() {
                               [BREAKING ALERT]
                             </span>
                           )}
-                          {renderHeadlineWithEntityTooltips(sig.headline)}
+                          <a
+                            href={sig.url || buildSourceSearchUrl(sig.headline, selectedCountry.name)}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="hover:underline hover:text-[#7bd0ff] transition-colors"
+                          >
+                            {renderHeadlineWithEntityTooltips(sig.headline)}
+                          </a>
                         </h3>
                         <p className="text-xs text-[#c6c6cd] leading-normal">{sig.summary}</p>
                         <div className="flex justify-between items-center text-[9px] font-mono">
@@ -3098,7 +3311,14 @@ function App() {
                                 [BREAKING]
                               </span>
                             )}
-                            {renderHeadlineWithEntityTooltips(sig.headline)}
+                            <a
+                              href={sig.url || buildSourceSearchUrl(sig.headline, selectedCountry.name)}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="hover:underline hover:text-[#7bd0ff] transition-colors"
+                            >
+                              {renderHeadlineWithEntityTooltips(sig.headline)}
+                            </a>
                           </h3>
                           <p className="text-[11px] text-[#c6c6cd] line-clamp-3 leading-relaxed">{sig.summary}</p>
                         </div>
@@ -3149,7 +3369,14 @@ function App() {
                           [BREAKING]
                         </span>
                       )}
-                      {selectedDossierSignal.headline}
+                      <a
+                        href={selectedDossierSignal.url || buildSourceSearchUrl(selectedDossierSignal.headline, selectedCountry.name)}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="hover:underline hover:text-[#7bd0ff] transition-colors"
+                      >
+                        {selectedDossierSignal.headline}
+                      </a>
                     </h2>
                     <p className="text-[10px] text-[#c6c6cd]">
                       Ingestion Epoch: {new Date(selectedDossierSignal.timestamp).toLocaleString()}
@@ -3300,6 +3527,14 @@ function App() {
                   <div className="flex justify-between items-center">
                     <span className="text-[#c6c6cd]">RISK PROBABILITY</span>
                     <span className="text-[#ffb4ab] font-bold text-sm">{(selectedCountry.riskProbability).toFixed(2)}%</span>
+                  </div>
+                  <div className="flex justify-between items-center">
+                    <span className="text-[#c6c6cd]">THREAT LEVEL</span>
+                    <span className={`font-bold text-sm ${
+                      (newsFeed[selectedCountry.name]?.threat_level || selectedCountry.threatLevel) === 'Critical' || (newsFeed[selectedCountry.name]?.threat_level || selectedCountry.threatLevel) === 'High' ? 'text-red-400' : 'text-yellow-400'
+                    }`}>
+                      {(newsFeed[selectedCountry.name]?.threat_level || selectedCountry.threatLevel).toUpperCase()}
+                    </span>
                   </div>
                 </div>
               </div>

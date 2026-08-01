@@ -7,6 +7,7 @@
     "dev": "concurrently -k \"npm run dev:server\" \"npm run dev:web\"",
     "dev:web": "vite --host 0.0.0.0 --port 3000",
     "dev:server": "python backend/run.py",
+    "dev:worker": "python backend/run_worker.py",
     "build": "tsc -b && vite build",
     "preview": "vite preview"
   },

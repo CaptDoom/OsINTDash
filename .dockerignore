@@ -1,0 +1,16 @@
+node_modules
+dist
+data
+scratch
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+.env
+.env.local
+.dockerignore
+.git
+.gitignore
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

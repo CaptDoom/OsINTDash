@@ -7,8 +7,9 @@ A high-performance news and tactical telemetry intelligence dashboard monitoring
 ## 1. System Architecture
 
 The application is structured as a decoupled web application comprising:
-1. **Express Ingestion Backend**: A background caching poller that aggregates geopolitical border signals from NewsAPI, GDELT, and multilingual RSS feeds, serving them via REST and Server-Sent Events (SSE).
+1. **FastAPI Ingestion Backend**: A Python backend that aggregates geopolitical border signals from NewsAPI, RSS feeds, and global wire sources, serving them via REST and WebSockets.
 2. **React/TypeScript Frontend**: A visual telemetry dashboard styled with CSS and Material Symbols, displaying dossiers, interactive gauges, and real-time alerts.
+3. **Docker Compose Deployment**: Backend, frontend, PostgreSQL with pgvector, and Redis services are orchestrated together for reproducible local deployment.
 
 ```mermaid
 graph TD
@@ -100,4 +101,17 @@ To build and bundle the project files:
 ```bash
 npm run build
 ```
-The compiled assets will be served statically by the Express backend.
+The compiled assets can be served statically by the backend in Docker or by the frontend Nginx container.
+
+### Render Deployment
+This repository includes a `render.yaml` configuration for Render.com.
+
+- Use the `Dockerfile.backend` service in Render to build both the frontend and backend assets in one container.
+- Set `DATABASE_URL` and `REDIS_URL` using Render managed services.
+- Deploy with the start command:
+
+```bash
+sh -c "uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT:-3001}"
+```
+
+Render deployment uses the backend service to serve the React app assets and API from the same container.

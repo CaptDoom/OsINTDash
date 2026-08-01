@@ -40,13 +40,19 @@ class JSONVector(TypeDecorator):
             except Exception:
                 return None
 
-# Dynamic detection of pgvector
-DATABASE_IS_POSTGRES = settings.DATABASE_URL.startswith("postgresql")
+# Normalize database URLs for async SQLAlchemy compatibility
+database_url = settings.database_url or ""
+if database_url.startswith("postgres://"):
+    database_url = database_url.replace("postgres://", "postgresql+asyncpg://", 1)
+
+# Dynamic detection of pgvector capability
+DATABASE_IS_POSTGRES = database_url.startswith("postgresql+asyncpg://")
 
 try:
     if DATABASE_IS_POSTGRES:
         from pgvector.sqlalchemy import Vector
-        VectorType = Vector(1536)
+
+        VectorType = Vector(settings.embedding_dimensions)
         logger.info("[Database] Using pgvector for database embeddings.")
     else:
         VectorType = JSONVector()
@@ -89,11 +95,13 @@ SessionLocal = None
 async def init_db_engine():
     global engine, SessionLocal
     
+    db_url = database_url
+
     # Try Postgres
     if DATABASE_IS_POSTGRES:
         try:
-            logger.info(f"[Database] Attempting connection to PostgreSQL at {settings.DATABASE_URL.split('@')[-1]}")
-            engine = create_async_engine(settings.DATABASE_URL, echo=False)
+            logger.info(f"[Database] Attempting connection to PostgreSQL at {db_url.split('@')[-1]}")
+            engine = create_async_engine(db_url, echo=False)
             # Try to connect
             async with engine.connect() as conn:
                 await conn.execute(select(1))
@@ -104,7 +112,7 @@ async def init_db_engine():
             logger.warning(f"[Database] PostgreSQL connection failed: {e}. Falling back to SQLite.")
 
     # SQLite fallback
-    sqlite_path = settings.SQLITE_URL
+    sqlite_path = settings.sqlite_url
     logger.info(f"[Database] Initializing SQLite local fallback at {sqlite_path}")
     engine = create_async_engine(sqlite_path, echo=False)
     SessionLocal = async_sessionmaker(autocommit=False, autoflush=False, bind=engine, class_=AsyncSession)

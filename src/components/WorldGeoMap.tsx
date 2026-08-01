@@ -13,6 +13,7 @@ export type WorldGeoMapMarker = {
   headline: string;
   source: string;
   url: string;
+  summary?: string;
 };
 
 type WorldGeoMapProps = {
@@ -24,11 +25,14 @@ type WorldGeoMapProps = {
   panX?: number;
   panY?: number;
   fitMode?: 'meet' | 'slice';
+  selectedCountryName?: string;
+  onCountryClick?: (name: string, code: string) => void;
 };
 
 type CountryHoverMeta = {
   name: string;
   capital: string;
+  cca2: string;
 };
 
 export function WorldGeoMap({
@@ -40,6 +44,8 @@ export function WorldGeoMap({
   panX = 0,
   panY = 0,
   fitMode = 'meet',
+  selectedCountryName,
+  onCountryClick,
 }: WorldGeoMapProps) {
   const { countryPaths, markerPoints } = useMemo(() => {
     const countriesGeoJson = feature(
@@ -48,12 +54,13 @@ export function WorldGeoMap({
     ) as any;
 
     const countryMetaByNumericCode = new Map<string, CountryHoverMeta>();
-    (worldCountries as Array<{ ccn3?: string; name?: { common?: string }; capital?: string[] }>).forEach((country) => {
+    (worldCountries as Array<{ ccn3?: string; cca2?: string; name?: { common?: string }; capital?: string[] }>).forEach((country) => {
       const code = country.ccn3?.padStart(3, '0');
       if (!code) return;
       countryMetaByNumericCode.set(code, {
         name: country.name?.common || 'Unknown country',
         capital: country.capital?.[0] || 'Capital unavailable',
+        cca2: country.cca2 || '',
       });
     });
 
@@ -66,7 +73,7 @@ export function WorldGeoMap({
         const path = pathGenerator(item as never);
         if (!path) return null;
         const code = String(featureItem.id ?? '').padStart(3, '0');
-        const meta = countryMetaByNumericCode.get(code) || { name: 'Unknown country', capital: 'Capital unavailable' };
+        const meta = countryMetaByNumericCode.get(code) || { name: 'Unknown country', capital: 'Capital unavailable', cca2: '' };
         return { id: `country-${index}`, d: path, meta };
       })
       .filter((item: { id: string; d: string; meta: CountryHoverMeta } | null): item is { id: string; d: string; meta: CountryHoverMeta } => Boolean(item));
@@ -98,11 +105,30 @@ export function WorldGeoMap({
     >
       <rect x="0" y="0" width="1200" height="620" fill="transparent" />
       <g transform={`translate(${panX} ${panY}) translate(600 310) scale(${zoom}) translate(-600 -310)`}>
-        {countryPaths.map((country: { id: string; d: string; meta: CountryHoverMeta }) => (
-          <path key={country.id} d={country.d} fill="rgba(170, 198, 222, 0.35)" stroke="rgba(214, 231, 245, 0.75)" strokeWidth="0.8">
-            <title>{`${country.meta.name} - Capital: ${country.meta.capital}`}</title>
-          </path>
-        ))}
+        {countryPaths.map((country: { id: string; d: string; meta: CountryHoverMeta }) => {
+          const isSelected = selectedCountryName && country.meta.name.toLowerCase() === selectedCountryName.toLowerCase();
+          return (
+            <path
+              key={country.id}
+              d={country.d}
+              fill={isSelected ? "rgba(0, 229, 255, 0.45)" : "rgba(170, 198, 222, 0.25)"}
+              stroke={isSelected ? "#00e5ff" : "rgba(214, 231, 245, 0.75)"}
+              strokeWidth={isSelected ? 1.5 : 0.8}
+              onClick={() => {
+                if (interactive && onCountryClick && country.meta.name !== 'Unknown country') {
+                  onCountryClick(country.meta.name, country.meta.cca2);
+                }
+              }}
+              style={{
+                cursor: (interactive && country.meta.name !== 'Unknown country') ? 'pointer' : 'default',
+                transition: 'fill 0.2s, stroke 0.2s'
+              }}
+              className="hover:fill-[#00e5ff]/20"
+            >
+              <title>{`${country.meta.name} - Capital: ${country.meta.capital}`}</title>
+            </path>
+          );
+        })}
 
         {showMarkers &&
           markerPoints.map(({ marker, x, y }) => {

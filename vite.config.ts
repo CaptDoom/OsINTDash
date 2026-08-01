@@ -13,4 +13,25 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    chunkSizeWarningLimit: 900,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules')) {
+            if (id.includes('react')) {
+              return 'vendor-react';
+            }
+            if (id.includes('d3-geo') || id.includes('topojson-client') || id.includes('world-atlas') || id.includes('world-countries')) {
+              return 'vendor-geo';
+            }
+            if (id.includes('cheerio') || id.includes('jsdom') || id.includes('@mozilla/readability')) {
+              return 'vendor-parser';
+            }
+            return 'vendor';
+          }
+        },
+      },
+    },
+  },
 });
