@@ -113,10 +113,15 @@ async def seed_data_if_empty(session: AsyncSession):
     # Check if empty
     result = await session.execute(select(func.count(Article.id)))
     count = result.scalar()
-    if count >= 50:
+    if count >= 350:
         return
         
-    logger.info("[Database] Seeding database with high impact realistic articles...")
+    logger.info("[Database] Seeding database with high density high impact realistic articles...")
+    
+    # Delete old seeding to ensure clean, high-density data without duplicate key errors
+    from sqlalchemy import delete
+    await session.execute(delete(Article))
+    await session.commit()
     
     countries_list = ["China", "Pakistan", "Afghanistan", "Bangladesh", "Myanmar", "Nepal", "Bhutan", "Sri Lanka", "Maldives"]
     departments = ["Military & Defense", "Economic & Financial", "Social Affairs & Welfare", "Political & Diplomatic"]
@@ -161,10 +166,11 @@ async def seed_data_if_empty(session: AsyncSession):
     for country in countries_list:
         cc = country_codes.get(country, "GL")
         for dept in departments:
-            # Create 3 unique articles per department
+            # Create 10 unique articles per department
             title_templates = templates[dept]
-            for i, temp in enumerate(title_templates[:3]):
-                title = temp.format(country=country) + f" (Alert #{random.randint(100, 999)})"
+            for i in range(10):
+                temp = title_templates[i % len(title_templates)]
+                title = temp.format(country=country) + f" (Intel Alert #{100 + i * 17 + random.randint(1, 9)})"
                 content = (
                     f"Factual intelligence report detailing operational telemetry sweeps near the {country} frontier. "
                     f"Command reports high-readiness posture. Incident remains active under surveillance. "

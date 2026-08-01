@@ -933,7 +933,7 @@ function App() {
   const pastNewsSignals = categoryNewsSignals.filter((signal) => {
     const signalKey = signal.id || signal.timestamp;
     if (latestSignalKey && signalKey === latestSignalKey) return false;
-    return signal.impact === 'High';
+    return true;
   });
 
   const selectedSignalTimeline = useMemo(() => {
@@ -2062,9 +2062,9 @@ function App() {
                   </div>
                 </>
               ) : panelView === 'archive' ? (
-                <ArchiveView isDarkMode={isDarkMode} />
+                <ArchiveView />
               ) : panelView === 'chatFusion' ? (
-                <LiveChatFusion isDarkMode={isDarkMode} />
+                <LiveChatFusion />
               ) : !isCountrySelected ? (
                 <div className="h-full flex items-center justify-center text-center text-white/70">
                   <p className={isDarkMode ? 'text-white/70' : 'text-black/70'}>Select a country to view its latest news categories.</p>
@@ -3393,7 +3393,7 @@ function App() {
 
 type ArchiveTimeframe = '1M' | '6M' | '1Y';
 
-function ArchiveView({ isDarkMode }: { isDarkMode: boolean }) {
+function ArchiveView() {
   const [timeframe, setTimeframe] = useState<ArchiveTimeframe>('1M');
   const [dept, setDept] = useState<string>('All');
   const [articles, setArticles] = useState<any[]>([]);
@@ -3559,7 +3559,7 @@ function ArchiveView({ isDarkMode }: { isDarkMode: boolean }) {
   );
 }
 
-function LiveChatFusion({ isDarkMode }: { isDarkMode: boolean }) {
+function LiveChatFusion() {
   const [dragOver, setDragOver] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [progress, setProgress] = useState<'idle' | 'parsing' | 'searching' | 'synthesizing' | 'completed' | 'failed'>('idle');

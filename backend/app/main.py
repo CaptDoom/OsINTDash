@@ -84,20 +84,63 @@ async def periodic_ingestion_loop():
             
         await asyncio.sleep(60)
 
+async def redis_listener_task():
+    """
+    Subscribes to Redis 'live_stream' channel and broadcasts received articles
+    to all websocket clients connected to this node.
+    Handles automatic reconnection and falls back to local memory_stream if Redis is offline.
+    """
+    import redis.asyncio as aioredis
+    import json
+    
+    redis_online = False
+    
+    while True:
+        try:
+            logger.info("[Main] Attempting connection to Redis Pub/Sub...")
+            redis_conn = aioredis.from_url(settings.REDIS_URL, socket_timeout=5.0)
+            # Test connection
+            await redis_conn.ping()
+            
+            pubsub = redis_conn.pubsub()
+            await pubsub.subscribe("live_stream")
+            logger.info("[Main] Redis pub/sub successfully subscribed to channel 'live_stream'.")
+            redis_online = True
+            
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    try:
+                        data = json.loads(message["data"])
+                        await manager.broadcast({
+                            "type": "live_article",
+                            "article": data
+                        })
+                    except Exception as ex:
+                        logger.error(f"[Main] Error parsing pubsub message: {ex}")
+        except Exception as e:
+            logger.warning(f"[Main] Redis pub/sub error/offline: {e}.")
+            if not redis_online:
+                logger.info("[Main] Falling back to local in-memory event stream.")
+                # Fallback to local memory stream
+                def on_live_signal(article):
+                    asyncio.create_task(manager.broadcast({
+                        "type": "live_article",
+                        "article": article
+                    }))
+                memory_stream.subscribe(on_live_signal)
+                break
+            else:
+                logger.info("[Main] Retrying Redis Pub/Sub connection in 5 seconds...")
+                await asyncio.sleep(5)
+
 @app.on_event("startup")
 async def startup_event():
     # Run DB initializations
     await create_tables()
     # Launch ingestion loop in background
     asyncio.create_task(periodic_ingestion_loop())
-    
-    # Subscribe database memory stream to websocket broadcasts
-    def on_live_signal(article):
-        asyncio.create_task(manager.broadcast({
-            "type": "live_article",
-            "article": article
-        }))
-    memory_stream.subscribe(on_live_signal)
+    # Launch Redis listener task in background
+    asyncio.create_task(redis_listener_task())
 
 @app.get("/api/news/all")
 async def get_all_news(
