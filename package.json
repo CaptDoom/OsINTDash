@@ -4,12 +4,12 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "node -e \"if(process.env.RENDER) { require('child_process').execSync('PYTHONPATH=$(python3 -m site --user-site || python -m site --user-site) python3 -m uvicorn backend.app.main:app --host 0.0.0.0 --port ' + process.env.PORT, {stdio: 'inherit'}); } else { require('child_process').execSync('concurrently -k \\\"npm run dev:server\\\" \\\"npm run dev:web\\\"', {stdio: 'inherit'}); }\"",
+    "dev": "node -e \"if(process.env.RENDER) { require('child_process').execSync('venv/bin/python -m uvicorn backend.app.main:app --host 0.0.0.0 --port ' + process.env.PORT, {stdio: 'inherit'}); } else { require('child_process').execSync('concurrently -k \\\"npm run dev:server\\\" \\\"npm run dev:web\\\"', {stdio: 'inherit'}); }\"",
     "dev:web": "vite --host 0.0.0.0 --port 3000",
     "dev:server": "python backend/run.py",
     "dev:worker": "python backend/run_worker.py",
-    "build": "(python3 -m pip install -r backend/requirements.txt --break-system-packages || pip install -r backend/requirements.txt --break-system-packages || pip3 install -r backend/requirements.txt --break-system-packages) && tsc -b && vite build",
-    "start": "PYTHONPATH=$(python3 -m site --user-site || python -m site --user-site) python3 -m uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT:-3001} || PYTHONPATH=$(python3 -m site --user-site || python -m site --user-site) python -m uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT:-3001}",
+    "build": "python3 -m venv venv && venv/bin/pip install --upgrade pip && venv/bin/pip install -r backend/requirements.txt && tsc -b && vite build",
+    "start": "venv/bin/python -m uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT:-3001}",
     "preview": "vite preview"
   },
   "dependencies": {
