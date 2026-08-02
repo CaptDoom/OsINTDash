@@ -8,7 +8,7 @@
     "dev:web": "vite --host 0.0.0.0 --port 3000",
     "dev:server": "python backend/run.py",
     "dev:worker": "python backend/run_worker.py",
-    "build": "(python3 -m pip install -r backend/requirements.txt || pip install -r backend/requirements.txt || pip3 install -r backend/requirements.txt) && tsc -b && vite build",
+    "build": "(python3 -m pip install -r backend/requirements.txt --break-system-packages || pip install -r backend/requirements.txt --break-system-packages || pip3 install -r backend/requirements.txt --break-system-packages) && tsc -b && vite build",
     "start": "python3 -m uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT:-3001} || python -m uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT:-3001}",
     "preview": "vite preview"
   },
