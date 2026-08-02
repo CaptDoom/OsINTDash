@@ -4,12 +4,12 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k \"npm run dev:server\" \"npm run dev:web\"",
+    "dev": "node -e \"if(process.env.RENDER) { require('child_process').execSync('python3 -m uvicorn backend.app.main:app --host 0.0.0.0 --port ' + process.env.PORT, {stdio: 'inherit'}); } else { require('child_process').execSync('concurrently -k \\\"npm run dev:server\\\" \\\"npm run dev:web\\\"', {stdio: 'inherit'}); }\"",
     "dev:web": "vite --host 0.0.0.0 --port 3000",
     "dev:server": "python backend/run.py",
     "dev:worker": "python backend/run_worker.py",
-    "build": "pip install -r backend/requirements.txt && tsc -b && vite build",
-    "start": "uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT:-3001}",
+    "build": "(python3 -m pip install -r backend/requirements.txt || pip install -r backend/requirements.txt || pip3 install -r backend/requirements.txt) && tsc -b && vite build",
+    "start": "python3 -m uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT:-3001} || python -m uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT:-3001}",
     "preview": "vite preview"
   },
   "dependencies": {
