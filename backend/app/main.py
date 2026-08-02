@@ -41,15 +41,7 @@ app.add_middleware(
 app.include_router(archive.router)
 app.include_router(chat.router)
 
-# Serve the built frontend assets if available.
-FRONTEND_DIST = Path(__file__).resolve().parents[2] / "dist"
-if FRONTEND_DIST.exists():
-    app.mount("/", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")
-    logger.info("[Main] Mounted frontend static assets from %s", FRONTEND_DIST)
 
-    @app.get("/{full_path:path}")
-    async def serve_single_page_app(full_path: str):
-        return FileResponse(FRONTEND_DIST / "index.html")
 
 
 @app.middleware("http")
@@ -309,17 +301,9 @@ async def get_all_news(
     """
     Simulates /api/news/all returning country dossier arrays formatted for App.tsx
     """
+    # Query past 30 days from database to ensure high-density news feeds
     now = datetime_now()
-    if timeframe == "1h":
-        delta = timedelta_now(hours=1)
-    elif timeframe == "24h" or timeframe == "1d":
-        delta = timedelta_now(hours=24)
-    elif timeframe == "7d" or timeframe == "1w":
-        delta = timedelta_now(days=7)
-    else:
-        delta = timedelta_now(hours=24)
-
-    cutoff = now - delta
+    cutoff = now - timedelta_now(days=30)
     
     # Query database articles (High Impact)
     stmt = select(Article).where(Article.published_at >= cutoff)
@@ -369,7 +353,7 @@ async def get_all_news(
                 "id": art.id,
                 "country": country,
                 "category": get_frontend_category(art.department, art.title, art.source),
-                "impact": "High" if art.impact_level == "High Impact" else "Medium",
+                "impact": "High" if art.impact_level == "High Impact" else ("Medium" if art.impact_level == "Medium Impact" else "Low"),
                 "headline": art.title,
                 "summary": art.summary or art.content[:150],
                 "source": art.source or "OSINT Mesh",
@@ -418,16 +402,25 @@ async def get_specific_country_news(
     ISO_COUNTRIES[code] = name
     
     # 1. Query database for articles matching the country code
-    stmt = select(Article).where(Article.country_code == code).order_by(Article.published_at.desc()).limit(20)
+    stmt = select(Article).where(Article.country_code == code).order_by(Article.published_at.desc()).limit(50)
     res = await db.execute(stmt)
     db_articles = res.scalars().all()
     
-    # 2. If we have less than 5 articles, trigger on-the-fly fetch
+    # 2. Trigger fresh fetch if db has fewer than 15 articles or latest is older than 15 mins
+    from datetime import timezone
+    is_stale = True
+    if db_articles:
+        latest_art = db_articles[0]
+        now = datetime.now(timezone.utc) if latest_art.published_at.tzinfo is not None else datetime.utcnow()
+        time_diff = (now - latest_art.published_at).total_seconds()
+        if time_diff < 900 and len(db_articles) >= 15:
+            is_stale = False
+            
     fetched_signals = []
-    if len(db_articles) < 5:
+    if is_stale:
         async with httpx.AsyncClient(follow_redirects=True) as client:
             try:
-                raw_articles = await fetch_country_news(client, code, budget=10)
+                raw_articles = await fetch_country_news(client, code, budget=50)
                 if raw_articles:
                     # Save to DB (this handles duplicates and only saves High/Medium Impact)
                     await classify_and_store_batch(db, raw_articles)
@@ -440,7 +433,7 @@ async def get_specific_country_news(
                             "id": f"dyn-{hashlib.md5(art['url'].encode()).hexdigest()}",
                             "country": name,
                             "category": get_frontend_category(dept, art.get("title", ""), art.get("source", "")),
-                            "impact": "High" if impact == "High Impact" else "Medium",
+                            "impact": "High" if impact == "High Impact" else ("Medium" if impact == "Medium Impact" else "Low"),
                             "headline": art.get("title", "Untitled"),
                             "summary": art.get("summary") or art.get("content", "")[:150],
                             "source": art.get("source") or "OSINT Feed",
@@ -458,7 +451,7 @@ async def get_specific_country_news(
             "id": art.id,
             "country": name,
             "category": get_frontend_category(art.department, art.title, art.source),
-            "impact": "High" if art.impact_level == "High Impact" else "Medium",
+            "impact": "High" if art.impact_level == "High Impact" else ("Medium" if art.impact_level == "Medium Impact" else "Low"),
             "headline": art.title,
             "summary": art.summary or art.content[:150],
             "source": art.source or "OSINT Mesh",
@@ -478,7 +471,7 @@ async def get_specific_country_news(
             seen_urls.add(sig["url"])
             all_signals.append(sig)
             
-    all_signals = all_signals[:10]
+    all_signals = all_signals[:50]
     
     threat_level = "Moderate"
     if all_signals:
@@ -706,3 +699,13 @@ async def query_news_research(payload: QueryRequest, db: AsyncSession = Depends(
         "generatedAt": datetime_now().isoformat(),
         "detectedCountry": country or "Global"
     }
+
+# Serve the built frontend assets if available.
+FRONTEND_DIST = Path(__file__).resolve().parents[2] / "dist"
+if FRONTEND_DIST.exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIST), html=True), name="frontend")
+    logger.info("[Main] Mounted frontend static assets from %s", FRONTEND_DIST)
+
+    @app.get("/{full_path:path}")
+    async def serve_single_page_app(full_path: str):
+        return FileResponse(FRONTEND_DIST / "index.html")

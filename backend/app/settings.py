@@ -29,7 +29,7 @@ class Settings(BaseSettings):
 
     openai_api_key: Optional[str] = Field(default=None, validation_alias="OPENAI_API_KEY")
     google_api_key: Optional[str] = Field(default=None, validation_alias="GOOGLE_API_KEY")
-    newsapi_key: Optional[str] = Field(default=None, validation_alias="NEWSAPI_KEY")
+    newsapi_key: Optional[str] = Field(default=None, validation_alias="NEWS_API_KEY")
     world_news_api_key: Optional[str] = Field(default=None, validation_alias="WORLD_NEWS_API_KEY")
     newsdata_api_key: Optional[str] = Field(default=None, validation_alias="NEWSDATA_API_KEY")
     finnhub_api_key: Optional[str] = Field(default=None, validation_alias="FINNHUB_API_KEY")
@@ -55,7 +55,7 @@ class Settings(BaseSettings):
     enable_redis_dedup: bool = True
 
     ingestion_batch_size: int = 50
-    scrape_limit_per_country: int = 20
+    scrape_limit_per_country: int = 50
     request_retry_count: int = 4
     request_timeout_seconds: float = 12.0
     request_backoff_base_seconds: float = 0.8

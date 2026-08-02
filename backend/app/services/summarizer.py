@@ -112,6 +112,29 @@ async def call_openai(prompt: str, system_instruction: str = "You are a senior a
         raise
 
 
+async def call_ollama(prompt: str, system_instruction: str = "You are a senior analyst.") -> str:
+    if not settings.ollama_base_url:
+        raise ValueError("OLLAMA_BASE_URL is not set.")
+    import httpx
+    model = settings.llm_model or "llama3.1:8b-instruct"
+    url = f"{settings.ollama_base_url.rstrip('/')}/api/chat"
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": prompt},
+        ],
+        "stream": False
+    }
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, json=payload, timeout=30.0)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("message", {}).get("content", "").strip()
+        else:
+            raise ValueError(f"Ollama status {response.status_code}: {response.text}")
+
+
 async def _compose_single_pass_summary(articles: List[Article], timeframe: str) -> str:
     article_context = "\n---\n".join(_article_block(article) for article in articles)
     prompt = f"""
@@ -124,6 +147,11 @@ Keep it coherent and avoid repetitive phrasing.
 Source articles:
 {article_context}
 """
+    if settings.llm_provider == "ollama" and settings.ollama_base_url:
+        try:
+            return await call_ollama(prompt, "You are a senior strategic intelligence officer.")
+        except Exception as exc:
+            logger.warning("[Summarizer] Ollama call failed, falling back: %s", exc)
     if settings.openai_api_key:
         return await call_openai(prompt, "You are a senior strategic intelligence officer.")
     if settings.google_api_key:
@@ -150,6 +178,11 @@ Preserve the strongest findings and remove repetition.
 Partial summaries:
 {chr(10).join(f'- {summary}' for summary in summaries)}
 """
+    if settings.llm_provider == "ollama" and settings.ollama_base_url:
+        try:
+            return await call_ollama(reduce_prompt, "You are a senior strategic intelligence officer.")
+        except Exception as exc:
+            logger.warning("[Summarizer] Ollama call failed, falling back: %s", exc)
     if settings.openai_api_key:
         return await call_openai(reduce_prompt, "You are a senior strategic intelligence officer.")
     if settings.google_api_key:

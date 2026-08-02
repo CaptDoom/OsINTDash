@@ -94,15 +94,15 @@ class ImpactClassifier:
             "Political & Diplomatic",
         ]
         self.label_keywords = {
-            "High Impact": r"(troop|deployment|missile|clash|invasion|drill|sanction|nuclear|navy|air force|border conflict|skirmish|casualty|coup|strike)",
-            "Medium Impact": r"(bilateral|agreement|trade deal|tariff|summit|protest|refugee|inflation|corruption|embassy|drone|port|aid)",
-            "Normal Impact": r"(quiz|sport|cricket|entertainment|weather|stock price|tourism|festival|culture|feature)",
+            "High Impact": r"\b(troop|deployment|missile|clash|invasion|drill|sanction|nuclear|navy|air force|border conflict|skirmish|casualty|coup|strike)s?\b",
+            "Medium Impact": r"\b(bilateral|agreement|trade deal|tariff|summit|protest|refugee|inflation|corruption|embassy|drone|port|aid)s?\b",
+            "Normal Impact": r"\b(quiz|sport|cricket|entertainment|weather|stock price|tourism|festival|culture|feature)s?\b",
         }
         self.dept_keywords = {
-            "Military & Defense": r"(pla|loc|lac|military|troop|air force|navy|missile|radar|defense|border post|uav|drone|arms|exercise|drill|clash|patrol)",
-            "Economic & Financial": r"(economic|trade|finance|tariff|port|investment|infrastructure|road|highway|corridor|inflation|currency|gdp|aid)",
-            "Social Affairs & Welfare": r"(social|refugee|community|migration|protest|settlement|civilian|health|disease|aid|disaster|religion|citizenship)",
-            "Political & Diplomatic": r"(political|diplomat|embassy|border crossing|government|summit|treaty|talks|meeting|minister|president|signing)",
+            "Military & Defense": r"\b(pla|loc|lac|military|troop|air force|navy|missile|radar|defense|border post|uav|drone|arms|exercise|drill|clash|patrol)s?\b",
+            "Economic & Financial": r"\b(economic|trade|finance|tariff|port|investment|infrastructure|road|highway|corridor|inflation|currency|gdp|aid)s?\b",
+            "Social Affairs & Welfare": r"\b(social|refugee|community|migration|protest|settlement|civilian|health|disease|aid|disaster|religion|citizenship)s?\b",
+            "Political & Diplomatic": r"\b(political|diplomat|embassy|border crossing|government|summit|treaty|talks|meeting|minister|president|signing)s?\b",
         }
 
     @staticmethod
@@ -137,11 +137,13 @@ class ImpactClassifier:
         for label, pattern in self.dept_keywords.items():
             dept_scores[label] += len(re.findall(pattern, text))
 
-        impact = "Normal Impact"
-        if scores["High Impact"] >= 2:
+        # Relaxed classification for abundant high-fidelity operational signals
+        if scores["High Impact"] >= 1:
             impact = "High Impact"
-        elif scores["Medium Impact"] > 0:
+        elif scores["Medium Impact"] > 0 or scores["Normal Impact"] == 0:
             impact = "Medium Impact"
+        else:
+            impact = "Normal Impact"
 
         dept = dept_scores.most_common(1)[0][0] if dept_scores else "Political & Diplomatic"
         return impact, dept
@@ -167,26 +169,7 @@ class ImpactClassifier:
             logger.debug("[Classifier] Live stream publish skipped: %s", exc)
 
     async def save_article(self, db: AsyncSession, article_data: Dict[str, Any], embedding: Optional[List[float]] = None) -> bool:
-        impact, dept = await self.route_article(article_data)
-        payload = {
-            "title": article_data["title"],
-            "headline": article_data.get("headline") or article_data["title"],
-            "summary": article_data.get("summary") or article_data["title"],
-            "content": article_data["content"],
-            "url": article_data["url"],
-            "source": article_data.get("source"),
-            "country_code": article_data["country_code"],
-            "published_at": article_data["published_at"].isoformat() if isinstance(article_data["published_at"], datetime) else str(article_data["published_at"]),
-            "impact_level": impact,
-            "department": dept,
-        }
-
-        if impact in {"High Impact", "Medium Impact"}:
-            return (await self.persist_high_impact_batch(db, [article_data], embeddings=[embedding] if embedding else None)) > 0
-
-        logger.info("[Classifier] Ingested %s article. Streaming to live UI.", impact)
-        await self._publish_realtime(payload)
-        return False
+        return (await self.persist_high_impact_batch(db, [article_data], embeddings=[embedding] if embedding else None)) > 0
 
     async def persist_high_impact_batch(
         self,
@@ -194,28 +177,26 @@ class ImpactClassifier:
         articles: List[Dict[str, Any]],
         embeddings: Optional[List[Optional[List[float]]]] = None,
     ) -> int:
-        if not articles:
-            return 0
-
+        inserted = 0
         rows: List[Article] = []
         for idx, article_data in enumerate(articles):
             impact, dept = await self.route_article(article_data)
-            if impact not in {"High Impact", "Medium Impact"}:
-                await self._publish_realtime(
-                    {
-                        "title": article_data["title"],
-                        "headline": article_data.get("headline") or article_data["title"],
-                        "summary": article_data.get("summary") or article_data["title"],
-                        "content": article_data["content"],
-                        "url": article_data["url"],
-                        "source": article_data.get("source"),
-                        "country_code": article_data["country_code"],
-                        "published_at": article_data["published_at"].isoformat() if isinstance(article_data["published_at"], datetime) else str(article_data["published_at"]),
-                        "impact_level": impact,
-                        "department": dept,
-                    }
-                )
-                continue
+            
+            # Send real-time updates for all ingested articles
+            await self._publish_realtime(
+                {
+                    "title": article_data["title"],
+                    "headline": article_data.get("headline") or article_data["title"],
+                    "summary": article_data.get("summary") or article_data["title"],
+                    "content": article_data["content"],
+                    "url": article_data["url"],
+                    "source": article_data.get("source"),
+                    "country_code": article_data["country_code"],
+                    "published_at": article_data["published_at"].isoformat() if isinstance(article_data["published_at"], datetime) else str(article_data["published_at"]),
+                    "impact_level": impact,
+                    "department": dept,
+                }
+            )
 
             rows.append(
                 Article(

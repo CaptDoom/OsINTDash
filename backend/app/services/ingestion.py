@@ -215,7 +215,7 @@ async def fetch_newsapi_feed(client: httpx.AsyncClient, country_code: str, count
     params = {
         "q": _search_query(country_name),
         "language": "en",
-        "pageSize": min(limit, 10),
+        "pageSize": limit,
         "sortBy": "relevancy",
         "apiKey": settings.newsapi_key,
     }
@@ -237,7 +237,7 @@ async def fetch_gnews_feed(client: httpx.AsyncClient, country_code: str, country
     params = {
         "q": _search_query(country_name),
         "lang": "en",
-        "max": min(limit, 10),
+        "max": limit,
         "token": settings.gnews_api_key,
     }
     response = await _get_with_retry(client, "https://gnews.io/api/v4/search", source_name="GNews", breaker=breaker, params=params)
@@ -259,8 +259,7 @@ async def fetch_newsdata_feed(client: httpx.AsyncClient, country_code: str, coun
         "apikey": settings.newsdata_api_key,
         "q": _search_query(country_name),
         "language": "en",
-        "page": 1,
-        "page_size": min(limit, 10),
+        "size": limit,
     }
     response = await _get_with_retry(client, "https://newsdata.io/api/1/news", source_name="NewsData", breaker=breaker, params=params)
     if not response or response.status_code != 200:
@@ -282,7 +281,7 @@ async def fetch_worldnews_feed(client: httpx.AsyncClient, country_code: str, cou
         "language": "en",
         "q": _search_query(country_name),
         "page": 1,
-        "pageSize": min(limit, 10),
+        "pageSize": limit,
     }
     urls = [
         "https://www.worldnewsapi.com/search-news",
@@ -336,7 +335,7 @@ async def fetch_currents_feed(client: httpx.AsyncClient, country_code: str, coun
         "apiKey": settings.currents_api_key,
         "keywords": _search_query(country_name),
         "language": "en",
-        "limit": min(limit, 10),
+        "limit": limit,
     }
     response = await _get_with_retry(client, "https://api.currentsapi.services/v1/search", source_name="Currents", breaker=breaker, params=params)
     if not response or response.status_code != 200:
@@ -357,7 +356,7 @@ async def fetch_thenews_feed(client: httpx.AsyncClient, country_code: str, count
         "api_token": settings.thenews_api_key,
         "language": "en",
         "search": _search_query(country_name),
-        "limit": min(limit, 10),
+        "limit": limit,
     }
     response = await _get_with_retry(client, "https://api.thenewsapi.com/v1/news/all", source_name="TheNews", breaker=breaker, params=params)
     if not response or response.status_code != 200:
@@ -378,7 +377,7 @@ async def fetch_mediastack_feed(client: httpx.AsyncClient, country_code: str, co
         "access_key": settings.mediastack_api_key,
         "keywords": _search_query(country_name),
         "languages": "en",
-        "limit": min(limit, 10),
+        "limit": limit,
     }
     response = await _get_with_retry(client, "http://api.mediastack.com/v1/news", source_name="Mediastack", breaker=breaker, params=params)
     if not response or response.status_code != 200:
@@ -399,7 +398,7 @@ async def fetch_newscatcher_feed(client: httpx.AsyncClient, country_code: str, c
     params = {
         "q": _search_query(country_name),
         "lang": "en",
-        "page_size": min(limit, 10),
+        "page_size": limit,
         "sort_by": "relevancy",
     }
     response = await _get_with_retry(client, "https://api.newscatcherapi.com/v2/search", source_name="Newscatcher", breaker=breaker, params=params, headers=headers)
@@ -420,7 +419,7 @@ async def fetch_bing_news_feed(client: httpx.AsyncClient, country_code: str, cou
     headers = {"Ocp-Apim-Subscription-Key": settings.bing_news_api_key}
     params = {
         "q": _search_query(country_name),
-        "count": min(limit, 10),
+        "count": limit,
         "freshness": "Day",
         "textFormat": "Raw",
         "mkt": "en-US",
@@ -437,7 +436,7 @@ async def fetch_bing_news_feed(client: httpx.AsyncClient, country_code: str, cou
 
 
 async def _fetch_all_news_sources(client: httpx.AsyncClient, country_code: str, country_name: str, limit: int) -> List[Dict[str, Any]]:
-    source_limit = min(max(limit, 5), 12)
+    source_limit = max(limit, 10)
     sources = [
         fetch_newsapi_feed,
         fetch_gnews_feed,

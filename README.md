@@ -1,6 +1,6 @@
 # Drishya
 
-A high-performance news and tactical telemetry intelligence dashboard monitoring India's border sectors in real-time. Built and maintained by Seekay with a Node/Express ingestion mesh and a React/TypeScript/Vite frontend.
+A high-performance news and tactical telemetry intelligence dashboard monitoring India's border sectors in real-time. Built with a FastAPI ingestion mesh, SQLite fallback database, and a React/TypeScript/Vite frontend.
 
 ---
 
@@ -14,35 +14,32 @@ The application is structured as a decoupled web application comprising:
 ```mermaid
 graph TD
   User[Browser Client] -- 1. Authenticates via WebAuthn MFA --> App[React App]
-  App -- 2. Polls every 60s / Establishes SSE --> Express[Express Server]
-  Express -- 3. Serves from Cache (<5ms) --> Cache[(In-Memory Cache)]
+  App -- 2. Polls every 60s / Establishes SSE --> Backend[FastAPI Server]
+  Backend -- 3. Serves from SQLite / Postgres Cache --> DB[(SQLite/Postgres Database)]
   
   subgraph Background Ingestion Mesh
-    Cache -- 4. Lazy Polling (Only if Active Session) --> NewsAPI[NewsAPI Unified Query]
-    Cache -- 5. RSS Parallel Ingestion (Every 3 mins) --> RSS[Google News RSS Feeds]
-    Cache -- 6. World Wires (Every 5 mins) --> Wires[BBC / NYT Wires]
+    Backend -- 4. Multi-source Scraping (Every 3 mins) --> NewsAPI[NewsAPI Unified Query]
+    Backend -- 5. RSS Parallel Ingestion --> RSS[Google News RSS Feeds]
+    Backend -- 6. World Wires --> Wires[BBC / Yahoo Wires]
   end
 
   NewsAPI --> Processing[Deduplicate, Classify, Filter & Scorer]
   RSS --> Processing
   Wires --> Processing
-  Processing -- 7. Updates Cache & Streams via SSE --> Cache
-  Cache --> App
+  Processing -- 7. Persists in DB & Streams via WebSocket --> DB
+  DB --> App
 ```
 
 ---
 
 ## 2. Key Features
 
-- **Unified Ingestion & Quota Preservation**: Consolidates news queries into a single query to NewsAPI, reducing key quota consumption by 90%.
-- **Lazy Session Polling**: Automatically pauses NewsAPI scraper calls when there is no active client activity, preventing rate-limit exhaustion.
-- **Multilingual RSS Ingestion**: Parses English, Chinese, and Urdu RSS feeds for all 9 borders concurrently using parallel promises.
-- **Local Classification Engine**: Maps, scores, and categorizes articles into `Military`, `Tech`, `Political`, `Economic`, and `Social` categories.
-- **LLM Article Enrichment**: Each ingested article is enriched with a 2-3 line summary, threat level, intelligence domain category, extracted entities, and map-ready location metadata.
-- **Grounded AI Search**: Optional online model-backed query answers that summarize trusted public reporting and return cited source links.
-- **SSE Real-Time Stream**: Streams breaking geopolitical signals instantly. Interleaves high-fidelity simulated telemetry sweeps to maintain operational visual flow during silent periods.
-- **Tactical Keyboard Navigation**: Fully keyboard-navigable (`j`/`k` cursors, `Enter` to open split preview, `Esc` to close, `/` to focus search coordinates).
-- **WebAuthn Authenticator Gate**: Secure simulated biometric access control gate.
+- **OSINT Tactical Intelligence Chatbot**: Replaced file uploading with an interactive scrolling chatbot. Query border alerts, trade deals, and troop movements in real-time. Supports markdown parsing (bold and hyperlinks) and lists reference news card links directly under responses.
+- **Unified Ingestion & High Density**: Consolidates news queries into unified API searches, saving 90% key quota. The ingestion pipeline scrapes up to **500 raw articles** per sweep cycle (up to 50 articles per border country) to guarantee high-fidelity operational signals.
+- **Abundant News Feeds**: In order to prevent empty dashboard displays, the query lookup is set to 30 days and the frontend dynamically merges recent events with matching older historical articles, maintaining a rich, populated dossier (15-30 articles) at all times.
+- **Precise Classification Matching**: Uses standalone word boundaries (`\b...s?\b`) inside the classification regex engine to ensure zero false positive match collisions on common English terms (e.g. word *sports* matching *port*, *said* matching *aid*).
+- **Local LLM Synthesis (Ollama)**: Natively supports local Ollama API queries (using `llama3.1:8b-instruct`) for chatbot summaries and executive briefings, falling back to local rule-based Markdown synthesis only when the local model is offline.
+- **Automated Test Suite**: Equipped with a comprehensive unittest suite validating database connections, classification rules, summarizer heuristics, and FastAPI endpoint routes.
 
 ---
 
@@ -50,6 +47,7 @@ graph TD
 
 ### Prerequisites
 - Node.js (v18 or higher)
+- Python (3.11 or higher)
 - npm
 
 ### Installation
@@ -61,39 +59,35 @@ graph TD
 2. Install dependencies:
    ```bash
    npm install
+   pip install -r backend/requirements.txt
    ```
 3. Set up credentials in the `.env` file at the project root:
    ```env
    NEWS_API_KEY=your_news_api_key_here
-   GNEWS_API_KEY=your_gnews_api_key_here
    LLM_PROVIDER=ollama
    LLM_MODEL=llama3.1:8b-instruct
    OLLAMA_BASE_URL=http://127.0.0.1:11434
-
-   # Optional hosted model fallback
-   HF_API_KEY=your_huggingface_api_key_here
-   HF_MODEL=google/flan-t5-large
    ```
 
-### Free LLM Setup (Ollama)
+### Local LLM Setup (Ollama)
 1. Install Ollama locally from https://ollama.com.
-2. Pull a free open-weight model:
+2. Pull the default open-weight model:
    ```bash
    ollama pull llama3.1:8b-instruct
    ```
 3. Keep Ollama running locally (default endpoint: `http://127.0.0.1:11434`).
-
-If Ollama is unavailable, the backend automatically falls back to deterministic rule-based enrichment so ingestion remains stable.
-
-### AI Search Notes
-- The search overlay can use an optional Hugging Face hosted model for source-grounded news answers.
-- If `HF_API_KEY` is not set, the app falls back to its built-in extractive answer generator.
-- The AI search is restricted to public-news summarization and refuses operational or tactical planning requests.
+If Ollama is unavailable, the backend automatically falls back to offline semantic summaries so the interface remains fully functional.
 
 ### Running Locally
 To launch both the backend server (port 3001) and frontend dev server (port 3000) concurrently:
 ```bash
 npm run dev
+```
+
+### Running Tests
+To execute the automated Python backend unit and integration test suite:
+```bash
+python -m unittest backend/tests/test_all.py
 ```
 
 ### Production Build
@@ -105,13 +99,10 @@ The compiled assets can be served statically by the backend in Docker or by the 
 
 ### Render Deployment
 This repository includes a `render.yaml` configuration for Render.com.
-
 - Use the `Dockerfile.backend` service in Render to build both the frontend and backend assets in one container.
 - Set `DATABASE_URL` and `REDIS_URL` using Render managed services.
 - Deploy with the start command:
-
-```bash
-sh -c "uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT:-3001}"
-```
-
-Render deployment uses the backend service to serve the React app assets and API from the same container.
+  ```bash
+  sh -c "uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT:-3001}"
+  ```
+Render deployment uses the backend service to serve the React app assets and API from the same container. The routing structure is optimized to ensure static files do not shadow backend API endpoints.

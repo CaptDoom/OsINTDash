@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from backend.app.database import get_db, Article
-from backend.app.services.summarizer import call_openai, call_gemini
+from backend.app.services.summarizer import call_openai, call_gemini, call_ollama
 from backend.app.config import settings
 from backend.app.services.job_store import job_store
 
@@ -211,12 +211,19 @@ async def process_fusion_job(job_id: str, temp_file_path: str, filename: str):
         """
 
         fused_summary = ""
-        if settings.openai_api_key:
-            fused_summary = await call_openai(prompt, "You are a Senior Intel Fusion Officer.")
-        elif settings.google_api_key:
-            fused_summary = await call_gemini(prompt, "You are a Senior Intel Fusion Officer.")
-        else:
-            fused_summary = generate_local_fusion_fallback(extracted_text, matching_articles)
+        if settings.llm_provider == "ollama" and settings.ollama_base_url:
+            try:
+                fused_summary = await call_ollama(prompt, "You are a Senior Intel Fusion Officer.")
+            except Exception as exc:
+                logger.warning("[Chat] Ollama call failed, falling back: %s", exc)
+        
+        if not fused_summary:
+            if settings.openai_api_key:
+                fused_summary = await call_openai(prompt, "You are a Senior Intel Fusion Officer.")
+            elif settings.google_api_key:
+                fused_summary = await call_gemini(prompt, "You are a Senior Intel Fusion Officer.")
+            else:
+                fused_summary = generate_local_fusion_fallback(extracted_text, matching_articles)
 
         await job_store.update(
             job_id,
@@ -343,11 +350,18 @@ async def chat_query(payload: ChatQuery):
     """
 
     fused_summary = ""
-    if settings.openai_api_key:
-        fused_summary = await call_openai(prompt, "You are a Senior Intel Fusion Officer.")
-    elif settings.google_api_key:
-        fused_summary = await call_gemini(prompt, "You are a Senior Intel Fusion Officer.")
-    else:
-        fused_summary = generate_local_fusion_fallback(query_text, matching_articles)
+    if settings.llm_provider == "ollama" and settings.ollama_base_url:
+        try:
+            fused_summary = await call_ollama(prompt, "You are a Senior Intel Fusion Officer.")
+        except Exception as exc:
+            logger.warning("[Chat] Ollama call failed, falling back: %s", exc)
+            
+    if not fused_summary:
+        if settings.openai_api_key:
+            fused_summary = await call_openai(prompt, "You are a Senior Intel Fusion Officer.")
+        elif settings.google_api_key:
+            fused_summary = await call_gemini(prompt, "You are a Senior Intel Fusion Officer.")
+        else:
+            fused_summary = generate_local_fusion_fallback(query_text, matching_articles)
 
     return {"summary": fused_summary, "relevant_articles": relevant_list}

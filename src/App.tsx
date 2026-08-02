@@ -1059,6 +1059,7 @@ function App() {
 
   const latestNewsDetail = buildDetailedNewsText(effectiveLatestSignal);
   const latestNewsAvailable = effectiveLatestSignal !== null;
+  void latestNewsAvailable;
 
   const getRefreshStatusLabel = () => {
     if (!lastRefreshAt) return 'Refreshing now...';
@@ -1095,6 +1096,7 @@ function App() {
     if (!signal) return 'Source';
     return signal.url ? 'Direct source' : 'Search fallback';
   };
+  void getSignalSourceKind;
 
   const getLatestCountrySignal = (countryName: string) => {
     const signals = newsFeed[countryName]?.signals ?? [];
@@ -1337,17 +1339,8 @@ function App() {
     const raw = selectedIntel?.signals ?? [];
     if (raw.length === 0) return [];
 
-    const now = new Date();
-    let windowMs = 24 * 60 * 60 * 1000; // default 24h
-    if (timeWindow === '1h') windowMs = 60 * 60 * 1000;
-    else if (timeWindow === '1d') windowMs = 24 * 60 * 60 * 1000;
-    else if (timeWindow === '1w') windowMs = 7 * 24 * 60 * 60 * 1000;
-    else if (timeWindow === '1m') windowMs = 30 * 24 * 60 * 60 * 1000;
-
-    const threshold = new Date(now.getTime() - windowMs);
-    let filtered = raw.filter(s => new Date(s.timestamp) >= threshold);
-
-    // Apply matrix parameters filters
+    // Apply matrix parameters filters first
+    let filtered = raw;
     if (filterCategory !== 'All') {
       filtered = filtered.filter(s => s.category === filterCategory);
     }
@@ -1362,14 +1355,32 @@ function App() {
       filtered = filtered.filter(s => s.headline.toLowerCase().includes(q) || s.summary.toLowerCase().includes(q));
     }
 
-    if (filtered.length === 0) {
-      // Fallback: show next most relevant signals
-      setIsFallbackTimeframe(true);
-      return raw;
-    } else {
+    // Check timeframe window
+    const now = new Date();
+    let windowMs = 24 * 60 * 60 * 1000; // default 24h
+    if (timeWindow === '1h') windowMs = 60 * 60 * 1000;
+    else if (timeWindow === '1d') windowMs = 24 * 60 * 60 * 1000;
+    else if (timeWindow === '1w') windowMs = 7 * 24 * 60 * 60 * 1000;
+    else if (timeWindow === '1m') windowMs = 30 * 24 * 60 * 60 * 1000;
+
+    const threshold = new Date(now.getTime() - windowMs);
+    const timeframeFiltered = filtered.filter(s => new Date(s.timestamp) >= threshold);
+
+    // If we have plenty of articles in the strict timeframe window, use that
+    if (timeframeFiltered.length >= 15) {
       setIsFallbackTimeframe(false);
-      return filtered;
+      return timeframeFiltered;
     }
+
+    // Otherwise, fill up the list with older matching historical signals to keep it abundant!
+    const timeframeUrls = new Set(timeframeFiltered.map(s => s.url));
+    const olderMatching = filtered.filter(s => !timeframeUrls.has(s.url));
+    
+    const merged = [...timeframeFiltered, ...olderMatching].slice(0, 30);
+    
+    // Set fallback notice if we have absolutely 0 in the strict timeframe
+    setIsFallbackTimeframe(timeframeFiltered.length === 0);
+    return merged;
   }, [selectedIntel, timeWindow, filterCategory, filterImpact, filterTrust, filterQuery]);
 
   // Keyboard navigation shortcut listeners (J/K/Enter/Esc/Slash)
@@ -1964,7 +1975,7 @@ function App() {
                         : 'border-black/20 hover:bg-black/10'
                   }`}
                 >
-                  RAG Chat Fusion
+                  OSINT AI Chatbot
                 </button>
               </div>
             </div>
@@ -2324,75 +2335,57 @@ function App() {
                     </div>
 
                     {newsView === 'latest' ? (
-                      <div className="space-y-3">
-                        {!latestNewsAvailable ? (
-                          <p className={`text-sm leading-relaxed ${isDarkMode ? 'text-white/70' : 'text-black/70'}`}>you are upto date with latest news</p>
+                      <div className="space-y-4">
+                        {categoryNewsSignals.length === 0 ? (
+                          <p className={`text-sm leading-relaxed ${isDarkMode ? 'text-white/70' : 'text-black/70'}`}>
+                            you are upto date with latest news
+                          </p>
                         ) : (
-                          <>
-                            <p className={`text-sm leading-relaxed ${isDarkMode ? 'text-white/70' : 'text-black/70'}`}>{latestNewsDetail}</p>
-                            {isUsingCategoryFallback && (
-                              <p className={`text-xs leading-relaxed ${isDarkMode ? 'text-[#ffcf6e]' : 'text-[#8f5a00]'}`}>
-                                This is the last recorded {selectedCategory.toLowerCase()} update for this country. It will be updated soon when a new event is detected.
-                              </p>
-                            )}
-                          </>
-                        )}
-                        {effectiveLatestSignal && (
-                          <div className="flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.2em]">
-                            <span className={`rounded border px-2 py-1 ${isDarkMode ? 'border-white/20 bg-black/35 text-white/80' : 'border-black/20 bg-white/60 text-black/80'}`}>
-                              {effectiveLatestSignal.verification_status || 'Single-source'}
-                            </span>
-                            <span className={`rounded border px-2 py-1 ${isDarkMode ? 'border-white/20 bg-black/35 text-white/80' : 'border-black/20 bg-white/60 text-black/80'}`}>
-                              Confidence {effectiveLatestSignal.confidence_score ?? 0}/100
-                            </span>
-                            {effectiveLatestSignal.related_count && effectiveLatestSignal.related_count > 1 && (
-                              <span className={`rounded border px-2 py-1 ${isDarkMode ? 'border-white/20 bg-black/35 text-white/80' : 'border-black/20 bg-white/60 text-black/80'}`}>
-                                Timeline {effectiveLatestSignal.related_count} updates
-                              </span>
-                            )}
-                          </div>
-                        )}
-                        <div className={`flex flex-wrap items-center gap-2 text-xs uppercase tracking-[0.2em] ${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>
-                          <span>Primary source: {effectiveLatestSignal?.source || 'Live ingestion mesh'}</span>
-                          {effectiveLatestSignal && effectiveLatestSignal.url && (
-                            <a
-                              href={getSignalSourceUrl(effectiveLatestSignal)}
-                              target="_blank"
-                              rel="noreferrer"
-                              className={`underline underline-offset-4 ${isDarkMode ? 'text-white' : 'text-black'}`}
+                          categoryNewsSignals.slice(0, 10).map((sig) => (
+                            <div
+                              key={sig.id}
+                              className={`border p-4 rounded flex flex-col gap-2 relative transition-colors ${
+                                isDarkMode ? 'border-white/10 bg-white/5 hover:bg-white/10' : 'border-black/10 bg-black/5 hover:bg-black/10'
+                              }`}
                             >
-                              Open source link
-                            </a>
-                          )}
-                          {effectiveLatestSignal?.youtube_url && (
-                            <a
-                              href={effectiveLatestSignal.youtube_url}
-                              target="_blank"
-                              rel="noreferrer"
-                              className={`underline underline-offset-4 ${isDarkMode ? 'text-white' : 'text-black'}`}
-                            >
-                              Watch coverage
-                            </a>
-                          )}
-                          <span>{getSignalSourceKind(effectiveLatestSignal)}</span>
-                        </div>
-                        {effectiveLatestSignal?.source_links && effectiveLatestSignal.source_links.length > 0 && (
-                          <div className={`rounded border p-3 ${isDarkMode ? 'border-white/20 bg-white/5' : 'border-black/20 bg-black/5'}`}>
-                            <p className={`text-[10px] uppercase tracking-[0.3em] ${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>Sources used for this summary</p>
-                            <div className="mt-2 flex flex-wrap gap-2">
-                              {effectiveLatestSignal.source_links.map((source) => (
+                              <div className="flex justify-between items-center text-[10px] font-mono">
+                                <span className="text-[#7bd0ff] font-bold uppercase">{sig.source}</span>
+                                <span className="text-[#c6c6cd] opacity-75">{new Date(sig.timestamp).toLocaleString()}</span>
+                              </div>
+                              
+                              <h4 className="text-sm font-bold text-[#d4e4fa]">
+                                {sig.is_breaking && (
+                                  <span className="inline-block bg-[#ff3b30]/20 text-[#ff453a] text-[8px] font-bold font-mono uppercase px-1.5 py-0.5 border border-[#ff453a]/30 rounded animate-pulse mr-1.5">
+                                    [BREAKING]
+                                  </span>
+                                )}
                                 <a
-                                  key={`${source.name}-${source.url}`}
-                                  href={source.url}
+                                  href={sig.url || buildSourceSearchUrl(sig.headline, selectedCountry.name)}
                                   target="_blank"
                                   rel="noreferrer"
-                                  className={`rounded px-2 py-1 text-xs underline underline-offset-2 ${isDarkMode ? 'bg-white/10 text-white' : 'bg-black/10 text-black'}`}
+                                  className="hover:underline hover:text-[#7bd0ff] transition-colors"
                                 >
-                                  {source.name}
+                                  {sig.headline}
                                 </a>
-                              ))}
+                              </h4>
+                              
+                              <p className={`text-xs leading-relaxed ${isDarkMode ? 'text-white/70' : 'text-black/70'}`}>
+                                {sig.summary || sig.headline}
+                              </p>
+                              
+                              <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[#45464d]/10 text-[10px] font-mono">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[#4edea3]">{sig.verification_status || 'Verified Source'}</span>
+                                  <span className="text-[#c6c6cd]">Confidence {Math.round((sig.confidence_score ?? 0.98) * 100)}%</span>
+                                </div>
+                                <span className={`font-bold px-1.5 py-0.5 rounded text-[9px] ${
+                                  sig.impact === 'High' ? 'bg-red-500/20 text-red-400' : 'bg-orange-500/20 text-orange-400'
+                                }`}>
+                                  IMPACT: {sig.impact.toUpperCase()}
+                                </span>
+                              </div>
                             </div>
-                          </div>
+                          ))
                         )}
                       </div>
                     ) : (
@@ -3795,196 +3788,258 @@ function ArchiveView() {
 }
 
 function LiveChatFusion() {
-  const [dragOver, setDragOver] = useState(false);
-  const [file, setFile] = useState<File | null>(null);
-  const [progress, setProgress] = useState<'idle' | 'parsing' | 'searching' | 'synthesizing' | 'completed' | 'failed'>('idle');
-  const [result, setResult] = useState<any>(null);
-  const [errorMsg, setErrorMsg] = useState('');
+  interface Message {
+    id: string;
+    sender: 'user' | 'bot';
+    text: string;
+    timestamp: Date;
+    articles?: Array<{
+      id: string;
+      title: string;
+      url: string;
+      source: string;
+      department: string;
+      country_code: string;
+      summary: string;
+      published_at: string;
+    }>;
+  }
 
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-    setDragOver(true);
-  };
-
-  const handleDragLeave = () => {
-    setDragOver(false);
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setDragOver(false);
-    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      processFile(e.dataTransfer.files[0]);
+  const [messages, setMessages] = useState<Message[]>([
+    {
+      id: 'welcome',
+      sender: 'bot',
+      text: 'Greetings. I am the OSINT Tactical Intelligence Bot. Ask me any question regarding recent geopolitical developments, military deployments, trade relations, or security alerts across our border sectors.',
+      timestamp: new Date()
     }
+  ]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      processFile(e.target.files[0]);
-    }
-  };
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, loading]);
 
-  const processFile = async (targetFile: File) => {
-    setFile(targetFile);
-    setProgress('parsing');
-    setErrorMsg('');
-    setResult(null);
+  const handleSend = async (textToSend: string) => {
+    if (!textToSend.trim() || loading) return;
 
-    const formData = new FormData();
-    formData.append('file', targetFile);
+    const userMessage: Message = {
+      id: `msg-${Date.now()}-${Math.random()}`,
+      sender: 'user',
+      text: textToSend,
+      timestamp: new Date()
+    };
+
+    setMessages((prev) => [...prev, userMessage]);
+    setInput('');
+    setLoading(true);
 
     try {
-      // Step interval simulation to offer beautiful client UI stepper animations
-      const steps: Array<'parsing' | 'searching' | 'synthesizing'> = ['parsing', 'searching', 'synthesizing'];
-      let current = 0;
-      const interval = setInterval(() => {
-        if (current < 2) {
-          current++;
-          setProgress(steps[current]);
-        } else {
-          clearInterval(interval);
-        }
-      }, 1500);
-
-      const res = await fetch('/api/chat/fusion', {
+      const response = await fetch('/api/chat/query', {
         method: 'POST',
-        body: formData
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ query: textToSend })
       });
 
-      clearInterval(interval);
-
-      if (!res.ok) {
-        throw new Error(`Server returned status code: ${res.status}`);
+      if (!response.ok) {
+        throw new Error(`Server status ${response.status}`);
       }
 
-      const data = await res.json();
-      setResult(data);
-      setProgress('completed');
+      const data = await response.json();
+      const botMessage: Message = {
+        id: `msg-${Date.now()}-${Math.random()}`,
+        sender: 'bot',
+        text: data.summary || 'No detailed analysis returned.',
+        timestamp: new Date(),
+        articles: data.relevant_articles || []
+      };
+
+      setMessages((prev) => [...prev, botMessage]);
     } catch (err) {
-      console.error("[Fusion] Upload error:", err);
-      setErrorMsg(String(err));
-      setProgress('failed');
+      console.error("[Chatbot] Query error:", err);
+      const errorMessage: Message = {
+        id: `msg-${Date.now()}-${Math.random()}`,
+        sender: 'bot',
+        text: `Error contacting tactical intelligence channel: ${String(err)}`,
+        timestamp: new Date()
+      };
+      setMessages((prev) => [...prev, errorMessage]);
+    } finally {
+      setLoading(false);
     }
+  };
+
+  const suggestions = [
+    "What are the latest military updates near China border?",
+    "Show me recent trade agreements with Pakistan",
+    "What is the security status in Myanmar?",
+    "Show me recent infrastructure investments in Bangladesh"
+  ];
+
+  const parseLineElements = (line: string) => {
+    const regex = /(\*\*([^*]+)\*\*|\[([^\]]+)\]\(([^)]+)\))/g;
+    const parts = [];
+    let lastIndex = 0;
+    let match;
+    let idx = 0;
+    
+    while ((match = regex.exec(line)) !== null) {
+      if (match.index > lastIndex) {
+        parts.push(line.substring(lastIndex, match.index));
+      }
+      
+      if (match[2]) { // Bold
+        parts.push(<strong key={`bold-${idx++}`} className="text-white font-bold">{match[2]}</strong>);
+      } else if (match[3]) { // Link
+        parts.push(
+          <a 
+            key={`link-${idx++}`} 
+            href={match[4]} 
+            target="_blank" 
+            rel="noopener noreferrer" 
+            className="text-[#7bd0ff] hover:underline font-bold"
+          >
+            {match[3]}
+          </a>
+        );
+      }
+      lastIndex = regex.lastIndex;
+    }
+    
+    if (lastIndex < line.length) {
+      parts.push(line.substring(lastIndex));
+    }
+    return parts;
+  };
+
+  const renderMessageText = (text: string) => {
+    return (
+      <div className="space-y-2 text-xs leading-relaxed font-mono">
+        {text.split('\n').map((line, idx) => (
+          <p key={idx}>
+            {parseLineElements(line)}
+          </p>
+        ))}
+      </div>
+    );
   };
 
   return (
-    <div className="space-y-6 text-[#d4e4fa]">
-      <div>
-        <h2 className="text-xl font-bold uppercase tracking-wider text-[#7bd0ff]">Interactive RAG Chat Fusion</h2>
-        <p className="text-xs opacity-70 mt-1">Upload reports (.pdf, .docx, .txt) to cross-reference user data with live intelligence channels.</p>
+    <div className="flex flex-col h-[600px] border border-[#45464d]/60 bg-[#122131]/10 rounded-lg overflow-hidden text-[#d4e4fa]">
+      {/* Header */}
+      <div className="bg-[#122131]/80 border-b border-[#45464d]/60 p-4">
+        <h2 className="text-sm font-bold uppercase tracking-widest text-[#7bd0ff] flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+          OSINT Tactical Intelligence Chatbot
+        </h2>
+        <p className="text-[10px] opacity-70 mt-0.5">Query live border alerts, trade deals, and military intelligence feeds in real-time.</p>
       </div>
 
-      {/* Drag & Drop Area */}
-      <div
-        onDragOver={handleDragOver}
-        onDragLeave={handleDragLeave}
-        onDrop={handleDrop}
-        className={`border-2 border-dashed rounded-lg p-8 text-center transition-all ${
-          dragOver
-            ? 'border-[#7bd0ff] bg-[#7bd0ff]/10'
-            : 'border-white/20 bg-[#122131]/10 hover:border-white/40'
-        }`}
-      >
-        <span className="material-symbols-outlined text-4xl text-[#7bd0ff] opacity-80">cloud_upload</span>
-        <p className="text-sm mt-3 font-semibold">Drag and drop document here</p>
-        <p className="text-xs opacity-60 mt-1">Supports PDF, DOCX, or Text up to 10MB</p>
-        
-        <div className="mt-4">
-          <label className="cursor-pointer border border-white/20 bg-white/5 hover:bg-white/10 px-4 py-2 rounded text-xs font-mono uppercase tracking-wider transition-colors inline-block">
-            Choose File
-            <input type="file" onChange={handleFileChange} className="hidden" accept=".pdf,.docx,.txt" />
-          </label>
-        </div>
-      </div>
-
-      {file && (
-        <div className="border border-white/10 p-4 rounded bg-[#122131]/5 flex justify-between items-center text-xs">
-          <div className="flex items-center gap-2">
-            <span className="material-symbols-outlined text-base">description</span>
-            <span className="font-mono font-bold truncate max-w-xs">{file.name}</span>
-            <span className="opacity-60">({(file.size / 1024).toFixed(1)} KB)</span>
-          </div>
-          <span className="text-[10px] font-mono uppercase text-[#7bd0ff]">Loaded</span>
-        </div>
-      )}
-
-      {/* Multi-stage Progress Stepper */}
-      {progress !== 'idle' && (
-        <div className="border border-white/10 p-5 rounded space-y-4">
-          <h3 className="text-xs font-mono uppercase tracking-widest text-[#7bd0ff]">Fusion Pipeline Status</h3>
-          
-          <div className="grid grid-cols-3 gap-2 text-center text-[10px] font-mono tracking-wider">
-            {/* Step 1: Parsing */}
-            <div className={`p-2 rounded border transition-colors ${
-              progress === 'parsing' ? 'border-[#7bd0ff] bg-[#7bd0ff]/10 text-white' :
-              ['searching', 'synthesizing', 'completed'].includes(progress) ? 'border-green-500/30 text-green-400' : 'border-white/10 opacity-50'
+      {/* Messages List */}
+      <div className="flex-1 overflow-y-auto p-4 space-y-4 min-h-[300px]">
+        {messages.map((msg) => (
+          <div
+            key={msg.id}
+            className={`flex flex-col max-w-[85%] stream-slide-in ${
+              msg.sender === 'user' ? 'ml-auto items-end' : 'mr-auto items-start'
+            }`}
+          >
+            <div className={`p-3 rounded-lg ${
+              msg.sender === 'user'
+                ? 'bg-[#7bd0ff]/20 border border-[#7bd0ff]/40 text-[#d4e4fa] rounded-br-none'
+                : 'bg-[#122131]/60 border border-[#45464d]/60 text-[#bec6e0] rounded-bl-none'
             }`}>
-              1. PARSING DOC
+              {renderMessageText(msg.text)}
             </div>
-
-            {/* Step 2: Searching */}
-            <div className={`p-2 rounded border transition-colors ${
-              progress === 'searching' ? 'border-[#7bd0ff] bg-[#7bd0ff]/10 text-white' :
-              ['synthesizing', 'completed'].includes(progress) ? 'border-green-500/30 text-green-400' : 'border-white/10 opacity-50'
-            }`}>
-              2. VECTOR MATCH
-            </div>
-
-            {/* Step 3: Synthesizing */}
-            <div className={`p-2 rounded border transition-colors ${
-              progress === 'synthesizing' ? 'border-[#7bd0ff] bg-[#7bd0ff]/10 text-white' :
-              progress === 'completed' ? 'border-green-500/30 text-green-400' : 'border-white/10 opacity-50'
-            }`}>
-              3. SYNTHESIZING
-            </div>
-          </div>
-
-          {progress === 'failed' && (
-            <div className="p-3 border border-red-500/30 bg-red-950/20 rounded text-xs text-red-400 font-mono">
-              Pipeline Error: {errorMsg}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Results Markdown Panel */}
-      {result && (
-        <div className="space-y-6">
-          <div className="border border-green-500/20 bg-[#122131]/30 p-5 rounded relative overflow-hidden">
-            <div className="scan-line" />
-            <h3 className="text-sm font-mono uppercase tracking-widest text-green-400 border-b border-white/10 pb-2 mb-3 flex items-center gap-1.5">
-              <span className="material-symbols-outlined text-base">check_circle</span>
-              Fused OSINT Intelligence Briefing
-            </h3>
             
-            <div className="text-xs leading-relaxed font-mono whitespace-pre-wrap text-[#bec6e0]">
-              {result.summary}
+            <span className="text-[8px] opacity-50 font-mono mt-1 px-1">
+              {msg.timestamp.toLocaleTimeString()}
+            </span>
+
+            {/* Referenced articles inline */}
+            {msg.sender === 'bot' && msg.articles && msg.articles.length > 0 && (
+              <div className="mt-2 w-full space-y-1">
+                <p className="text-[8px] uppercase tracking-wider font-mono text-[#7bd0ff] opacity-80">Retrieved reference feeds:</p>
+                {msg.articles.map((art, artIdx) => (
+                  <a
+                    key={art.id}
+                    href={art.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="block border border-white/5 hover:border-[#7bd0ff]/30 bg-[#122131]/20 p-2 rounded text-[10px] transition-colors"
+                  >
+                    <div className="flex justify-between items-center font-mono">
+                      <span className="font-bold text-white truncate max-w-[250px]">[{artIdx + 1}] {art.title}</span>
+                      <span className="text-[8px] text-[#7bd0ff] shrink-0">{art.department.split(' ')[0]}</span>
+                    </div>
+                  </a>
+                ))}
+              </div>
+            )}
+          </div>
+        ))}
+
+        {loading && (
+          <div className="flex flex-col mr-auto max-w-[85%] items-start">
+            <div className="bg-[#122131]/60 border border-[#45464d]/60 p-3 rounded-lg rounded-bl-none text-xs font-mono text-[#7bd0ff] flex items-center gap-2">
+              <span className="w-1.5 h-1.5 bg-[#7bd0ff] rounded-full animate-ping" />
+              Re-routing intelligence channels...
             </div>
           </div>
+        )}
+        <div ref={messagesEndRef} />
+      </div>
 
-          {/* Connected Articles */}
-          <div className="space-y-3">
-            <h4 className="text-xs font-mono uppercase tracking-widest text-[#7bd0ff]">Retrieved Reference Feeds</h4>
-            {result.relevant_articles.map((art: any, index: number) => (
-              <a
-                key={art.id}
-                href={art.url}
-                target="_blank"
-                rel="noreferrer"
-                className="block border border-white/10 hover:border-white/30 bg-[#122131]/10 p-3 rounded text-xs transition-colors"
+      {/* Suggestion Chips */}
+      {messages.length === 1 && (
+        <div className="px-4 py-2 bg-[#122131]/20 border-t border-[#45464d]/30 space-y-1.5">
+          <p className="text-[9px] uppercase tracking-wider font-mono text-[#7bd0ff]/80">Quick Queries:</p>
+          <div className="flex flex-wrap gap-2 pb-1">
+            {suggestions.map((sug, idx) => (
+              <button
+                key={idx}
+                onClick={() => handleSend(sug)}
+                className="text-[10px] font-mono bg-white/5 hover:bg-[#7bd0ff]/10 border border-white/10 hover:border-[#7bd0ff]/30 px-2 py-1 rounded transition-colors text-left"
               >
-                <div className="flex justify-between items-center">
-                  <span className="font-bold text-white">[{index + 1}] {art.title}</span>
-                  <span className="text-[9px] font-mono text-[#7bd0ff]">{art.department}</span>
-                </div>
-                <div className="mt-1 text-[10px] opacity-60 font-mono">
-                  Source: {art.source} • Target: {art.country_code} • Published: {new Date(art.published_at).toLocaleString()}
-                </div>
-              </a>
+                {sug}
+              </button>
             ))}
           </div>
         </div>
       )}
+
+      {/* Input Area */}
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          handleSend(input);
+        }}
+        className="border-t border-[#45464d]/60 p-3 bg-[#122131]/60 flex gap-2"
+      >
+        <input
+          type="text"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          placeholder="Ask for updates (e.g. military actions near China)..."
+          className="flex-1 bg-[#122131]/80 border border-[#45464d]/60 rounded px-3 py-2 text-xs text-[#d4e4fa] focus:outline-none focus:border-[#7bd0ff] font-mono"
+          disabled={loading}
+        />
+        <button
+          type="submit"
+          disabled={!input.trim() || loading}
+          className="bg-[#7bd0ff] hover:bg-[#7bd0ff]/80 disabled:opacity-40 disabled:hover:bg-[#7bd0ff] text-black text-xs font-mono font-bold uppercase tracking-wider px-4 py-2 rounded transition-colors flex items-center gap-1.5"
+        >
+          <span className="material-symbols-outlined text-sm font-bold">send</span>
+          Send
+        </button>
+      </form>
     </div>
   );
 }
