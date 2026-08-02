@@ -9,6 +9,8 @@
     "dev:server": "python backend/run.py",
     "dev:worker": "python backend/run_worker.py",
     "build": "tsc -b && vite build",
+    "build:prod": "pip install -r backend/requirements.txt && tsc -b && vite build",
+    "start:prod": "uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT",
     "preview": "vite preview"
   },
   "dependencies": {
