@@ -121,7 +121,7 @@ async def seed_data_if_empty(session: AsyncSession):
     # Check if empty
     result = await session.execute(select(func.count(Article.id)))
     count = result.scalar()
-    if count >= 1200:
+    if count >= 2000:
         return
         
     logger.info("[Database] Seeding database with high density high impact realistic articles for all countries...")
@@ -222,7 +222,7 @@ async def seed_data_if_empty(session: AsyncSession):
                 f"Command reports high-readiness posture. Incident remains active under surveillance. "
                 f"Further updates are scheduled as the situation develops."
             )
-            pub_time = datetime.now(timezone.utc) - timedelta(hours=random.randint(1, 48), minutes=random.randint(0, 59))
+            pub_time = datetime.now(timezone.utc) - timedelta(minutes=random.randint(1, 55))
             
             sources_map = {
                 "Military & Defense": ["reuters.com", "apnews.com", "aljazeera.com"],
