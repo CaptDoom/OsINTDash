@@ -1,5 +1,6 @@
 {
   "name": "india-neighbor-news-dashboard",
+  "description": "An advanced, high-performance news and tactical telemetry intelligence dashboard (Drishya) monitoring India's border sectors and key global strategic sectors in real-time with comprehensive weather boundary HUDs and multi-source API integration.",
   "private": true,
   "version": "1.0.0",
   "type": "module",

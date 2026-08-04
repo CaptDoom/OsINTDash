@@ -1,6 +1,6 @@
 # Drishya
 
-A high-performance news and tactical telemetry intelligence dashboard monitoring India's border sectors in real-time. Built with a FastAPI ingestion mesh, SQLite fallback database, and a React/TypeScript/Vite frontend.
+An advanced, high-performance news and tactical telemetry intelligence dashboard monitoring India's border sectors and key global strategic partners (including US, Russia, Iran, Israel, Taiwan, and neighbors) in real-time. Features a comprehensive meteorological boundary HUD, a live world map, FastAPI parallel ingestion mesh with fallback mechanisms, and an interactive OSINT intelligence chatbot.
 
 ---
 
