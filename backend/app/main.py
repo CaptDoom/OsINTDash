@@ -629,7 +629,7 @@ async def world_alerts_endpoint(
     now = datetime_now()
     cutoff = now - timedelta_now(days=7)
 
-    stmt = select(Article).where(Article.published_at >= cutoff).order_by(Article.published_at.desc()).limit(150)
+    stmt = select(Article).where(Article.published_at >= cutoff).order_by(Article.published_at.desc()).limit(2000)
     result = await db.execute(stmt)
     articles = result.scalars().all()
 
@@ -644,7 +644,7 @@ async def world_alerts_endpoint(
             continue
         seen.add(key)
         alerts.append(alert)
-        if len(alerts) >= 20:
+        if len(alerts) >= 1500:
             break
 
     return {

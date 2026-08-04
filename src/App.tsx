@@ -1412,7 +1412,7 @@ function App() {
       }
     });
 
-    return Array.from(deduped.values()).slice(0, 180);
+    return Array.from(deduped.values()).slice(0, 1000);
   }, [worldAlerts]);
 
   const fallbackWorldMapMarkers = useMemo<WorldGeoMapMarker[]>(() => {
@@ -1444,6 +1444,10 @@ function App() {
 
       const latestMedium = (intel.signals || [])
         .filter((signal) => Boolean(signal.url) && signal.impact === 'Medium')
+        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
+
+      const latestLow = (intel.signals || [])
+        .filter((signal) => Boolean(signal.url) && signal.impact === 'Low')
         .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
 
       if (latestHigh?.url) {
@@ -1479,6 +1483,23 @@ function App() {
           countryCode: latestMedium.country_code || (worldCountries as any[]).find(c => c.name.common.toLowerCase() === countryName.toLowerCase())?.cca2 || '',
         });
       }
+
+      if (latestLow?.url) {
+        const coordinates = resolveCoordinates(latestLow, countryName);
+        if (!coordinates) return;
+        markers.push({
+          id: `fallback-${countryName}-low-${latestLow.id || latestLow.timestamp}`,
+          location: latestLow.location_name || countryName,
+          lat: coordinates.lat,
+          lon: coordinates.lon,
+          severity: 'low',
+          headline: latestLow.headline,
+          source: latestLow.source,
+          url: latestLow.url,
+          timestamp: latestLow.timestamp,
+          countryCode: latestLow.country_code || (worldCountries as any[]).find(c => c.name.common.toLowerCase() === countryName.toLowerCase())?.cca2 || '',
+        });
+      }
     });
 
     return markers;
@@ -1504,7 +1525,7 @@ function App() {
     });
 
     // Support displaying all dynamic countries on the world map
-    return sorted.slice(0, 250);
+    return sorted.slice(0, 1500);
   }, [techFocusWorldMapMarkers, worldMapMarkers, fallbackWorldMapMarkers]);
 
   const clampPan = (x: number, y: number, zoom: number): WorldMapPan => {

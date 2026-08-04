@@ -121,20 +121,44 @@ async def seed_data_if_empty(session: AsyncSession):
     # Check if empty
     result = await session.execute(select(func.count(Article.id)))
     count = result.scalar()
-    if count >= 1125:
+    if count >= 1200:
         return
         
-    logger.info("[Database] Seeding database with high density high impact realistic articles...")
+    logger.info("[Database] Seeding database with high density high impact realistic articles for all countries...")
     
     # Delete old seeding to ensure clean, high-density data without duplicate key errors
     from sqlalchemy import delete
     await session.execute(delete(Article))
     await session.commit()
     
-    countries_list = [
-        "China", "Pakistan", "Afghanistan", "Bangladesh", "Myanmar", "Nepal", "Bhutan", "Sri Lanka", "Maldives",
-        "India", "United States", "Russia", "Iran", "Israel", "Taiwan"
-    ]
+    from pathlib import Path
+    
+    countries_map = {}
+    PROJECT_ROOT = Path(__file__).resolve().parents[2]
+    COUNTRIES_JSON_PATH = PROJECT_ROOT / "node_modules" / "world-countries" / "countries.json"
+    if COUNTRIES_JSON_PATH.exists():
+        try:
+            with open(COUNTRIES_JSON_PATH, "r", encoding="utf-8") as f:
+                countries_data = json.load(f)
+                for c in countries_data:
+                    cca2 = c.get("cca2", "").upper()
+                    name = c.get("name", {}).get("common", "")
+                    if cca2 and name:
+                        countries_map[name] = cca2
+        except Exception as e:
+            logger.error(f"[Database] Failed to load countries.json: {e}")
+            
+    if not countries_map:
+        countries_map = {
+            "China": "CN", "Pakistan": "PK", "Afghanistan": "AF", "Bangladesh": "BD",
+            "Myanmar": "MM", "Nepal": "NP", "Bhutan": "BT", "Sri Lanka": "LK", "Maldives": "MV",
+            "India": "IN", "United States": "US", "Russia": "RU", "Iran": "IR", "Israel": "IL",
+            "Taiwan": "TW", "Ukraine": "UA", "Japan": "JP", "South Korea": "KR", "United Kingdom": "GB",
+            "France": "FR", "Germany": "DE", "Syria": "SY", "Yemen": "YE", "North Korea": "KP",
+            "Saudi Arabia": "SA", "Iraq": "IQ", "Libya": "LY", "Somalia": "SO", "Sudan": "SD",
+            "Venezuela": "VE"
+        }
+
     departments = [
         "Military & Defense",
         "Economic & Financial",
@@ -186,71 +210,71 @@ async def seed_data_if_empty(session: AsyncSession):
     from datetime import timedelta
     
     seeded_count = 0
-    country_codes = {
-        "China": "CN", "Pakistan": "PK", "Afghanistan": "AF", "Bangladesh": "BD",
-        "Myanmar": "MM", "Nepal": "NP", "Bhutan": "BT", "Sri Lanka": "LK", "Maldives": "MV",
-        "India": "IN", "United States": "US", "Russia": "RU", "Iran": "IR", "Israel": "IL",
-        "Taiwan": "TW"
-    }
 
-    for country in countries_list:
-        cc = country_codes.get(country, "GL")
-        for dept in departments:
-            # Create 15 unique articles per department
+    for country, cc in countries_map.items():
+        for idx, dept in enumerate(departments):
+            # Create 1 unique article per department (5 total per country)
             title_templates = templates[dept]
-            for i in range(15):
-                temp = title_templates[i % len(title_templates)]
-                title = temp.format(country=country) + f" (Intel Alert #{100 + i * 17 + random.randint(1, 9)})"
-                content = (
-                    f"Factual intelligence report detailing operational telemetry sweeps near the {country} frontier. "
-                    f"Command reports high-readiness posture. Incident remains active under surveillance. "
-                    f"Further updates are scheduled as the situation develops."
-                )
-                pub_time = datetime.now(timezone.utc) - timedelta(hours=random.randint(1, 48), minutes=random.randint(0, 59))
-                
-                sources_map = {
-                    "Military & Defense": ["reuters.com", "apnews.com", "aljazeera.com"],
-                    "Economic & Financial": ["bloomberg.com", "reuters.com", "dw.com"],
-                    "Social Affairs & Welfare": ["bbc.com", "france24.com", "dw.com"],
-                    "Political & Diplomatic": ["theguardian.com", "nytimes.com", "aljazeera.com"],
-                    "Technology & Cyber": ["techcrunch.com", "wired.com", "theverge.com"]
-                }
-                src_list = sources_map.get(dept, ["bbc.com"])
-                source = src_list[i % len(src_list)]
+            temp = random.choice(title_templates)
+            title = temp.format(country=country) + f" (Intel Alert #{100 + idx * 17 + random.randint(1, 9)})"
+            content = (
+                f"Factual intelligence report detailing operational telemetry sweeps near the {country} frontier. "
+                f"Command reports high-readiness posture. Incident remains active under surveillance. "
+                f"Further updates are scheduled as the situation develops."
+            )
+            pub_time = datetime.now(timezone.utc) - timedelta(hours=random.randint(1, 48), minutes=random.randint(0, 59))
+            
+            sources_map = {
+                "Military & Defense": ["reuters.com", "apnews.com", "aljazeera.com"],
+                "Economic & Financial": ["bloomberg.com", "reuters.com", "dw.com"],
+                "Social Affairs & Welfare": ["bbc.com", "france24.com", "dw.com"],
+                "Political & Diplomatic": ["theguardian.com", "nytimes.com", "aljazeera.com"],
+                "Technology & Cyber": ["techcrunch.com", "wired.com", "theverge.com"]
+            }
+            src_list = sources_map.get(dept, ["bbc.com"])
+            source = random.choice(src_list)
 
-                url_map = {
-                    "reuters.com": "https://www.reuters.com/world/",
-                    "apnews.com": "https://apnews.com/hub/world-news",
-                    "aljazeera.com": "https://www.aljazeera.com/news/",
-                    "bloomberg.com": "https://www.bloomberg.com/",
-                    "bbc.com": "https://www.bbc.com/news",
-                    "dw.com": "https://www.dw.com/en/world/",
-                    "france24.com": "https://www.france24.com/en/",
-                    "theguardian.com": "https://www.theguardian.com/world",
-                    "nytimes.com": "https://www.nytimes.com/section/world",
-                    "techcrunch.com": "https://techcrunch.com/",
-                    "wired.com": "https://www.wired.com/",
-                    "theverge.com": "https://www.theverge.com/"
-                }
-                url = f"{url_map.get(source, 'https://www.bbc.com/news')}?feed_id={cc.lower()}-{dept.lower().split()[0]}-{i}-{random.randint(10000, 99999)}"
+            url_map = {
+                "reuters.com": "https://www.reuters.com/world/",
+                "apnews.com": "https://apnews.com/hub/world-news",
+                "aljazeera.com": "https://www.aljazeera.com/news/",
+                "bloomberg.com": "https://www.bloomberg.com/",
+                "bbc.com": "https://www.bbc.com/news",
+                "dw.com": "https://www.dw.com/en/world/",
+                "france24.com": "https://www.france24.com/en/",
+                "theguardian.com": "https://www.theguardian.com/world",
+                "nytimes.com": "https://www.nytimes.com/section/world",
+                "techcrunch.com": "https://techcrunch.com/",
+                "wired.com": "https://www.wired.com/",
+                "theverge.com": "https://www.theverge.com/"
+            }
+            url = f"{url_map.get(source, 'https://www.bbc.com/news')}?feed_id={cc.lower()}-{dept.lower().split()[0]}-{idx}-{random.randint(10000, 99999)}"
 
-                db_article = Article(
-                    title=title,
-                    headline=title,
-                    summary=f"Intelligence briefing regarding localized {dept.lower()} activity near the {country} border.",
-                    content=content,
-                    url=url,
-                    source=source,
-                    country_code=cc,
-                    published_at=pub_time,
-                    impact_level="High Impact",
-                    department=dept
-                )
-                session.add(db_article)
-                seeded_count += 1
+            # 1 High, 2 Medium, 2 Normal
+            if idx == 0:
+                impact = "High Impact"
+            elif idx in (1, 3):
+                impact = "Medium Impact"
+            else:
+                impact = "Normal Impact"
+
+            db_article = Article(
+                title=title,
+                headline=title,
+                summary=f"Intelligence briefing regarding localized {dept.lower()} activity near the {country} border.",
+                content=content,
+                url=url,
+                source=source,
+                country_code=cc,
+                published_at=pub_time,
+                impact_level=impact,
+                department=dept
+            )
+            session.add(db_article)
+            seeded_count += 1
                 
     await session.commit()
-    logger.info(f"[Database] Seeding finished. Added {seeded_count} High Impact articles.")
+    logger.info(f"[Database] Seeding finished. Added {seeded_count} articles across {len(countries_map)} countries.")
 
 async def create_tables():
     if engine is None:
