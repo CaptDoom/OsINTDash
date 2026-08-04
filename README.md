@@ -35,8 +35,10 @@ graph TD
 ## 2. Key Features
 
 - **OSINT Tactical Intelligence Chatbot**: Replaced file uploading with an interactive scrolling chatbot. Query border alerts, trade deals, and troop movements in real-time. Supports markdown parsing (bold and hyperlinks) and lists reference news card links directly under responses.
+- **Real-Time Meteorological Boundary HUD**: Real-time weather telemetry monitoring across 15 stations along the entire Indian international border sectors (including Jammu, Kargil, Rann of Kutch, Lipulekh, Nathu La, Moreh, and Minicoy Island) using the OpenWeatherMap API.
+- **Expanded Live Worldmap Coverage**: Real-time alert markers and news feeds expanded beyond immediate neighbors to cover key global strategic partners and regions (India, United States, Russia, Iran, Israel, Taiwan).
+- **Abundant News & fallbacks**: Increased seeding to 1125 high-quality articles, ensuring a minimum of 10 articles per category for every monitored country. Implemented frontend and backend fallbacks to prevent empty feed or archive views.
 - **Unified Ingestion & High Density**: Consolidates news queries into unified API searches, saving 90% key quota. The ingestion pipeline scrapes up to **500 raw articles** per sweep cycle (up to 50 articles per border country) to guarantee high-fidelity operational signals.
-- **Abundant News Feeds**: In order to prevent empty dashboard displays, the query lookup is set to 30 days and the frontend dynamically merges recent events with matching older historical articles, maintaining a rich, populated dossier (15-30 articles) at all times.
 - **Precise Classification Matching**: Uses standalone word boundaries (`\b...s?\b`) inside the classification regex engine to ensure zero false positive match collisions on common English terms (e.g. word *sports* matching *port*, *said* matching *aid*).
 - **Local LLM Synthesis (Ollama)**: Natively supports local Ollama API queries (using `llama3.1:8b-instruct`) for chatbot summaries and executive briefings, falling back to local rule-based Markdown synthesis only when the local model is offline.
 - **Automated Test Suite**: Equipped with a comprehensive unittest suite validating database connections, classification rules, summarizer heuristics, and FastAPI endpoint routes.
@@ -53,8 +55,8 @@ graph TD
 ### Installation
 1. Clone the repository:
    ```bash
-   git clone https://github.com/Seekay/globalive.git
-   cd globalive
+   git clone https://github.com/CaptDoom/newsFeed.git
+   cd newsFeed
    ```
 2. Install dependencies:
    ```bash
@@ -64,6 +66,11 @@ graph TD
 3. Set up credentials in the `.env` file at the project root:
    ```env
    NEWS_API_KEY=your_news_api_key_here
+   NEWSDATA_API_KEY=your_newsdata_api_key_here
+   GNEWS_API_KEY=your_gnews_api_key_here
+   CURRENTS_API_KEY=your_currents_api_key_here
+   MEDIASTACK_API_KEY=your_mediastack_api_key_here
+   OPENWEATHERMAP_API_KEY=your_openweather_api_key_here
    LLM_PROVIDER=ollama
    LLM_MODEL=llama3.1:8b-instruct
    OLLAMA_BASE_URL=http://127.0.0.1:11434
