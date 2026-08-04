@@ -1218,6 +1218,22 @@ function App() {
         const headline = template.replace('{country}', selectedCountry.name) + ` (Telemetry Alert #${200 + i * 13})`;
         const source = sources[i % sources.length];
         
+        const urlMap: Record<string, string> = {
+          'bbc.com': 'https://www.bbc.com/news',
+          'reuters.com': 'https://www.reuters.com/world',
+          'apnews.com': 'https://apnews.com/hub/world-news',
+          'aljazeera.com': 'https://www.aljazeera.com/news',
+          'bloomberg.com': 'https://www.bloomberg.com',
+          'dw.com': 'https://www.dw.com/en/world',
+          'france24.com': 'https://www.france24.com/en',
+          'theguardian.com': 'https://www.theguardian.com/world',
+          'nytimes.com': 'https://www.nytimes.com/section/world',
+          'techcrunch.com': 'https://techcrunch.com',
+          'wired.com': 'https://www.wired.com',
+          'theverge.com': 'https://www.theverge.com'
+        };
+        const url = `${urlMap[source] || 'https://www.' + source}?feed_id=${selectedCountry.name.toLowerCase()}-${selectedCategory.toLowerCase()}-${i}-${Math.floor(Math.random() * 90000) + 10000}`;
+
         mockSignals.push({
           id: `dynamic-mock-${selectedCountry.name}-${selectedCategory}-${i}`,
           country: selectedCountry.name,
@@ -1227,7 +1243,7 @@ function App() {
           summary: `Factual OSINT telemetry signal indicating active ${selectedCategory.toLowerCase()} operations near the border. Surveillance networks report normal stability.`,
           source: source,
           timestamp: new Date(Date.now() - (i + 1) * 4 * 3600 * 1000).toISOString(),
-          url: `https://${source}/osint-news-${selectedCategory.toLowerCase()}-${i}`,
+          url: url,
           verification_status: "Verified Source",
           confidence_score: 0.98
         });
@@ -4014,13 +4030,29 @@ function ArchiveView() {
       const title = template.replace('{country}', country) + ` (OSINT Archive #${300 + i * 19})`;
       const source = sources[i % sources.length];
       
+      const urlMap: Record<string, string> = {
+        'bbc.com': 'https://www.bbc.com/news',
+        'reuters.com': 'https://www.reuters.com/world',
+        'apnews.com': 'https://apnews.com/hub/world-news',
+        'aljazeera.com': 'https://www.aljazeera.com/news',
+        'bloomberg.com': 'https://www.bloomberg.com',
+        'dw.com': 'https://www.dw.com/en/world',
+        'france24.com': 'https://www.france24.com/en',
+        'theguardian.com': 'https://www.theguardian.com/world',
+        'nytimes.com': 'https://www.nytimes.com/section/world',
+        'techcrunch.com': 'https://techcrunch.com',
+        'wired.com': 'https://www.wired.com',
+        'theverge.com': 'https://www.theverge.com'
+      };
+      const url = `${urlMap[source] || 'https://www.' + source}?feed_id=${country.toLowerCase()}-${targetDept.toLowerCase()}-${i}-${Math.floor(Math.random() * 90000) + 10000}`;
+
       mockArticles.push({
         id: `fallback-archive-${timeframe}-${dept}-${i}`,
         title: title,
         headline: title,
         summary: `Factual OSINT telemetry record confirming stable and secure ${targetDept.toLowerCase()} conditions near the border. Joint command checks confirm standard operating patterns.`,
         content: `Factual intelligence report detailing operational telemetry sweeps near the ${country} frontier. Command reports high-readiness posture. Incident remains active under surveillance. Further updates are scheduled as the situation develops.`,
-        url: `https://${source}/archive/news-${i}`,
+        url: url,
         source: source,
         country_code: country.substring(0, 2).toUpperCase(),
         published_at: new Date(Date.now() - (i + 1) * 36 * 3600 * 1000).toISOString(),

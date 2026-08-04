@@ -209,21 +209,37 @@ async def seed_data_if_empty(session: AsyncSession):
                 pub_time = datetime.now(timezone.utc) - timedelta(hours=random.randint(1, 48), minutes=random.randint(0, 59))
                 
                 sources_map = {
-                    "Military & Defense": ["defence-wire.org", "border-patrol.in", "strategic-intel.com"],
-                    "Economic & Financial": ["asia-trade.com", "financial-post.org", "economic-brief.in"],
-                    "Social Affairs & Welfare": ["regional-welfare.org", "frontier-news.in", "social-pulse.com"],
-                    "Political & Diplomatic": ["diplomatic-times.org", "summit-reports.in", "political-wire.com"],
-                    "Technology & Cyber": ["cyber-monitor.gov.in", "telecom-weekly.com", "space-telemetry.org"]
+                    "Military & Defense": ["reuters.com", "apnews.com", "aljazeera.com"],
+                    "Economic & Financial": ["bloomberg.com", "reuters.com", "dw.com"],
+                    "Social Affairs & Welfare": ["bbc.com", "france24.com", "dw.com"],
+                    "Political & Diplomatic": ["theguardian.com", "nytimes.com", "aljazeera.com"],
+                    "Technology & Cyber": ["techcrunch.com", "wired.com", "theverge.com"]
                 }
-                src_list = sources_map.get(dept, ["intel-mesh.org"])
+                src_list = sources_map.get(dept, ["bbc.com"])
                 source = src_list[i % len(src_list)]
+
+                url_map = {
+                    "reuters.com": "https://www.reuters.com/world/",
+                    "apnews.com": "https://apnews.com/hub/world-news",
+                    "aljazeera.com": "https://www.aljazeera.com/news/",
+                    "bloomberg.com": "https://www.bloomberg.com/",
+                    "bbc.com": "https://www.bbc.com/news",
+                    "dw.com": "https://www.dw.com/en/world/",
+                    "france24.com": "https://www.france24.com/en/",
+                    "theguardian.com": "https://www.theguardian.com/world",
+                    "nytimes.com": "https://www.nytimes.com/section/world",
+                    "techcrunch.com": "https://techcrunch.com/",
+                    "wired.com": "https://www.wired.com/",
+                    "theverge.com": "https://www.theverge.com/"
+                }
+                url = f"{url_map.get(source, 'https://www.bbc.com/news')}?feed_id={cc.lower()}-{dept.lower().split()[0]}-{i}-{random.randint(10000, 99999)}"
 
                 db_article = Article(
                     title=title,
                     headline=title,
                     summary=f"Intelligence briefing regarding localized {dept.lower()} activity near the {country} border.",
                     content=content,
-                    url=f"https://{source}/report/{cc.lower()}/{dept.lower().split()[0]}/{i}/{random.randint(1000, 9999)}",
+                    url=url,
                     source=source,
                     country_code=cc,
                     published_at=pub_time,
