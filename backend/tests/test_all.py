@@ -1,7 +1,7 @@
 import unittest
 import sys
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Set sys.path to workspace root
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
@@ -79,7 +79,7 @@ class TestSummarizerFallback(unittest.TestCase):
             url="https://intel.local/test",
             source="TEST-SOURCE",
             country_code="CN",
-            published_at=datetime.utcnow(),
+            published_at=datetime.now(timezone.utc),
             impact_level="High Impact",
             department="Military & Defense"
         )
@@ -108,6 +108,26 @@ class TestFastAPIRoutes(unittest.TestCase):
         data = response.json()
         self.assertIn("China", data)
         self.assertIn("Pakistan", data)
+
+    def test_news_all_max_age_hours(self):
+        response = self.client.get("/api/news/all?max_age_hours=1")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("China", data)
+
+    def test_weather_border_route(self):
+        response = self.client.get("/api/weather/border")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        for name in ["Siachen Glacier", "Pangong Tso", "Tawang Sector", "Doklam Sector", "Sir Creek"]:
+            self.assertIn(name, data)
+            sector_data = data[name]
+            self.assertEqual(sector_data["sector"], name)
+            self.assertIn("temperature", sector_data)
+            self.assertIn("condition", sector_data)
+            self.assertIn("visibility_km", sector_data)
+            self.assertIn("wind_speed_kmh", sector_data)
+            self.assertIn("source", sector_data)
 
     def test_chat_query_route(self):
         response = self.client.post("/api/chat/query", json={"query": "test"})

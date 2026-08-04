@@ -1,5 +1,5 @@
-from __future__ import annotations
-
+import json
+from pathlib import Path
 import asyncio
 import hashlib
 import logging
@@ -40,6 +40,21 @@ ISO_COUNTRIES: Dict[str, str] = {
     "DE": "Germany",
     "KR": "South Korea",
 }
+
+# Dynamically load coordinates and names from world-countries npm package
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+COUNTRIES_JSON_PATH = PROJECT_ROOT / "node_modules" / "world-countries" / "countries.json"
+if COUNTRIES_JSON_PATH.exists():
+    try:
+        with open(COUNTRIES_JSON_PATH, "r", encoding="utf-8") as f:
+            countries_data = json.load(f)
+            for c in countries_data:
+                cca2 = c.get("cca2", "").upper()
+                name = c.get("name", {}).get("common", "")
+                if cca2 and name:
+                    ISO_COUNTRIES[cca2] = name
+    except Exception as e:
+        logger.warning("[Ingestion] Failed to populate ISO_COUNTRIES from countries.json: %s", e)
 
 for char1 in range(65, 91):
     for char2 in range(65, 91):
@@ -82,7 +97,11 @@ def _parse_datetime(value: str | None) -> datetime:
 
 
 def _priority_codes() -> List[str]:
-    return list(dict.fromkeys(settings.critical_countries + settings.high_countries + settings.medium_countries + settings.low_countries))
+    # Prioritize settings watchlists, then append all other world country codes
+    config_codes = list(dict.fromkeys(settings.critical_countries + settings.high_countries + settings.medium_countries + settings.low_countries))
+    all_codes = list(ISO_COUNTRIES.keys())
+    merged = config_codes + [code for code in all_codes if code not in config_codes]
+    return merged
 
 
 def _country_priority(code: str) -> str:
@@ -105,6 +124,25 @@ def _should_refresh(priority: str) -> int:
     return settings.country_refresh_minutes_low
 
 
+def get_clear_source(url: str | None, current_source: str | None) -> str:
+    from urllib.parse import urlparse
+    src = (current_source or "").strip()
+    generic_sources = {"rss", "newsapi", "gdelt", "unknown", "none", "osint", "osint-mesh", "feed", "api", "web", "internet"}
+    if src and src.lower() not in generic_sources:
+        return src
+    if url:
+        try:
+            parsed = urlparse(url)
+            domain = parsed.netloc
+            if domain:
+                if domain.startswith("www."):
+                    domain = domain[4:]
+                return domain
+        except Exception:
+            pass
+    return src or "OSINT Mesh"
+
+
 def _parse_rss_items(xml_text: str, country_code: str, country_name: str, limit: int) -> List[Dict[str, Any]]:
     try:
         root = ET.fromstring(xml_text)
@@ -116,7 +154,7 @@ def _parse_rss_items(xml_text: str, country_code: str, country_name: str, limit:
             title = item.findtext("title") or "Untitled"
             link = item.findtext("link") or ""
             desc = item.findtext("description") or ""
-            source = item.findtext("source") or "RSS"
+            source = get_clear_source(link, item.findtext("source") or "RSS")
             if "<" in desc:
                 desc = re.sub("<[^<]+?>", "", desc)
             items.append(
@@ -139,13 +177,15 @@ def _parse_rss_items(xml_text: str, country_code: str, country_name: str, limit:
 
 def _normalize_gdelt_record(article: Dict[str, Any], country_code: str, country_name: str) -> Dict[str, Any]:
     title = article.get("title") or article.get("seendate") or "Untitled"
+    url = article.get("url") or ""
+    source = get_clear_source(url, article.get("sourceCountry") or article.get("domain") or "GDELT")
     return {
         "title": title,
         "headline": title,
         "content": article.get("excerpt") or article.get("content") or article.get("title") or "",
         "summary": article.get("excerpt") or article.get("title") or "",
-        "url": article.get("url") or "",
-        "source": article.get("sourceCountry") or article.get("domain") or "GDELT",
+        "url": url,
+        "source": source,
         "country_code": country_code,
         "country_name": country_name,
         "published_at": _parse_datetime(article.get("seendate") or article.get("datetime")),
@@ -191,6 +231,8 @@ def _normalize_api_article(article: Dict[str, Any], country_code: str, country_n
     elif article.get("source"):
         source = article.get("source")
 
+    source = get_clear_source(url, source)
+
     return {
         "title": article.get("title") or article.get("headline") or article.get("name") or "Untitled",
         "headline": article.get("title") or article.get("headline") or article.get("name") or "Untitled",
@@ -205,7 +247,8 @@ def _normalize_api_article(article: Dict[str, Any], country_code: str, country_n
 
 
 def _search_query(country_name: str) -> str:
-    return f"{country_name} conflict OR security OR border OR military OR diplomatic OR economy OR summit OR trade"
+    # Expanded query supporting Military, Economic, Political, and Social sectors
+    return f"{country_name} conflict OR security OR border OR military OR diplomatic OR economy OR summit OR trade OR protest OR crisis OR social"
 
 
 async def fetch_newsapi_feed(client: httpx.AsyncClient, country_code: str, country_name: str, limit: int, breaker: CircuitState) -> List[Dict[str, Any]]:
@@ -216,7 +259,7 @@ async def fetch_newsapi_feed(client: httpx.AsyncClient, country_code: str, count
         "q": _search_query(country_name),
         "language": "en",
         "pageSize": limit,
-        "sortBy": "relevancy",
+        "sortBy": "publishedAt",
         "apiKey": settings.newsapi_key,
     }
     response = await _get_with_retry(client, "https://newsapi.org/v2/everything", source_name="NewsAPI", breaker=breaker, params=params)
@@ -255,9 +298,10 @@ async def fetch_newsdata_feed(client: httpx.AsyncClient, country_code: str, coun
     if not settings.newsdata_api_key:
         return []
 
+    # NewsData.io free tier keys reject complex boolean queries with a 422, so we use the country name directly
     params = {
         "apikey": settings.newsdata_api_key,
-        "q": _search_query(country_name),
+        "q": country_name,
         "language": "en",
         "size": limit,
     }
@@ -280,6 +324,8 @@ async def fetch_worldnews_feed(client: httpx.AsyncClient, country_code: str, cou
         "key": settings.world_news_api_key,
         "language": "en",
         "q": _search_query(country_name),
+        "sort": "publish-time",
+        "sort-direction": "DESC",
         "page": 1,
         "pageSize": limit,
     }

@@ -193,9 +193,13 @@ async def process_fusion_job(job_id: str, temp_file_path: str, filename: str):
             )
 
         await job_store.update(job_id, "fusion", status="synthesizing", progress=75, step="synthesizing")
+        # 2. LLM synthesis
         prompt = f"""
-        You are an expert geopolitical intelligence analyst.
-        Below is the text extracted from an internal user document:
+        CLASSIFICATION: UNCLASSIFIED // OSINT FOR INTERNAL STRATCOM USE ONLY
+        GEOPOLITICAL INTELLIGENCE FUSION REPORT
+        
+        You are a Senior Intelligence Analyst at the Strategic Command (STRATCOM).
+        Below is the text extracted from an uploaded internal tactical document:
         -----------------------------------------------------
         {extracted_text[:3000]}
         -----------------------------------------------------
@@ -205,9 +209,15 @@ async def process_fusion_job(job_id: str, temp_file_path: str, filename: str):
         {article_context}
         -----------------------------------------------------
 
-        Write a cohesive Fused Intelligence Report summarizing the overlap and connections.
-        You MUST cite the news sources where applicable (e.g., "[Title of news article](URL)").
-        If the document has no relation to the news reports, state that clearly but write a helpful brief.
+        INSTRUCTIONS:
+        1. Deliver a formal, objective, and analytical briefing suitable for military command/government briefing.
+        2. Format using clear tactical headings:
+           - **1. OPERATIONAL SITUATION OVERVIEW**: Summary of facts, locations, and actions.
+           - **2. CROSS-REFERENCE ANALYSIS**: Synthesizing the overlap and connections between the uploaded document and OSINT feeds.
+           - **3. THREAT EVALUATION & RECOMMENDATIONS**: Assess stability impact, warnings, and security indices.
+        3. You must use a passive, objective, and authoritative tone. Avoid conversational fillers, jokes, or first-person pronouns.
+        4. You MUST cite the news sources where applicable using markdown links (e.g. "[Title of news article](URL)").
+        5. If the document has no relation to the news reports, state "NO CORRELATION ESTABLISHED" and write a helpful brief.
         """
 
         fused_summary = ""
@@ -273,22 +283,28 @@ def extract_simple_docx_text(path: str) -> str:
         return "Word document text extraction fallback"
 
 def generate_local_fusion_fallback(doc_text: str, articles: List[Article]) -> str:
-    md = "# Fused Intelligence Summary (Offline Fallback Mode)\n\n"
-    md += "Unable to query cloud LLM APIs. Generating standard semantic overlap details:\n\n"
+    md = "CLASSIFICATION: UNCLASSIFIED // OSINT FOR INTERNAL STRATCOM USE ONLY\n"
+    md += "TACTICAL GEOPOLITICAL INTELLIGENCE REPORT (OFFLINE FALLBACK)\n\n"
     
-    md += "### User Document Context Snippet\n"
-    md += f"> {doc_text[:350]}...\n\n"
+    md += "**1. OPERATIONAL SITUATION OVERVIEW**\n"
+    md += f"Source document contains basic intelligence query or text: \n> {doc_text[:350]}...\n\n"
     
-    md += "### Connected Public Reports\n"
+    md += "**2. DETAILED ANALYSIS & CROSS-REFERENCE**\n"
     if not articles:
-        md += "*No semantic overlap could be established with current high-impact news archives.*\n"
-    for art in articles:
-        md += (
-            f"* **[{art.title}]({art.url})** (Source: {art.source} | Department: {art.department} | Target: {art.country_code})\n"
-            f"  {art.summary or art.content[:160]}...\n\n"
-        )
-    md += "### Fusion Insight\n"
-    md += "The best matched sources above were selected based on shared terminology and verified impact signals. Review the summarized report for focus areas and supporting evidence.\n"
+        md += "*NO LIVE GEOPOLITICAL OSINT FEEDS IDENTIFIED IN SPECIFIED SECTOR.*\n\n"
+    else:
+        md += "Matched the following public threat assets in active surveillance cache:\n\n"
+        for art in articles:
+            md += (
+                f"*   **[{art.title}]({art.url or '#'})**\n"
+                f"    *   *Source*: {art.source or 'Unknown'}\n"
+                f"    *   *Department*: {art.department or 'Unclassified'}\n"
+                f"    *   *Sector Target*: {art.country_code or 'Global'}\n"
+                f"    *   *Brief*: {art.summary or art.content[:160]}...\n\n"
+            )
+            
+    md += "**3. THREAT EVALUATION & RECOMMENDATIONS**\n"
+    md += "Tactical cross-reference compiled successfully. Threat indexes are calibrated against term weights and matching threat parameters in the local memory database. Continuous monitoring is recommended.\n"
     return md
 
 
@@ -333,20 +349,29 @@ async def chat_query(payload: ChatQuery):
 
     # 2. LLM synthesis
     prompt = f"""
-    You are an expert geopolitical intelligence analyst.
-    The user is asking a live query regarding recent events:
+    CLASSIFICATION: UNCLASSIFIED // OSINT FOR INTERNAL STRATCOM USE ONLY
+    TACTICAL GEOPOLITICAL INTELLIGENCE SUMMARY
+    
+    You are a Senior Intelligence Analyst at the Strategic Command (STRATCOM).
+    The operator has submitted the following query:
     -----------------------------------------------------
-    Query: {query_text}
+    QUERY: {query_text}
     -----------------------------------------------------
 
-    Answer this query based on the following verified public OSINT news reports:
+    Analyze and answer this query based on the following verified public OSINT news reports:
     -----------------------------------------------------
     {article_context}
     -----------------------------------------------------
 
-    Write a precise, concise, and real-time AI news briefing answering the user's query.
-    You MUST cite the news sources where applicable (e.g., "[Title of news article](URL)").
-    If no relevant information is in the reports, answer to the best of your ability but clarify what the verified sources say.
+    INSTRUCTIONS:
+    1. Deliver a formal, objective, and analytical briefing suitable for military command/government briefing.
+    2. Format using clear tactical headings:
+       - **1. OPERATIONAL SITUATION OVERVIEW**: Summary of facts, locations, and actions.
+       - **2. DETAILED ANALYSIS**: Cross-referencing entities, movements, and key dates.
+       - **3. THREAT EVALUATION**: Assess stability impact, warnings, and security indices.
+    3. You must use a passive, objective, and authoritative tone. Avoid conversational fillers, jokes, or first-person pronouns.
+    4. You MUST cite the news sources where applicable using markdown links (e.g. "[Title of news article](URL)").
+    5. If no relevant information is available in the provided reports, state "NO LIVE OSINT FEEDS IN SPECIFIED SECTOR" and provide a brief general security assessment.
     """
 
     fused_summary = ""

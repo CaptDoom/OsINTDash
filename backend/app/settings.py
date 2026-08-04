@@ -74,7 +74,7 @@ class Settings(BaseSettings):
 
     critical_countries: List[str] = Field(default_factory=lambda: ["CN", "PK", "AF", "MM"])
     high_countries: List[str] = Field(default_factory=lambda: ["BD", "NP", "BT", "LK", "MV", "IN"])
-    medium_countries: List[str] = Field(default_factory=lambda: ["US", "RU", "UA", "IR", "IL", "JP", "KR", "TW"])
+    medium_countries: List[str] = Field(default_factory=lambda: ["US", "RU", "UA", "IR", "IL", "JP", "KR", "TW", "GB", "FR", "DE", "SY", "YE", "KP", "SA", "IQ", "LY", "SO", "SD", "VE"])
     low_countries: List[str] = Field(default_factory=list)
 
     country_refresh_minutes_critical: int = 15

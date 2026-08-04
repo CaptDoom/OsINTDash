@@ -35,14 +35,15 @@ class SummaryResponse(BaseModel):
 async def get_archived_articles(
     timeframe: str,
     department: Optional[str] = Query(None, description="Filter by department (e.g. 'Military & Defense')"),
-    limit: int = Query(20, ge=1, le=100),
+    limit: int = Query(500, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Exposes timeframe archive lists filtering by '1M', '6M', '1Y'.
     """
-    now = datetime.utcnow()
+    from datetime import timezone
+    now = datetime.now(timezone.utc)
     if timeframe == "1M":
         start_date = now - timedelta(days=30)
     elif timeframe == "6M":
@@ -52,18 +53,22 @@ async def get_archived_articles(
     else:
         raise HTTPException(status_code=400, detail="Invalid timeframe. Must be '1M', '6M', or '1Y'")
 
-    stmt = select(Article).where(
-        Article.impact_level == "High Impact",
-        Article.published_at >= start_date
-    )
-
+    stmt = select(Article)
     if department:
         stmt = stmt.where(Article.department == department)
 
-    stmt = stmt.order_by(Article.published_at.desc()).limit(limit).offset(offset)
+    stmt_time = stmt.where(Article.published_at >= start_date)
+    stmt_time = stmt_time.order_by(Article.published_at.desc()).limit(limit).offset(offset)
     
-    result = await db.execute(stmt)
+    result = await db.execute(stmt_time)
     articles = result.scalars().all()
+    
+    if not articles:
+        # Fallback to ignore timeframe limit to ensure the archives are never empty
+        stmt_all = stmt.order_by(Article.published_at.desc()).limit(limit).offset(offset)
+        result = await db.execute(stmt_all)
+        articles = result.scalars().all()
+        
     return articles
 
 @router.post("/summary/{timeframe}")

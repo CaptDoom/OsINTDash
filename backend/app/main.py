@@ -16,7 +16,7 @@ from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.config import settings
 from backend.app.database import create_tables, get_db, Article
-from backend.app.api.routes import archive, chat
+from backend.app.api.routes import archive, chat, weather
 from backend.app.services.ingestion import fetch_global_news
 from backend.app.services.classifier import ImpactClassifier, classify_and_store_batch, memory_stream
 from backend.app.services.summarizer import call_openai, call_gemini
@@ -40,6 +40,7 @@ app.add_middleware(
 # Include specs and prompts routes
 app.include_router(archive.router)
 app.include_router(chat.router)
+app.include_router(weather.router)
 
 
 
@@ -165,6 +166,34 @@ COUNTRY_NAMES_BY_CODE = {
     "MV": "Maldives",
 }
 
+COUNTRY_CODES_BY_NAME = {}
+COUNTRY_REGIONS = {}
+
+# Dynamically load coordinates, names, and regions from world-countries npm package
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+COUNTRIES_JSON_PATH = PROJECT_ROOT / "node_modules" / "world-countries" / "countries.json"
+if COUNTRIES_JSON_PATH.exists():
+    try:
+        with open(COUNTRIES_JSON_PATH, "r", encoding="utf-8") as f:
+            countries_data = json.load(f)
+            for c in countries_data:
+                cca2 = c.get("cca2", "").upper()
+                name = c.get("name", {}).get("common", "")
+                latlng = c.get("latlng")
+                region = c.get("region", "Global")
+                if cca2 and name:
+                    COUNTRY_NAMES_BY_CODE[cca2] = name
+                    COUNTRY_CODES_BY_NAME[name.lower()] = cca2
+                    COUNTRY_REGIONS[name] = region
+                    if latlng and len(latlng) == 2:
+                        COUNTRY_COORDS[name] = {"lat": latlng[0], "lon": latlng[1]}
+    except Exception as e:
+        logger.error(f"[Main] Failed to load global countries.json: {e}")
+
+# Build reverse lookup index for base static countries
+for k, v in COUNTRY_NAMES_BY_CODE.items():
+    COUNTRY_CODES_BY_NAME[v.lower()] = k
+
 
 def country_name_from_code(country_code: str) -> str:
     return COUNTRY_NAMES_BY_CODE.get((country_code or "").upper(), country_code or "Global")
@@ -179,17 +208,27 @@ def article_to_world_alert(article: Article) -> Optional[dict]:
     if not coords:
         return None
 
+    # Severity: high (Red), medium (Blue), low (Green)
+    severity = "high"
+    if article.impact_level == "High Impact":
+        severity = "high"
+    elif article.impact_level == "Medium Impact":
+        severity = "medium"
+    else:
+        severity = "low"
+
     return {
         "id": article.id,
         "location": country_name_from_code(article.country_code),
         "lat": coords["lat"],
         "lon": coords["lon"],
-        "severity": "high" if article.impact_level == "High Impact" else "medium",
+        "severity": severity,
         "headline": article.title,
         "source": article.source or "OSINT Mesh",
         "url": article.url,
         "timestamp": article.published_at.isoformat(),
         "summary": article.summary or article.headline or "Details restricted to Stratcom command.",
+        "countryCode": article.country_code,
     }
 
 # Background Ingestion Task
@@ -231,7 +270,7 @@ async def periodic_ingestion_loop():
         except Exception as e:
             logger.error(f"[Main] Ingestion error: {e}")
 
-        await asyncio.sleep(60)
+        await asyncio.sleep(5 * 60)
 
 async def redis_listener_task():
     """
@@ -296,14 +335,28 @@ async def startup_event():
 async def get_all_news(
     category: str = Query("All"),
     timeframe: str = Query("24h"),
+    max_age_hours: Optional[int] = Query(None),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Simulates /api/news/all returning country dossier arrays formatted for App.tsx
     """
-    # Query past 30 days from database to ensure high-density news feeds
     now = datetime_now()
-    cutoff = now - timedelta_now(days=30)
+    if max_age_hours is not None:
+        cutoff = now - timedelta_now(hours=max_age_hours)
+    else:
+        if timeframe == "1h":
+            cutoff = now - timedelta_now(hours=1)
+        elif timeframe == "12h":
+            cutoff = now - timedelta_now(hours=12)
+        elif timeframe in ("24h", "1d"):
+            cutoff = now - timedelta_now(hours=24)
+        elif timeframe in ("7d", "1w"):
+            cutoff = now - timedelta_now(days=7)
+        elif timeframe in ("30d", "1m"):
+            cutoff = now - timedelta_now(days=30)
+        else:
+            cutoff = now - timedelta_now(days=30)
     
     # Query database articles (High Impact)
     stmt = select(Article).where(Article.published_at >= cutoff)
@@ -317,28 +370,26 @@ async def get_all_news(
             return True
         return article_category == selected_category
 
-    # Build dossiers map
-    countries = [
-        "China", "Pakistan", "Afghanistan", "Bangladesh", 
-        "Myanmar", "Nepal", "Bhutan", "Sri Lanka", "Maldives"
-    ]
+    # Build list of active countries dynamically from database articles and settings watchlists
+    active_codes = {art.country_code.upper() for art in db_articles if art.country_code}
+    config_codes = set(settings.critical_countries + settings.high_countries + settings.medium_countries)
+    all_active_codes = active_codes | config_codes
     
-    country_meta = {
-        "China": {"region": "Northern Front", "threatLevel": "Critical"},
-        "Pakistan": {"region": "Western Front", "threatLevel": "High"},
-        "Afghanistan": {"region": "Western Front", "threatLevel": "High"},
-        "Bangladesh": {"region": "Eastern Front", "threatLevel": "Moderate"},
-        "Myanmar": {"region": "Southeastern Front", "threatLevel": "Critical"},
-        "Nepal": {"region": "Northern Front", "threatLevel": "Moderate"},
-        "Bhutan": {"region": "Northern Front", "threatLevel": "Moderate"},
-        "Sri Lanka": {"region": "Indian Ocean", "threatLevel": "Moderate"},
-        "Maldives": {"region": "Indian Ocean", "threatLevel": "Moderate"}
-    }
+    countries = []
+    for code in all_active_codes:
+        name = COUNTRY_NAMES_BY_CODE.get(code.upper())
+        if name:
+            countries.append(name)
+            
+    base_countries = ["China", "Pakistan", "Afghanistan", "Bangladesh", "Myanmar", "Nepal", "Bhutan", "Sri Lanka", "Maldives"]
+    for c in base_countries:
+        if c not in countries:
+            countries.append(c)
+            
+    countries = sorted(list(set(countries)))
 
     results = {}
     for country in countries:
-        meta = country_meta[country]
-        
         # Filter matching signals
         filtered_articles = [
             article for article in db_articles
@@ -348,6 +399,29 @@ async def get_all_news(
         if category != "All":
             filtered_articles = [article for article in filtered_articles if matches_category(article, category)]
 
+        # Fallback to historical news to ensure abundant news display (Goal 3)
+        if not filtered_articles:
+            c_code = get_country_code(country)
+            stmt_fallback = select(Article).where(
+                (Article.country_code == c_code) |
+                (Article.title.like(f"%{country}%"))
+            )
+            if category != "All":
+                dept_map = {
+                    "Military": "Military & Defense",
+                    "Economic": "Economic & Financial",
+                    "Social": "Social Affairs & Welfare",
+                    "Political": "Political & Diplomatic",
+                    "Tech": "Technology & Cyber"
+                }
+                if category in dept_map:
+                    stmt_fallback = stmt_fallback.where(Article.department == dept_map[category])
+            stmt_fallback = stmt_fallback.order_by(Article.published_at.desc()).limit(150)
+            res_fallback = await db.execute(stmt_fallback)
+            filtered_articles = list(res_fallback.scalars().all())
+            if category != "All":
+                filtered_articles = [article for article in filtered_articles if matches_category(article, category)]
+ 
         signals = [
             {
                 "id": art.id,
@@ -364,22 +438,62 @@ async def get_all_news(
             }
             for art in sorted(filtered_articles, key=lambda item: item.published_at, reverse=True)
         ]
-
+ 
+        # Dynamic region & threat level resolution
+        region = COUNTRY_REGIONS.get(country, "International Sector")
+        base_regions = {
+            "China": "Northern Front",
+            "Pakistan": "Western Front",
+            "Afghanistan": "Western Front",
+            "Bangladesh": "Eastern Front",
+            "Myanmar": "Southeastern Front",
+            "Nepal": "Northern Front",
+            "Bhutan": "Northern Front",
+            "Sri Lanka": "Indian Ocean",
+            "Maldives": "Indian Ocean"
+        }
+        if country in base_regions:
+            region = base_regions[country]
+            
+        high_count = sum(1 for s in signals if s["impact"] == "High")
+        medium_count = sum(1 for s in signals if s["impact"] == "Medium")
+        
+        base_threats = {
+            "China": "Critical",
+            "Pakistan": "High",
+            "Afghanistan": "High",
+            "Bangladesh": "Moderate",
+            "Myanmar": "Critical",
+            "Nepal": "Moderate",
+            "Bhutan": "Moderate",
+            "Sri Lanka": "Moderate",
+            "Maldives": "Moderate"
+        }
+        
+        if high_count >= 3:
+            threat_level = "Critical"
+        elif high_count >= 1 or medium_count >= 5:
+            threat_level = "High"
+        elif medium_count >= 1:
+            threat_level = "Moderate"
+        else:
+            threat_level = base_threats.get(country, "Low")
+ 
         operational_summary = (
             "STATUS: STABLE // NO NEW SIGNAL IN DETECTED WINDOW"
             if not signals else
             f"Ingestion mesh verified. Detected {len(signals)} tactical and strategic signals in the selected window."
         )
-
+ 
         results[country] = {
-            "region": meta["region"],
-            "threat_level": meta["threatLevel"],
+            "region": region,
+            "threat_level": threat_level,
             "last_synced": now.isoformat(),
             "operational_summary": operational_summary,
             "signals": signals,
             "source_status": "normal"
         }
-
+ 
     return results
 
 
@@ -402,7 +516,7 @@ async def get_specific_country_news(
     ISO_COUNTRIES[code] = name
     
     # 1. Query database for articles matching the country code
-    stmt = select(Article).where(Article.country_code == code).order_by(Article.published_at.desc()).limit(50)
+    stmt = select(Article).where(Article.country_code == code).order_by(Article.published_at.desc()).limit(150)
     res = await db.execute(stmt)
     db_articles = res.scalars().all()
     
@@ -471,7 +585,7 @@ async def get_specific_country_news(
             seen_urls.add(sig["url"])
             all_signals.append(sig)
             
-    all_signals = all_signals[:50]
+    all_signals = all_signals[:500]
     
     threat_level = "Moderate"
     if all_signals:
@@ -595,14 +709,17 @@ async def run_mock_scrape_job(job_id: str, url: str, platform: str):
 
 # Utility helper mapping functions
 def datetime_now() -> Any:
-    from datetime import datetime
-    return datetime.utcnow()
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc)
 
 def timedelta_now(**kwargs) -> Any:
     from datetime import timedelta
     return timedelta(**kwargs)
 
 def get_country_code(country: str) -> str:
+    code = COUNTRY_CODES_BY_NAME.get(country.lower())
+    if code:
+        return code
     mapping = {
         "China": "CN", "Pakistan": "PK", "Afghanistan": "AF", "Bangladesh": "BD",
         "Myanmar": "MM", "Nepal": "NP", "Bhutan": "BT", "Sri Lanka": "LK", "Maldives": "MV"
@@ -614,7 +731,9 @@ def get_frontend_category(dept: str, title: str = "", source: str = "") -> str:
         "Military & Defense": "Military",
         "Economic & Financial": "Economic",
         "Social Affairs & Welfare": "Social",
-        "Political & Diplomatic": "Political"
+        "Political & Diplomatic": "Political",
+        "Technology & Cyber": "Tech",
+        "Cyber & Technology": "Tech"
     }
     base_category = mapping.get(dept, "Political")
     tech_keywords = re.compile(r"\b(cyber|drone|uav|satellite|radar|surveillance|sensor|telecom|internet|ai|artificial intelligence|machine learning|ml|technology|tech|space|communications|signal|gps)\b", re.I)

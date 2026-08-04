@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 from typing import AsyncGenerator, List, Optional
 from sqlalchemy import Column, String, Text, DateTime, TypeDecorator, select, func
@@ -77,7 +77,7 @@ class Article(Base):
     impact_level: Mapped[str] = mapped_column(String(32), default="High Impact")
     department: Mapped[str] = mapped_column(String(64), nullable=False)
     embedding = Column(VectorType, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 # Archive Summary Model
 class ArchiveSummary(Base):
@@ -86,7 +86,7 @@ class ArchiveSummary(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     timeframe: Mapped[str] = mapped_column(String(8), unique=True, nullable=False) # '1M', '6M', '1Y'
     summary: Mapped[str] = mapped_column(Text, nullable=False)
-    generated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    generated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 # Engine initialization with automatic fallback
 engine = None
@@ -121,7 +121,7 @@ async def seed_data_if_empty(session: AsyncSession):
     # Check if empty
     result = await session.execute(select(func.count(Article.id)))
     count = result.scalar()
-    if count >= 350:
+    if count >= 1125:
         return
         
     logger.info("[Database] Seeding database with high density high impact realistic articles...")
@@ -131,52 +131,74 @@ async def seed_data_if_empty(session: AsyncSession):
     await session.execute(delete(Article))
     await session.commit()
     
-    countries_list = ["China", "Pakistan", "Afghanistan", "Bangladesh", "Myanmar", "Nepal", "Bhutan", "Sri Lanka", "Maldives"]
-    departments = ["Military & Defense", "Economic & Financial", "Social Affairs & Welfare", "Political & Diplomatic"]
+    countries_list = [
+        "China", "Pakistan", "Afghanistan", "Bangladesh", "Myanmar", "Nepal", "Bhutan", "Sri Lanka", "Maldives",
+        "India", "United States", "Russia", "Iran", "Israel", "Taiwan"
+    ]
+    departments = [
+        "Military & Defense",
+        "Economic & Financial",
+        "Social Affairs & Welfare",
+        "Political & Diplomatic",
+        "Technology & Cyber"
+    ]
     
     import random
     
     templates = {
         "Military & Defense": [
-            "Verified deployment of active radar scanning arrays along the {country} border",
+            "Verified deployment of active border guards and troop divisions along the {country} frontier",
             "Joint tactical drills and armor maneuvers completed by frontier commands near {country}",
             "Special ops units conduct high-altitude patrol sweeps at the {country} demarcation lines",
-            "UAV drone surveillance sweeps increase along the strategic {country} corridors"
+            "Bunker reinforcements and artillery defense setups increase along the strategic {country} corridors",
+            "Frontier troops establish new high-altitude monitoring outposts near the {country} line"
         ],
         "Economic & Financial": [
             "New border highway and trade route construction expands commercial transit with {country}",
             "Deepwater port infrastructure upgrades secure strategic transport lanes near {country}",
             "Bilateral investment framework signed to fund major logistical hubs with {country}",
-            "Customs clearing facilities upgrade processing capacity at {country} border posts"
+            "Customs clearing facilities upgrade processing capacity at {country} border posts",
+            "Trade volume increases as new bilateral agreements ease tariff restrictions with {country}"
         ],
         "Social Affairs & Welfare": [
             "Local resettlement and border governance programs expand near {country} frontier",
             "Humanitarian medical aid stations established to assist crossing points with {country}",
             "Friction between civilian border populations and local patrols rises near {country}",
-            "Emergency food supply distribution sweeps verify secure conditions along the {country} line"
+            "Emergency food supply distribution sweeps verify secure conditions along the {country} line",
+            "Cultural exchange programs aim to foster peaceful border relations with {country}"
         ],
         "Political & Diplomatic": [
-            "High-level security summit coordinates border tax collection rules with {country}",
+            "High-level security-coordination summit sets border tax collection rules with {country}",
             "Diplomatic delegations sign memorandum for shared checkpoint security with {country}",
             "Commanders verify border demarcation protocol updates during meetings with {country}",
-            "Joint command coordination center launched to monitor communications with {country}"
+            "Joint command coordination center launched to monitor border developments with {country}",
+            "Peace talks progress as senior officials schedule bilateral discussions with {country}"
+        ],
+        "Technology & Cyber": [
+            "National cyber security center blocks major hacking attempts targeting key systems near {country}",
+            "Satellite tracking stations upgrade telemetry arrays to map satellite signals near {country}",
+            "AI-powered intelligence monitoring platforms deploy along strategic sectors near {country}",
+            "Tactical telecom network signals established to maintain active communications with {country}",
+            "Electronic warfare divisions deploy signal jammer systems along the {country} border"
         ]
     }
     
-    from datetime import datetime, timedelta
+    from datetime import timedelta
     
     seeded_count = 0
     country_codes = {
         "China": "CN", "Pakistan": "PK", "Afghanistan": "AF", "Bangladesh": "BD",
-        "Myanmar": "MM", "Nepal": "NP", "Bhutan": "BT", "Sri Lanka": "LK", "Maldives": "MV"
+        "Myanmar": "MM", "Nepal": "NP", "Bhutan": "BT", "Sri Lanka": "LK", "Maldives": "MV",
+        "India": "IN", "United States": "US", "Russia": "RU", "Iran": "IR", "Israel": "IL",
+        "Taiwan": "TW"
     }
 
     for country in countries_list:
         cc = country_codes.get(country, "GL")
         for dept in departments:
-            # Create 10 unique articles per department
+            # Create 15 unique articles per department
             title_templates = templates[dept]
-            for i in range(10):
+            for i in range(15):
                 temp = title_templates[i % len(title_templates)]
                 title = temp.format(country=country) + f" (Intel Alert #{100 + i * 17 + random.randint(1, 9)})"
                 content = (
@@ -184,15 +206,25 @@ async def seed_data_if_empty(session: AsyncSession):
                     f"Command reports high-readiness posture. Incident remains active under surveillance. "
                     f"Further updates are scheduled as the situation develops."
                 )
-                pub_time = datetime.utcnow() - timedelta(hours=random.randint(1, 48), minutes=random.randint(0, 59))
+                pub_time = datetime.now(timezone.utc) - timedelta(hours=random.randint(1, 48), minutes=random.randint(0, 59))
                 
+                sources_map = {
+                    "Military & Defense": ["defence-wire.org", "border-patrol.in", "strategic-intel.com"],
+                    "Economic & Financial": ["asia-trade.com", "financial-post.org", "economic-brief.in"],
+                    "Social Affairs & Welfare": ["regional-welfare.org", "frontier-news.in", "social-pulse.com"],
+                    "Political & Diplomatic": ["diplomatic-times.org", "summit-reports.in", "political-wire.com"],
+                    "Technology & Cyber": ["cyber-monitor.gov.in", "telecom-weekly.com", "space-telemetry.org"]
+                }
+                src_list = sources_map.get(dept, ["intel-mesh.org"])
+                source = src_list[i % len(src_list)]
+
                 db_article = Article(
                     title=title,
                     headline=title,
                     summary=f"Intelligence briefing regarding localized {dept.lower()} activity near the {country} border.",
                     content=content,
-                    url=f"https://intel.local/report/{cc.lower()}/{dept.lower().split()[0]}/{i}/{random.randint(1000, 9999)}",
-                    source="INTEL-MESH",
+                    url=f"https://{source}/report/{cc.lower()}/{dept.lower().split()[0]}/{i}/{random.randint(1000, 9999)}",
+                    source=source,
                     country_code=cc,
                     published_at=pub_time,
                     impact_level="High Impact",
