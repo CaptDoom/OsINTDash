@@ -173,7 +173,20 @@ export function WorldGeoMap({
       }
     });
 
-    return { countryPaths, alertGroups };
+    // Sort groups by severity and volume to prioritize most critical regions
+    const sortedGroups = [...alertGroups].sort((a, b) => {
+      const severityOrder = { high: 3, medium: 2, low: 1 };
+      if (severityOrder[a.maxSeverity] !== severityOrder[b.maxSeverity]) {
+        return severityOrder[b.maxSeverity] - severityOrder[a.maxSeverity];
+      }
+      return b.alerts.length - a.alerts.length;
+    });
+
+    // Reduce the news flags by 30% (keep the top 70% most critical/active) to prevent map crowding
+    const targetCount = Math.max(1, Math.round(sortedGroups.length * 0.7));
+    const reducedAlertGroups = sortedGroups.slice(0, targetCount);
+
+    return { countryPaths, alertGroups: reducedAlertGroups };
   }, [markers]);
 
   // Keep track of the currently selected country name to keep popup open / synced
@@ -261,31 +274,31 @@ export function WorldGeoMap({
                   }}
                 >
                   {/* Glowing Radar Beacons */}
-                  <circle r={24} fill="none" stroke={color} strokeWidth="1" opacity={0.15} />
-                  <circle r={18} fill="none" stroke={color} strokeWidth="1.5" className="animate-ping" opacity={0.4} style={{ animationDuration: '3s' }} />
+                  <circle r={20} fill="none" stroke={color} strokeWidth="1" opacity={0.15} />
+                  <circle r={14} fill="none" stroke={color} strokeWidth="1.5" className="animate-ping" opacity={0.4} style={{ animationDuration: '3s' }} />
 
-                  {/* Tactically Styled pill-shape Badge */}
+                  {/* Tactically Styled pill-shape Badge (Slightly resized for clean visibility) */}
                   <rect
-                    x={-22}
-                    y={-10}
-                    width={44}
-                    height={20}
-                    rx={4}
-                    ry={4}
+                    x={-19}
+                    y={-9}
+                    width={38}
+                    height={18}
+                    rx={3}
+                    ry={3}
                     fill="#051424"
                     stroke={color}
-                    strokeWidth={1.8}
-                    filter="drop-shadow(0px 2px 6px rgba(0,0,0,0.6))"
+                    strokeWidth={1.5}
+                    filter="drop-shadow(0px 2px 4px rgba(0,0,0,0.6))"
                     className="transition-all duration-200 hover:scale-105"
                   />
 
                   {/* Country Code Label */}
                   <text
-                    x={-10}
-                    y={4}
+                    x={-9}
+                    y={3.5}
                     textAnchor="middle"
                     fill="#7bd0ff"
-                    fontSize="9.5"
+                    fontSize="8.5"
                     fontWeight="bold"
                     fontFamily="monospace"
                     letterSpacing="0.02em"
@@ -294,15 +307,15 @@ export function WorldGeoMap({
                   </text>
 
                   {/* Badge Vertical Separator */}
-                  <line x1={0} y1={-6} x2={0} y2={6} stroke="rgba(123, 208, 255, 0.25)" strokeWidth="1" />
+                  <line x1={0} y1={-5} x2={0} y2={5} stroke="rgba(123, 208, 255, 0.25)" strokeWidth="1" />
 
                   {/* Total Alerts Count */}
                   <text
-                    x={10}
-                    y={4}
+                    x={9}
+                    y={3.5}
                     textAnchor="middle"
                     fill={color}
-                    fontSize="9.5"
+                    fontSize="8.5"
                     fontWeight="black"
                     fontFamily="monospace"
                   >
