@@ -152,6 +152,18 @@ COUNTRY_COORDS = {
     "Bhutan": {"lat": 27.5142, "lon": 90.4336},
     "Sri Lanka": {"lat": 7.8731, "lon": 80.7718},
     "Maldives": {"lat": 3.2028, "lon": 73.2207},
+    "India": {"lat": 20.5937, "lon": 78.9629},
+    "United States": {"lat": 37.0902, "lon": -95.7129},
+    "Russia": {"lat": 61.5240, "lon": 105.3188},
+    "Iran": {"lat": 32.4279, "lon": 53.6880},
+    "Israel": {"lat": 31.0461, "lon": 34.8516},
+    "Taiwan": {"lat": 23.6978, "lon": 120.9605},
+    "Japan": {"lat": 36.2048, "lon": 138.2529},
+    "Australia": {"lat": -25.2744, "lon": 133.7751},
+    "United Kingdom": {"lat": 55.3781, "lon": -3.4360},
+    "Germany": {"lat": 51.1657, "lon": 10.4515},
+    "Ukraine": {"lat": 48.3794, "lon": 31.1656},
+    "South Korea": {"lat": 35.9078, "lon": 127.7669},
 }
 
 COUNTRY_NAMES_BY_CODE = {
@@ -164,6 +176,18 @@ COUNTRY_NAMES_BY_CODE = {
     "BT": "Bhutan",
     "LK": "Sri Lanka",
     "MV": "Maldives",
+    "IN": "India",
+    "US": "United States",
+    "RU": "Russia",
+    "IR": "Iran",
+    "IL": "Israel",
+    "TW": "Taiwan",
+    "JP": "Japan",
+    "AU": "Australia",
+    "GB": "United Kingdom",
+    "DE": "Germany",
+    "UA": "Ukraine",
+    "KR": "South Korea",
 }
 
 COUNTRY_CODES_BY_NAME = {}

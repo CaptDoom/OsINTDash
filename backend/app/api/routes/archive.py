@@ -5,7 +5,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 from backend.app.database import get_db, Article
-from backend.app.services.summarizer import generate_archive_summary
+from backend.app.services.summarizer import generate_archive_summary, generate_archive_field_summary
 
 router = APIRouter(prefix="/api/archive")
 
@@ -74,16 +74,22 @@ async def get_archived_articles(
 @router.post("/summary/{timeframe}")
 async def trigger_archive_summary(
     timeframe: str,
+    department: Optional[str] = Query(None, description="Optional department filter"),
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Triggers or retrieves the Map-Reduce summarization chain for the target archive timeframe.
+    Triggers or retrieves the summarization chain for the target archive timeframe and optional department.
     """
     if timeframe not in ["1M", "6M", "1Y"]:
         raise HTTPException(status_code=400, detail="Invalid timeframe. Must be '1M', '6M', or '1Y'")
         
     try:
-        summary_text = await generate_archive_summary(timeframe, db)
-        return {"timeframe": timeframe, "summary": summary_text}
+        if department:
+            # Generate real-time summary for a specific field
+            summary_text = await generate_archive_field_summary(timeframe, department, db)
+        else:
+            # Generate general summary (uses cached map-reduce)
+            summary_text = await generate_archive_summary(timeframe, db)
+        return {"timeframe": timeframe, "department": department, "summary": summary_text}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Summarizer error: {str(e)}")

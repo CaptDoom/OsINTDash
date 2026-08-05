@@ -261,3 +261,77 @@ async def generate_archive_summary(timeframe: str, db: AsyncSession) -> str:
         logger.debug("[Summarizer] Cache row write skipped: %s", exc)
 
     return summary
+
+
+async def generate_archive_field_summary(timeframe: str, department: Optional[str], db: AsyncSession) -> str:
+    now = _utc_now()
+    if timeframe == "1M":
+        start_date = now - timedelta(days=30)
+    elif timeframe == "6M":
+        start_date = now - timedelta(days=180)
+    elif timeframe == "1Y":
+        start_date = now - timedelta(days=365)
+    else:
+        start_date = now - timedelta(days=30)
+
+    # First, query high impact articles matching timeframe and optionally department
+    stmt = select(Article).where(Article.impact_level == "High Impact", Article.published_at >= start_date)
+    if department:
+        stmt = stmt.where(Article.department == department)
+    stmt = stmt.order_by(Article.published_at.desc())
+    
+    articles = (await db.execute(stmt)).scalars().all()
+    if not articles:
+        # Fall back to include normal/medium impact if no high impact articles exist
+        stmt = select(Article).where(Article.published_at >= start_date)
+        if department:
+            stmt = stmt.where(Article.department == department)
+        stmt = stmt.order_by(Article.published_at.desc())
+        articles = (await db.execute(stmt)).scalars().all()
+
+    if not articles:
+        return f"# Executive Briefing: {department or 'All Fields'} ({timeframe})\n\nNo active reports found for this field in this archive window."
+
+    # Take up to 35 most relevant/recent articles to summarize to avoid token limits
+    articles = list(articles)[:35]
+    
+    article_context = "\n---\n".join(_article_block(article) for article in articles)
+    
+    field_name = department or "All Fields"
+    prompt = f"""
+    CLASSIFICATION: UNCLASSIFIED // OSINT FOR INTERNAL STRATCOM USE ONLY
+    REAL-TIME FIELD INTELLIGENCE SUMMARY
+    
+    You are a Senior Geopolitical Analyst at STRATCOM.
+    Generate a concise, highly accurate, and real-time executive summary of the operational wirefeed for the field '{field_name}' over the timeframe '{timeframe}'.
+    
+    Provide the summary based strictly on the following verified articles:
+    -----------------------------------------------------
+    {article_context}
+    -----------------------------------------------------
+    
+    INSTRUCTIONS:
+    1. Summarize the key geopolitical developments, actions, and risks.
+    2. Keep the summary concise, factual, and direct. Avoid any introductory or concluding pleasantries, greetings, or conversational filler.
+    3. Organize into:
+       - **1. TARGET DEVELOPMENTS**: Bulleted list of key actions or developments.
+       - **2. CRITICAL RISK AREAS**: Analysis of stability impact.
+    4. Keep the total output under 250 words. Ensure high signal-to-noise ratio.
+    """
+    
+    summary = ""
+    if settings.llm_provider == "ollama" and settings.ollama_base_url:
+        try:
+            summary = await call_ollama(prompt, "You are a senior strategic intelligence officer.")
+        except Exception as exc:
+            logger.warning("[Summarizer] Ollama call failed, falling back: %s", exc)
+    if not summary:
+        if settings.openai_api_key:
+            summary = await call_openai(prompt, "You are a senior strategic intelligence officer.")
+        elif settings.google_api_key:
+            summary = await call_gemini(prompt, "You are a senior strategic intelligence officer.")
+        else:
+            summary = _local_summary(articles, timeframe)
+            
+    return summary
+

@@ -200,10 +200,20 @@ async def _get_with_retry(client: httpx.AsyncClient, url: str, *, source_name: s
     for attempt in range(1, settings.request_retry_count + 1):
         try:
             response = await client.get(url, params=params, headers=headers, timeout=settings.request_timeout_seconds)
+            if response.status_code in (401, 403):
+                logger.warning("[Ingestion] %s key unauthorized/forbidden (HTTP %d). Tripping circuit breaker for 30m.", source_name, response.status_code)
+                breaker.failures = 3
+                breaker.open_until = asyncio.get_event_loop().time() + 1800  # 30 minutes cooldown
+                return response
             if response.status_code == 429 or 500 <= response.status_code < 600:
                 raise httpx.HTTPStatusError("retryable status", request=response.request, response=response)
             breaker.reset()
             return response
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            logger.info("[Ingestion] %s connection/DNS failure: %s. Tripping circuit breaker for 5m.", source_name, exc)
+            breaker.failures = 3
+            breaker.open_until = asyncio.get_event_loop().time() + 300  # 5 minutes cooldown
+            return None
         except Exception as exc:
             logger.info("[Ingestion] %s request failed (attempt %s/%s): %s", source_name, attempt, settings.request_retry_count, exc)
             breaker.record_failure(settings.request_backoff_max_seconds)

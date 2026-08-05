@@ -240,7 +240,7 @@ async def seed_data_if_empty(session: AsyncSession):
                 "aljazeera.com": "https://www.aljazeera.com/news/",
                 "bloomberg.com": "https://www.bloomberg.com/",
                 "bbc.com": "https://www.bbc.com/news",
-                "dw.com": "https://www.dw.com/en/world/",
+                "dw.com": "https://www.dw.com/en/",
                 "france24.com": "https://www.france24.com/en/",
                 "theguardian.com": "https://www.theguardian.com/world",
                 "nytimes.com": "https://www.nytimes.com/section/world",

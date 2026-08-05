@@ -69,18 +69,13 @@ def score_article_similarity(doc_text: str, article: Article) -> float:
 async def search_relevant_articles(db: AsyncSession, doc_text: str, limit: int = 5) -> List[Article]:
     """
     Ranking pipeline:
-    - Local hybrid retrieval based on term overlap and document similarity
-    - Prefer high-impact verified news articles with richer report content
-    - Fall back to all available articles if no high-impact matches exist
+    - Local term overlap and document similarity search across all articles
+    - Applies impact level score boost
+    - Falls back to the most recent articles if no term overlap matches
     """
-    stmt = select(Article).where(Article.impact_level == "High Impact")
+    stmt = select(Article)
     result = await db.execute(stmt)
     articles = result.scalars().all()
-
-    if not articles:
-        stmt = select(Article)
-        result = await db.execute(stmt)
-        articles = result.scalars().all()
 
     if not articles:
         return []
@@ -92,18 +87,21 @@ async def search_relevant_articles(db: AsyncSession, doc_text: str, limit: int =
             scored_articles.append((score, art))
 
     if not scored_articles:
-        return []
+        # Fall back to returning the 5 most recent articles
+        sorted_recent = sorted(articles, key=lambda x: x.published_at, reverse=True)
+        return sorted_recent[:limit]
 
     scored_articles.sort(key=lambda x: x[0], reverse=True)
     return [art for _, art in scored_articles[:limit]]
 
 @router.post("/fusion")
 async def upload_and_fuse_document(
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    instructions: Optional[str] = Form(None)
 ):
     """
-    Accepts a document upload, stores it for background processing, and returns a job id immediately.
-    The status endpoint exposes parsing/searching/synthesizing progress for polling.
+    Accepts a document upload with optional instruction prompts, stores it for background processing,
+    and returns a job id immediately. The status endpoint exposes progress.
     """
     temp_dir = Path(__file__).resolve().parents[3] / "scratch"
     temp_dir.mkdir(parents=True, exist_ok=True)
@@ -121,11 +119,12 @@ async def upload_and_fuse_document(
             "filename": file.filename,
             "file_path": str(temp_file_path),
             "content_type": file.content_type,
+            "instructions": instructions or "",
         },
     )
 
     if settings.enable_inline_job_processing:
-        asyncio.create_task(process_fusion_job(job.job_id, str(temp_file_path), file.filename))
+        asyncio.create_task(process_fusion_job(job.job_id, str(temp_file_path), file.filename, instructions))
 
     return {"job_id": job.job_id, "status": job.status, "progress": job.progress}
 
@@ -138,7 +137,7 @@ async def fusion_job_status(job_id: str):
     return job.__dict__
 
 
-async def process_fusion_job(job_id: str, temp_file_path: str, filename: str):
+async def process_fusion_job(job_id: str, temp_file_path: str, filename: str, instructions: Optional[str] = None):
     try:
         await job_store.update(job_id, "fusion", status="parsing", progress=15, step="parsing")
         extracted_text = ""
@@ -209,11 +208,16 @@ async def process_fusion_job(job_id: str, temp_file_path: str, filename: str):
         {article_context}
         -----------------------------------------------------
 
+        OPERATOR INSTRUCTIONS / TASKS TO PERFORM:
+        -----------------------------------------------------
+        {instructions if instructions else "Provide a general cross-reference intelligence briefing."}
+        -----------------------------------------------------
+
         INSTRUCTIONS:
         1. Deliver a formal, objective, and analytical briefing suitable for military command/government briefing.
         2. Format using clear tactical headings:
            - **1. OPERATIONAL SITUATION OVERVIEW**: Summary of facts, locations, and actions.
-           - **2. CROSS-REFERENCE ANALYSIS**: Synthesizing the overlap and connections between the uploaded document and OSINT feeds.
+           - **2. CROSS-REFERENCE ANALYSIS**: Synthesizing the overlap and connections between the uploaded document and OSINT feeds, specifically addressing the operator's instructions.
            - **3. THREAT EVALUATION & RECOMMENDATIONS**: Assess stability impact, warnings, and security indices.
         3. You must use a passive, objective, and authoritative tone. Avoid conversational fillers, jokes, or first-person pronouns.
         4. You MUST cite the news sources where applicable using markdown links (e.g. "[Title of news article](URL)").
@@ -308,8 +312,13 @@ def generate_local_fusion_fallback(doc_text: str, articles: List[Article]) -> st
     return md
 
 
+class ChatMessage(BaseModel):
+    sender: str
+    text: str
+
 class ChatQuery(BaseModel):
     query: str
+    history: Optional[List[ChatMessage]] = None
 
 
 @router.post("/query")
@@ -347,18 +356,31 @@ async def chat_query(payload: ChatQuery):
             }
         )
 
-    # 2. LLM synthesis
+    # 2. Format history context
+    history_context = ""
+    if payload.history:
+        history_context = "CONVERSATION HISTORY (Use this context to answer follow-up queries):\n"
+        # Take up to the last 6 messages to prevent token bloat
+        for msg in payload.history[-6:]:
+            role = "Operator" if msg.sender == "user" else "Assistant"
+            history_context += f"{role}: {msg.text}\n"
+        history_context += "\n"
+
+    # 3. LLM synthesis
     prompt = f"""
     CLASSIFICATION: UNCLASSIFIED // OSINT FOR INTERNAL STRATCOM USE ONLY
     TACTICAL GEOPOLITICAL INTELLIGENCE SUMMARY
     
     You are a Senior Intelligence Analyst at the Strategic Command (STRATCOM).
+    
+    {history_context}
+    
     The operator has submitted the following query:
     -----------------------------------------------------
     QUERY: {query_text}
     -----------------------------------------------------
 
-    Analyze and answer this query based on the following verified public OSINT news reports:
+    Analyze and answer this query based on the conversation history and the following verified public OSINT news reports:
     -----------------------------------------------------
     {article_context}
     -----------------------------------------------------

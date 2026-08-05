@@ -137,6 +137,12 @@ const countryMapCoordinates: Record<string, { lat: number; lon: number }> = {
   Iran: { lat: 32.4279, lon: 53.6880 },
   Israel: { lat: 31.0461, lon: 34.8516 },
   Taiwan: { lat: 23.6978, lon: 120.9605 },
+  Japan: { lat: 36.2048, lon: 138.2529 },
+  Australia: { lat: -25.2744, lon: 133.7751 },
+  'United Kingdom': { lat: 55.3781, lon: -3.4360 },
+  Germany: { lat: 51.1657, lon: 10.4515 },
+  Ukraine: { lat: 48.3794, lon: 31.1656 },
+  'South Korea': { lat: 35.9078, lon: 127.7669 },
 };
 
 type StoredCredential = {
@@ -437,6 +443,120 @@ const countries: Country[] = [
       Tech: { title: 'Semiconductor focus', summary: 'Global chip production facilities operate under high cybersecurity protocols.', impact: 'High', signal: 'Chip fabricator logs' },
       Economic: { title: 'Maritime trade', summary: 'Shipping container traffic through the Taiwan Strait remains active.', impact: 'High', signal: 'AIS ship tracking' },
       Military: { title: 'Air defense zones', summary: 'Fighter jet scrambles and naval tracking intercept runs are recorded.', impact: 'High', signal: 'ADIZ intercept reports' },
+    },
+  },
+  {
+    id: 'japan',
+    name: 'Japan',
+    capital: 'Tokyo',
+    borderKm: 0,
+    region: 'East Asia',
+    coordinates: '36.2048° N, 138.2529° E',
+    summary: 'Maritime Self-Defense Force patrols and joint naval coordination in the East China Sea remain highly active.',
+    threatLevel: 'Moderate',
+    stabilityIndex: 0.91,
+    riskProbability: 15.00,
+    categories: {
+      Political: { title: 'Bilateral alliances', summary: 'Tokyo reinforces regional partnerships and maritime boundary treaties.', impact: 'Medium', signal: 'Diplomatic declarations' },
+      Social: { title: 'Frontier communities', summary: 'Cohesive public awareness and emergency response systems in place.', impact: 'Low', signal: 'Civil training audits' },
+      Tech: { title: 'Semiconductor initiatives', summary: 'Advanced material research and secure supply chains are reinforced.', impact: 'High', signal: 'Tech corridor updates' },
+      Economic: { title: 'Trade routes', summary: 'Pacific shipping flows and seaport infrastructures show high density.', impact: 'Medium', signal: 'Commercial harbor logs' },
+      Military: { title: 'Maritime drills', summary: 'Joint naval defense maneuvers completed in neighboring sea lanes.', impact: 'High', signal: 'Fleet exercise updates' },
+    },
+  },
+  {
+    id: 'australia',
+    name: 'Australia',
+    capital: 'Canberra',
+    borderKm: 0,
+    region: 'Indo-Pacific',
+    coordinates: '25.2744° S, 133.7751° E',
+    summary: 'Strategic maritime tracking and intelligence sharing under the AUKUS framework continue to expand.',
+    threatLevel: 'Low',
+    stabilityIndex: 0.93,
+    riskProbability: 10.00,
+    categories: {
+      Political: { title: 'Indo-Pacific posture', summary: 'Canberra reinforces maritime surveillance treaties and global alliances.', impact: 'Medium', signal: 'Strategic declarations' },
+      Social: { title: 'Civic safety', summary: 'Public disaster readiness and network communications show high stability.', impact: 'Low', signal: 'Network safety status' },
+      Tech: { title: 'Radar telemetry', summary: 'Long-range radar stations and satellite links track ocean transits.', impact: 'Medium', signal: 'Telemetry sweeps' },
+      Economic: { title: 'Resource exports', summary: 'Mineral trade corridors operate under strict security guidelines.', impact: 'High', signal: 'Export manifests' },
+      Military: { title: 'Joint maneuvers', summary: 'Coast guard and fleet patrols execute surveillance sweeps.', impact: 'Medium', signal: 'Fleet maneuvers' },
+    },
+  },
+  {
+    id: 'united-kingdom',
+    name: 'United Kingdom',
+    capital: 'London',
+    borderKm: 0,
+    region: 'Global Sector',
+    coordinates: '55.3781° N, 3.4360° W',
+    summary: 'Strategic maritime security monitoring and global trade lane protection operations are fully active.',
+    threatLevel: 'Low',
+    stabilityIndex: 0.87,
+    riskProbability: 14.50,
+    categories: {
+      Political: { title: 'Indo-Pacific treaties', summary: 'London signs maritime security treaties and maps trade corridor directives.', impact: 'High', signal: 'Bilateral declarations' },
+      Social: { title: 'Sentiment monitoring', summary: 'Public discussion centers on supply chain security and trade lanes.', impact: 'Low', signal: 'Public surveys' },
+      Tech: { title: 'Cyber intelligence', summary: 'Defense warning networks block signal spoofing and cyber intrusions.', impact: 'High', signal: 'Intrusion reports' },
+      Economic: { title: 'Maritime trade routes', summary: 'Sea shipping lane protocols prioritize critical logistics flows.', impact: 'High', signal: 'Lanes registry logs' },
+      Military: { title: 'Fleet deployments', summary: 'Royal Navy carrier strike groups maintain presence in key sea lanes.', impact: 'High', signal: 'Carrier groups map' },
+    },
+  },
+  {
+    id: 'germany',
+    name: 'Germany',
+    capital: 'Berlin',
+    borderKm: 0,
+    region: 'Global Sector',
+    coordinates: '51.1657° N, 10.4515° E',
+    summary: 'Cyber defense hubs and joint logistics coordination networks monitor regional security developments.',
+    threatLevel: 'Low',
+    stabilityIndex: 0.89,
+    riskProbability: 12.00,
+    categories: {
+      Political: { title: 'European security', summary: 'Berlin coordinates security directives and infrastructure policies.', impact: 'Medium', signal: 'Bilateral discussions' },
+      Social: { title: 'Public resilience', summary: 'Emergency response logistics networks operate with high stability.', impact: 'Low', signal: 'Regional audit files' },
+      Tech: { title: 'Cyber networks', summary: 'Sovereign data networks verify blockades against external intrusions.', impact: 'High', signal: 'Sovereign system status' },
+      Economic: { title: 'Industrial corridors', summary: 'Energy supply networks undergo secure supply-chain reviews.', impact: 'High', signal: 'Supply chain reviews' },
+      Military: { title: 'Joint exercises', summary: 'Defense divisions participate in joint logistics combat readiness drills.', impact: 'Medium', signal: 'Logistics coordination' },
+    },
+  },
+  {
+    id: 'ukraine',
+    name: 'Ukraine',
+    capital: 'Kyiv',
+    borderKm: 0,
+    region: 'Eastern Europe',
+    coordinates: '48.3794° N, 31.1656° E',
+    summary: 'High-intensity tactical defense and air-demarcation monitoring operations continue along active combat sectors.',
+    threatLevel: 'Critical',
+    stabilityIndex: 0.24,
+    riskProbability: 92.00,
+    categories: {
+      Political: { title: 'Frontier sovereignty', summary: 'Kyiv asserts territorial boundary treaties while coordinating defense alliances.', impact: 'High', signal: 'Official policy briefs' },
+      Social: { title: 'Civic resilience', summary: 'Local shelter warnings and volunteer defense programs show high unity.', impact: 'High', signal: 'Civic safety logs' },
+      Tech: { title: 'EW arrays', summary: 'Tactical signal jammers and radar telemetry arrays remain operational.', impact: 'High', signal: 'Electronic warfare feeds' },
+      Economic: { title: 'Transit corridors', summary: 'Freight transport networks adapt to riverine security changes.', impact: 'High', signal: 'Transit cargo records' },
+      Military: { title: 'Active combat', summary: 'Frontier forces conduct intercept runs and artillery fire operations.', impact: 'Critical', signal: 'ADIZ intercept reports' },
+    },
+  },
+  {
+    id: 'south-korea',
+    name: 'South Korea',
+    capital: 'Seoul',
+    borderKm: 238,
+    region: 'East Asia',
+    coordinates: '35.9078° N, 127.7669° E',
+    summary: 'Demilitarized zone monitoring operations and joint tactical combat readiness remains fully optimized.',
+    threatLevel: 'High',
+    stabilityIndex: 0.78,
+    riskProbability: 38.00,
+    categories: {
+      Political: { title: 'Alliance coordination', summary: 'Seoul structures defense directives and joint regional operations.', impact: 'High', signal: 'Bilateral declarations' },
+      Social: { title: 'Public safety', summary: 'Demilitarized zone border zones operate under strict patrol protocols.', impact: 'Medium', signal: 'Civil prep training' },
+      Tech: { title: 'Sovereign components', summary: 'National chip production facilities operate under high cybersecurity protocols.', impact: 'High', signal: 'Sovereign system status' },
+      Economic: { title: 'Oceanic commerce', summary: 'Pacific shipping flows and commercial harbor logs verify active status.', impact: 'Medium', signal: 'Harbor logs telemetry' },
+      Military: { title: 'DMZ patrols', summary: 'Border command divisions conduct scheduled maneuvers along disputed posts.', impact: 'High', signal: 'Maneuver reports' },
     },
   },
   {
@@ -1224,7 +1344,7 @@ function App() {
           'apnews.com': 'https://apnews.com/hub/world-news',
           'aljazeera.com': 'https://www.aljazeera.com/news',
           'bloomberg.com': 'https://www.bloomberg.com',
-          'dw.com': 'https://www.dw.com/en/world',
+          'dw.com': 'https://www.dw.com/en/',
           'france24.com': 'https://www.france24.com/en',
           'theguardian.com': 'https://www.theguardian.com/world',
           'nytimes.com': 'https://www.nytimes.com/section/world',
@@ -3999,7 +4119,8 @@ function ArchiveView() {
     'Military & Defense',
     'Economic & Financial',
     'Social Affairs & Welfare',
-    'Political & Diplomatic'
+    'Political & Diplomatic',
+    'Technology & Cyber'
   ];
 
   function generateFallbackArchiveArticles(timeframe: string, dept: string): any[] {
@@ -4057,7 +4178,7 @@ function ArchiveView() {
         'apnews.com': 'https://apnews.com/hub/world-news',
         'aljazeera.com': 'https://www.aljazeera.com/news',
         'bloomberg.com': 'https://www.bloomberg.com',
-        'dw.com': 'https://www.dw.com/en/world',
+        'dw.com': 'https://www.dw.com/en/',
         'france24.com': 'https://www.france24.com/en',
         'theguardian.com': 'https://www.theguardian.com/world',
         'nytimes.com': 'https://www.nytimes.com/section/world',
@@ -4116,7 +4237,8 @@ function ArchiveView() {
     setSummarizing(true);
     setSummary('');
     try {
-      const res = await fetch(`/api/archive/summary/${timeframe}`, { method: 'POST' });
+      const url = `/api/archive/summary/${timeframe}${dept !== 'All' ? `?department=${encodeURIComponent(dept)}` : ''}`;
+      const res = await fetch(url, { method: 'POST' });
       if (res.ok) {
         const data = await res.json();
         setSummary(data.summary);
@@ -4147,7 +4269,7 @@ function ArchiveView() {
           }`}
         >
           <span className="material-symbols-outlined text-sm">summarize</span>
-          {summarizing ? 'Analyzing...' : 'Generate Executive Briefing'}
+          {summarizing ? 'Analyzing...' : dept === 'All' ? 'Generate Executive Briefing' : `Generate ${dept} Summary`}
         </button>
       </div>
 
@@ -4289,6 +4411,7 @@ function LiveChatFusion() {
   ]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [stagedFile, setStagedFile] = useState<File | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -4300,128 +4423,123 @@ function LiveChatFusion() {
     scrollToBottom();
   }, [messages, loading]);
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
-    const file = files[0];
-
-    const userMessage: Message = {
-      id: `msg-${Date.now()}-${Math.random()}`,
-      sender: 'user',
-      text: `[TACTICAL FILE ATTACHED] ${file.name} (${(file.size / 1024).toFixed(1)} KB) - Analyzing semantic correlations...`,
-      timestamp: new Date()
-    };
-
-    setMessages((prev) => [...prev, userMessage]);
-    setLoading(true);
-
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
-
-      const response = await fetch('/api/chat/fusion', {
-        method: 'POST',
-        body: formData
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to upload: Server status ${response.status}`);
-      }
-
-      const uploadData = await response.json();
-      const jobId = uploadData.job_id;
-
-      let status = uploadData.status;
-      let resultData: any = null;
-      let attempts = 0;
-
-      while (status !== 'completed' && status !== 'failed' && attempts < 60) {
-        await new Promise((resolve) => setTimeout(resolve, 1500));
-        attempts++;
-
-        const statusRes = await fetch(`/api/chat/fusion/status/${jobId}`);
-        if (!statusRes.ok) {
-          throw new Error(`Failed to retrieve fusion status`);
-        }
-
-        const statusData = await statusRes.json();
-        status = statusData.status;
-
-        if (status === 'completed') {
-          resultData = statusData.result;
-          break;
-        } else if (status === 'failed') {
-          throw new Error(statusData.error || 'Fusion processing failed on server.');
-        }
-      }
-
-      if (!resultData) {
-        throw new Error('Fusion correlation timeout.');
-      }
-
-      const botMessage: Message = {
-        id: `msg-${Date.now()}-${Math.random()}`,
-        sender: 'bot',
-        text: resultData.summary || 'No detailed analysis returned.',
-        timestamp: new Date(),
-        articles: resultData.relevant_articles || []
-      };
-
-      setMessages((prev) => [...prev, botMessage]);
-    } catch (err) {
-      console.error("[Chatbot] File fusion error:", err);
-      const errorMessage: Message = {
-        id: `msg-${Date.now()}-${Math.random()}`,
-        sender: 'bot',
-        text: `Error analyzing tactical document: ${String(err)}`,
-        timestamp: new Date()
-      };
-      setMessages((prev) => [...prev, errorMessage]);
-    } finally {
-      setLoading(false);
-      if (fileInputRef.current) {
-        fileInputRef.current.value = '';
-      }
-    }
+    setStagedFile(files[0]);
   };
 
   const handleSend = async (textToSend: string) => {
-    if (!textToSend.trim() || loading) return;
+    if (!textToSend.trim() && !stagedFile) return;
+    if (loading) return;
+
+    setLoading(true);
+    setInput('');
+
+    const userMsgId = `msg-${Date.now()}-${Math.random()}`;
+    const userMsgText = stagedFile
+      ? `[ATTACHED FILE: ${stagedFile.name}] ${textToSend}`
+      : textToSend;
 
     const userMessage: Message = {
-      id: `msg-${Date.now()}-${Math.random()}`,
+      id: userMsgId,
       sender: 'user',
-      text: textToSend,
+      text: userMsgText,
       timestamp: new Date()
     };
 
     setMessages((prev) => [...prev, userMessage]);
-    setInput('');
-    setLoading(true);
 
     try {
-      const response = await fetch('/api/chat/query', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ query: textToSend })
-      });
+      if (stagedFile) {
+        const formData = new FormData();
+        formData.append('file', stagedFile);
+        if (textToSend.trim()) {
+          formData.append('instructions', textToSend);
+        }
 
-      if (!response.ok) {
-        throw new Error(`Server status ${response.status}`);
+        const response = await fetch('/api/chat/fusion', {
+          method: 'POST',
+          body: formData
+        });
+
+        if (!response.ok) {
+          throw new Error(`Failed to upload: Server status ${response.status}`);
+        }
+
+        const uploadData = await response.json();
+        const jobId = uploadData.job_id;
+
+        let status = uploadData.status;
+        let resultData: any = null;
+        let attempts = 0;
+
+        while (status !== 'completed' && status !== 'failed' && attempts < 60) {
+          await new Promise((resolve) => setTimeout(resolve, 1500));
+          attempts++;
+
+          const statusRes = await fetch(`/api/chat/fusion/status/${jobId}`);
+          if (!statusRes.ok) {
+            throw new Error(`Failed to retrieve fusion status`);
+          }
+
+          const statusData = await statusRes.json();
+          status = statusData.status;
+
+          if (status === 'completed') {
+            resultData = statusData.result;
+            break;
+          } else if (status === 'failed') {
+            throw new Error(statusData.error || 'Fusion processing failed on server.');
+          }
+        }
+
+        if (!resultData) {
+          throw new Error('Fusion correlation timeout.');
+        }
+
+        const botMessage: Message = {
+          id: `msg-${Date.now()}-${Math.random()}`,
+          sender: 'bot',
+          text: resultData.summary || 'No detailed analysis returned.',
+          timestamp: new Date(),
+          articles: resultData.relevant_articles || []
+        };
+
+        setMessages((prev) => [...prev, botMessage]);
+        setStagedFile(null);
+      } else {
+        const historyPayload = messages.map(m => ({
+          sender: m.sender,
+          text: m.text
+        }));
+
+        const response = await fetch('/api/chat/query', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            query: textToSend,
+            history: historyPayload
+          })
+        });
+
+        if (!response.ok) {
+          throw new Error(`Server status ${response.status}`);
+        }
+
+        const data = await response.json();
+        const botMessage: Message = {
+          id: `msg-${Date.now()}-${Math.random()}`,
+          sender: 'bot',
+          text: data.summary || 'No detailed analysis returned.',
+          timestamp: new Date(),
+          articles: data.relevant_articles || []
+        };
+
+        setMessages((prev) => [...prev, botMessage]);
       }
-
-      const data = await response.json();
-      const botMessage: Message = {
-        id: `msg-${Date.now()}-${Math.random()}`,
-        sender: 'bot',
-        text: data.summary || 'No detailed analysis returned.',
-        timestamp: new Date(),
-        articles: data.relevant_articles || []
-      };
-
-      setMessages((prev) => [...prev, botMessage]);
     } catch (err) {
       console.error("[Chatbot] Query error:", err);
       const errorMessage: Message = {
@@ -4581,40 +4699,61 @@ function LiveChatFusion() {
           e.preventDefault();
           handleSend(input);
         }}
-        className="border-t border-[#45464d]/60 p-3 bg-[#122131]/60 flex gap-2"
+        className="border-t border-[#45464d]/60 p-3 bg-[#122131]/60 flex flex-col gap-2"
       >
-        <input
-          type="file"
-          ref={fileInputRef}
-          onChange={handleFileChange}
-          accept=".pdf,.docx,.txt,.doc"
-          className="hidden"
-        />
-        <button
-          type="button"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={loading}
-          className="bg-[#122131]/80 hover:bg-[#7bd0ff]/10 disabled:opacity-40 border border-[#45464d]/60 text-[#7bd0ff] text-xs font-mono font-bold uppercase p-2 rounded transition-colors flex items-center justify-center"
-          title="Upload Geopolitical Document (PDF, DOCX, TXT)"
-        >
-          <span className="material-symbols-outlined text-sm font-bold">attach_file</span>
-        </button>
-        <input
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="Ask for updates (e.g. military actions near China)..."
-          className="flex-1 bg-[#122131]/80 border border-[#45464d]/60 rounded px-3 py-2 text-xs text-[#d4e4fa] focus:outline-none focus:border-[#7bd0ff] font-mono"
-          disabled={loading}
-        />
-        <button
-          type="submit"
-          disabled={!input.trim() || loading}
-          className="bg-[#7bd0ff] hover:bg-[#7bd0ff]/80 disabled:opacity-40 disabled:hover:bg-[#7bd0ff] text-black text-xs font-mono font-bold uppercase tracking-wider px-4 py-2 rounded transition-colors flex items-center gap-1.5"
-        >
-          <span className="material-symbols-outlined text-sm font-bold">send</span>
-          Send
-        </button>
+        {stagedFile && (
+          <div className="flex items-center justify-between bg-[#1f3850] border border-[#7bd0ff]/40 px-3 py-1.5 rounded text-xs text-[#7bd0ff] font-mono">
+            <span className="flex items-center gap-1.5">
+              <span className="material-symbols-outlined text-sm">attach_file</span>
+              <span>ATTACHED: {stagedFile.name} ({(stagedFile.size / 1024).toFixed(1)} KB)</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                setStagedFile(null);
+                if (fileInputRef.current) fileInputRef.current.value = '';
+              }}
+              className="hover:text-red-400 font-bold transition-colors ml-2"
+              title="Remove File Attachment"
+            >
+              [REMOVE]
+            </button>
+          </div>
+        )}
+        <div className="flex gap-2 w-full">
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleFileChange}
+            accept=".pdf,.docx,.txt,.doc"
+            className="hidden"
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={loading}
+            className="bg-[#122131]/80 hover:bg-[#7bd0ff]/10 disabled:opacity-40 border border-[#45464d]/60 text-[#7bd0ff] text-xs font-mono font-bold uppercase p-2 rounded transition-colors flex items-center justify-center"
+            title="Upload Geopolitical Document (PDF, DOCX, TXT)"
+          >
+            <span className="material-symbols-outlined text-sm font-bold">attach_file</span>
+          </button>
+          <input
+            type="text"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder={stagedFile ? "Provide custom instructions/tasks for this file..." : "Ask for updates (e.g. military actions near China)..."}
+            className="flex-1 bg-[#122131]/80 border border-[#45464d]/60 rounded px-3 py-2 text-xs text-[#d4e4fa] focus:outline-none focus:border-[#7bd0ff] font-mono"
+            disabled={loading}
+          />
+          <button
+            type="submit"
+            disabled={(!input.trim() && !stagedFile) || loading}
+            className="bg-[#7bd0ff] hover:bg-[#7bd0ff]/80 disabled:opacity-40 disabled:hover:bg-[#7bd0ff] text-black text-xs font-mono font-bold uppercase tracking-wider px-4 py-2 rounded transition-colors flex items-center gap-1.5"
+          >
+            <span className="material-symbols-outlined text-sm font-bold">send</span>
+            Send
+          </button>
+        </div>
       </form>
     </div>
   );
