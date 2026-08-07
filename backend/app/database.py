@@ -286,22 +286,28 @@ async def create_tables():
         await conn.run_sync(Base.metadata.create_all)
         logger.info("[Database] Tables created successfully.")
 
-    # Always ensure user account is seeded
+    # Always ensure user accounts are seeded
     async with SessionLocal() as session:
         try:
-            user_check = await session.execute(select(User).limit(1))
-            if not user_check.scalars().first():
-                import bcrypt
-                logger.info("[Database] Seeding default STRATCOM operator account...")
-                password = "password123"
-                hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-                default_user = User(
-                    username="operator",
-                    password_hash=hashed,
-                    role="Operator"
-                )
-                session.add(default_user)
-                await session.commit()
+            import bcrypt
+            old_credentials = [
+                {"username": "operator@intel.local", "password": "Ops@2026", "role": "Operator"},
+                {"username": "analyst@intel.local", "password": "Intel@2026", "role": "Analyst"},
+                {"username": "admin@intel.local", "password": "Admin@2026", "role": "Admin"}
+            ]
+            for cred in old_credentials:
+                check_stmt = select(User).where(User.username == cred["username"])
+                check_res = await session.execute(check_stmt)
+                if not check_res.scalars().first():
+                    logger.info(f"[Database] Seeding secure user account: {cred['username']}")
+                    hashed = bcrypt.hashpw(cred["password"].encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+                    user_obj = User(
+                        username=cred["username"],
+                        password_hash=hashed,
+                        role=cred["role"]
+                    )
+                    session.add(user_obj)
+            await session.commit()
         except Exception as e:
             logger.error(f"[Database] User seeding failed: {e}")
         
