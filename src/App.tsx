@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { WorldGeoMap, type WorldGeoMapMarker } from './components/WorldGeoMap';
+import { WorldGeoMap, type WorldGeoMapMarker, getContinentName } from './components/WorldGeoMap';
 import { BorderWeatherHUD } from './components/BorderWeatherHUD';
 import worldCountries from 'world-countries';
 
@@ -691,7 +691,6 @@ function App() {
 
   // 2. Authentication States
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
-  const [pendingAuthUser, setPendingAuthUser] = useState<AuthUser | null>(null);
   const [loginForm, setLoginForm] = useState({ email: '', password: '' });
   const [loginError, setLoginError] = useState('');
   const [isWebAuthnSimulating, setIsWebAuthnSimulating] = useState(false);
@@ -801,11 +800,10 @@ function App() {
           const response = await fetch(`/api/news/country?name=${encodeURIComponent(selectedCountry.name)}&code=${cca2}`);
           if (response.ok) {
             const data = await response.json();
-            const trustLevels = ['Verified Source', 'Developing', 'Unverified', 'Rumor'];
             const formattedSignals = (data.signals || []).map((s: any, idx: number) => ({
               ...s,
               id: `${selectedCountry.name}-${idx}-${s.timestamp}`,
-              trust: trustLevels[idx % trustLevels.length],
+              trust: (s.verification_status as any) || 'Unrated',
               country: selectedCountry.name
             }));
             
@@ -825,7 +823,132 @@ function App() {
     }
   }, [authUser, selectedCountry, newsFeed]);
 
+
+
+  const handleScrapeSubmit = async () => {
+    const urls = scrapeLinks.split('\n').map(u => u.trim()).filter(u => u !== '');
+    if (urls.length === 0) return;
+    
+    try {
+      const response = await fetch('/api/scrape', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ urls, platform: scrapePlatform })
+      });
+      if (!response.ok) throw new Error(`Scraper submission failed: ${response.status}`);
+      const data = await response.json();
+      if (data.success && data.jobIds) {
+        setScrapeLinks('');
+        data.jobIds.forEach((id: string, idx: number) => {
+          setScrapedJobs(prev => ({
+            ...prev,
+            [id]: { url: urls[idx], platform: scrapePlatform, status: 'queued', progress: 10 }
+          }));
+        });
+      }
+    } catch (err: any) {
+      console.error(err);
+    }
+  };
+  const settingsMenuRef = useRef<HTMLDivElement>(null);
+
+  // Keyboard navigation cursor state
+  const [keyboardCursorIndex, setKeyboardCursorIndex] = useState(-1);
+  const [selectedDossierSignal, setSelectedDossierSignal] = useState<Signal | null>(null);
+
+  // Matrix Filter States
+  const [filterCategory, setFilterCategory] = useState<string>('All');
+  const [filterImpact, setFilterImpact] = useState<string>('All');
+  const [filterTrust, setFilterTrust] = useState<string>('All');
+  const [filterQuery, setFilterQuery] = useState<string>('');
+  const [newsView, setNewsView] = useState<'latest' | 'past'>('latest');
+  const [lastRefreshAt, setLastRefreshAt] = useState<Date | null>(null);
+  const [refreshLabelTick, setRefreshLabelTick] = useState(0);
+  const [isQueryOverlayOpen, setIsQueryOverlayOpen] = useState(false);
+  const [queryInput, setQueryInput] = useState('');
+  const [queryAnswer, setQueryAnswer] = useState<QueryAnswer | null>(null);
+  const [queryLoading, setQueryLoading] = useState(false);
+  const [queryError, setQueryError] = useState('');
+  const [queryHistory, setQueryHistory] = useState<string[]>([]);
+  const [worldAlerts, setWorldAlerts] = useState<WorldAlert[]>([]);
+  const [worldAlertsLoading, setWorldAlertsLoading] = useState(false);
+  const [worldAlertsUpdatedAt, setWorldAlertsUpdatedAt] = useState('');
+  const [worldMapZoom, setWorldMapZoom] = useState(1);
+  const [worldMapPan, setWorldMapPan] = useState<WorldMapPan>({ x: 0, y: 0 });
+  const [selectedContinent, setSelectedContinent] = useState<string>('All');
+  const [isWorldMapDragging, setIsWorldMapDragging] = useState(false);
+  const [isWorldMapFullscreen, setIsWorldMapFullscreen] = useState(false);
+  const worldMapDragRef = useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(null);
+
+  // Active Tooltip entity state
+  const [hoveredEntity, setHoveredEntity] = useState<{ text: string; x: number; y: number } | null>(null);
+
+  useEffect(() => {
+    if (!isSettingsOpen) return;
+
+    const handleDocumentClick = (event: MouseEvent) => {
+      const targetNode = event.target as Node;
+      if (settingsMenuRef.current && !settingsMenuRef.current.contains(targetNode)) {
+        setIsSettingsOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handleDocumentClick);
+    return () => {
+      document.removeEventListener('mousedown', handleDocumentClick);
+    };
+  }, [isSettingsOpen]);
+
+  const [systemStatus, setSystemStatus] = useState<any>(null);
+  const [isDemoBannerDismissed, setIsDemoBannerDismissed] = useState(false);
+
+  useEffect(() => {
+    window.localStorage.removeItem('intel-session');
+
+    async function checkSession() {
+      try {
+        const response = await fetch('/api/auth/me');
+        if (response.ok) {
+          const data = await response.json();
+          setAuthUser({
+            id: data.id,
+            name: data.username,
+            role: data.role.toUpperCase(),
+            clearance: clearanceForRole(data.role)
+          });
+        }
+      } catch (err) {
+        console.warn('Failed to verify session on load:', err);
+      }
+    }
+    void checkSession();
+
+    async function fetchSystemStatus() {
+      try {
+        const response = await fetch('/api/system/status');
+        if (response.ok) {
+          const data = await response.json();
+          setSystemStatus(data);
+        }
+      } catch (err) {
+        console.warn('Failed to fetch system status:', err);
+      }
+    }
+    void fetchSystemStatus();
+  }, []);
+
   // 7. WebSocket Listener Effect
+  const isUserScrolledDownRef = useRef(false);
+  const filterCategoryRef = useRef(filterCategory);
+
+  useEffect(() => {
+    isUserScrolledDownRef.current = isUserScrolledDown;
+  }, [isUserScrolledDown]);
+
+  useEffect(() => {
+    filterCategoryRef.current = filterCategory;
+  }, [filterCategory]);
+
   useEffect(() => {
     if (!authUser) return;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -894,6 +1017,43 @@ function App() {
                 };
               });
             }
+          } else if (msg.type === 'signal') {
+            const incomingSignal: Signal = {
+              ...msg.signal,
+              isNew: true
+            };
+
+            if (!incomingSignal.url) {
+              return;
+            }
+
+            if (filterCategoryRef.current !== 'All' && incomingSignal.category !== filterCategoryRef.current) {
+              return;
+            }
+
+            // Play double chime if high-impact or triggers key entities
+            const hasKeyEntity = /pla|taliban|uav|drone|clash|loc|lac/i.test(incomingSignal.headline);
+            if (incomingSignal.impact === 'High' || hasKeyEntity) {
+              playTerminalChime();
+            }
+
+            if (isUserScrolledDownRef.current) {
+              setStreamBuffer((prev) => [...prev, { country: msg.country, signal: incomingSignal }]);
+            } else {
+              setNewsFeed((prev) => {
+                const currentFeed = prev[msg.country];
+                if (!currentFeed) return prev;
+                const updatedSignals = [incomingSignal, ...currentFeed.signals].slice(0, 100);
+                return {
+                  ...prev,
+                  [msg.country]: {
+                    ...currentFeed,
+                    signals: updatedSignals,
+                    operational_summary: `Ingestion mesh verified. Detected ${updatedSignals.length} tactical signals in historical monitoring window. [Live Stream Update Received]`
+                  }
+                };
+              });
+            }
           }
         } catch (e) {
           console.warn('[WS] Telemetry parser error:', e);
@@ -906,84 +1066,6 @@ function App() {
     connect();
     return () => { if (socket) socket.close(); };
   }, [authUser]);
-
-  const handleScrapeSubmit = async () => {
-    const urls = scrapeLinks.split('\n').map(u => u.trim()).filter(u => u !== '');
-    if (urls.length === 0) return;
-    
-    try {
-      const response = await fetch('/api/scrape', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ urls, platform: scrapePlatform })
-      });
-      if (!response.ok) throw new Error(`Scraper submission failed: ${response.status}`);
-      const data = await response.json();
-      if (data.success && data.jobIds) {
-        setScrapeLinks('');
-        data.jobIds.forEach((id: string, idx: number) => {
-          setScrapedJobs(prev => ({
-            ...prev,
-            [id]: { url: urls[idx], platform: scrapePlatform, status: 'queued', progress: 10 }
-          }));
-        });
-      }
-    } catch (err: any) {
-      console.error(err);
-    }
-  };
-  const settingsMenuRef = useRef<HTMLDivElement>(null);
-
-  // Keyboard navigation cursor state
-  const [keyboardCursorIndex, setKeyboardCursorIndex] = useState(-1);
-  const [selectedDossierSignal, setSelectedDossierSignal] = useState<Signal | null>(null);
-
-  // Matrix Filter States
-  const [filterCategory, setFilterCategory] = useState<string>('All');
-  const [filterImpact, setFilterImpact] = useState<string>('All');
-  const [filterTrust, setFilterTrust] = useState<string>('All');
-  const [filterQuery, setFilterQuery] = useState<string>('');
-  const [newsView, setNewsView] = useState<'latest' | 'past'>('latest');
-  const [lastRefreshAt, setLastRefreshAt] = useState<Date | null>(null);
-  const [refreshLabelTick, setRefreshLabelTick] = useState(0);
-  const [isQueryOverlayOpen, setIsQueryOverlayOpen] = useState(false);
-  const [queryInput, setQueryInput] = useState('');
-  const [queryAnswer, setQueryAnswer] = useState<QueryAnswer | null>(null);
-  const [queryLoading, setQueryLoading] = useState(false);
-  const [queryError, setQueryError] = useState('');
-  const [queryHistory, setQueryHistory] = useState<string[]>([]);
-  const [worldAlerts, setWorldAlerts] = useState<WorldAlert[]>([]);
-  const [worldAlertsLoading, setWorldAlertsLoading] = useState(false);
-  const [worldAlertsUpdatedAt, setWorldAlertsUpdatedAt] = useState('');
-  const [worldMapZoom, setWorldMapZoom] = useState(1);
-  const [worldMapPan, setWorldMapPan] = useState<WorldMapPan>({ x: 0, y: 0 });
-  const [isWorldMapDragging, setIsWorldMapDragging] = useState(false);
-  const [isWorldMapFullscreen, setIsWorldMapFullscreen] = useState(false);
-  const worldMapDragRef = useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(null);
-
-  // Active Tooltip entity state
-  const [hoveredEntity, setHoveredEntity] = useState<{ text: string; x: number; y: number } | null>(null);
-
-  useEffect(() => {
-    if (!isSettingsOpen) return;
-
-    const handleDocumentClick = (event: MouseEvent) => {
-      const targetNode = event.target as Node;
-      if (settingsMenuRef.current && !settingsMenuRef.current.contains(targetNode)) {
-        setIsSettingsOpen(false);
-      }
-    };
-
-    document.addEventListener('mousedown', handleDocumentClick);
-    return () => {
-      document.removeEventListener('mousedown', handleDocumentClick);
-    };
-  }, [isSettingsOpen]);
-
-  useEffect(() => {
-    window.localStorage.removeItem('intel-session');
-    void getOrCreateCredentialStore();
-  }, []);
 
   useEffect(() => {
     const cachedTheme = window.localStorage.getItem('drishya-ui-theme-rgb');
@@ -1087,7 +1169,7 @@ function App() {
               signals: (data.signals || []).map((s, idx) => ({
                 ...s,
                 id: `${countryName}-${idx}-${s.timestamp}`,
-                trust: trustLevels[idx % trustLevels.length],
+                trust: (s.verification_status as any) || 'Unrated',
                 country: countryName
               }))
             };
@@ -1140,64 +1222,6 @@ function App() {
       window.clearInterval(labelInterval);
     };
   }, []);
-
-  // SSE Stream Listener (category-specific)
-  useEffect(() => {
-    if (!authUser) return;
-
-    const source = new EventSource(`/api/news/stream?category=${filterCategory}`);
-
-    source.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        if (data.type === 'signal') {
-          const incomingSignal: Signal = {
-            ...data.signal,
-            country: data.country,
-            trust: trustLevels[Math.floor(Math.random() * trustLevels.length)],
-            id: `${data.country}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            isNew: true
-          };
-
-          if (!incomingSignal.url) {
-            return;
-          }
-
-          // Play double chime if high-impact or triggers key entities
-          const hasKeyEntity = /pla|taliban|uav|drone|clash|loc|lac/i.test(incomingSignal.headline);
-          if (incomingSignal.impact === 'High' || hasKeyEntity) {
-            playTerminalChime();
-          }
-
-          if (isUserScrolledDown) {
-            // Buffer updates when user is scrolled down reading
-            setStreamBuffer((prev) => [...prev, { country: data.country, signal: incomingSignal }]);
-          } else {
-            // Otherwise, prepend directly to state feed
-            setNewsFeed((prev) => {
-              const currentFeed = prev[data.country];
-              if (!currentFeed) return prev;
-              const updatedSignals = [incomingSignal, ...currentFeed.signals].slice(0, 100);
-              return {
-                ...prev,
-                [data.country]: {
-                  ...currentFeed,
-                  signals: updatedSignals,
-                  operational_summary: `Ingestion mesh verified. Detected ${updatedSignals.length} tactical signals in historical monitoring window. [Live Stream Update Received]`
-                }
-              };
-            });
-          }
-        }
-      } catch (err) {
-        console.warn('Error parsing SSE payload:', err);
-      }
-    };
-
-    return () => {
-      source.close();
-    };
-  }, [authUser, isUserScrolledDown, filterCategory]);
 
   // Release stream buffer queue
   const releaseStreamBuffer = () => {
@@ -1644,9 +1668,20 @@ function App() {
       return techB - techA;
     });
 
-    // Support displaying all dynamic countries on the world map
-    return sorted.slice(0, 1500);
+    // Support displaying all dynamic countries on the world map (Filter empty/invalid URLs)
+    return sorted.filter(m => m.headline && m.headline.trim() && m.url && (m.url.startsWith("http://") || m.url.startsWith("https://")));
   }, [techFocusWorldMapMarkers, worldMapMarkers, fallbackWorldMapMarkers]);
+
+  // Continent-wise filtered markers
+  const filteredWorldMapMarkers = useMemo<WorldGeoMapMarker[]>(() => {
+    if (selectedContinent === 'All') return effectiveWorldMapMarkers;
+    return effectiveWorldMapMarkers.filter((marker) => {
+      const cca2 = marker.countryCode || '';
+      const countryObj = (worldCountries as any[]).find(c => c.cca2 === cca2);
+      const continent = countryObj ? getContinentName(countryObj.region, countryObj.subregion) : 'Other';
+      return continent === selectedContinent;
+    });
+  }, [effectiveWorldMapMarkers, selectedContinent]);
 
   const clampPan = (x: number, y: number, zoom: number): WorldMapPan => {
     const maxX = 500 * Math.max(0, zoom - 1);
@@ -1658,7 +1693,8 @@ function App() {
   };
 
   const setClampedWorldMapZoom = (value: number) => {
-    const clamped = Math.max(1, Math.min(4, Number(value.toFixed(2))));
+    // 10x Zoom Capability: raised limit to 10
+    const clamped = Math.max(1, Math.min(10, Number(value.toFixed(2))));
     setWorldMapZoom(clamped);
     setWorldMapPan((prev) => clampPan(prev.x, prev.y, clamped));
   };
@@ -1825,51 +1861,50 @@ function App() {
     event.preventDefault();
     setLoginError('');
 
-    const loginId = normalizeLoginId(loginForm.email);
-    if (!loginId || !loginForm.password) {
+    if (!loginForm.email || !loginForm.password) {
       setLoginError('ID and password are required.');
       return;
     }
 
-    const credentialStore = await getOrCreateCredentialStore();
-    const record = credentialStore[loginId];
-    if (!record) {
-      setLoginError('Invalid ID or password.');
-      return;
-    }
-
-    const inputHash = await hashSecret(loginForm.password);
-    if (inputHash !== record.passwordHash) {
-      setLoginError('Invalid ID or password.');
-      return;
-    }
-
-    const user: AuthUser = {
-      id: loginId,
-      name: record.name,
-      role: record.role.toUpperCase(),
-      clearance: clearanceForRole(record.role),
-    };
-    setPendingAuthUser(user);
-    
-    // Simulate Fingerprint / Security Key MFA
     setIsWebAuthnSimulating(true);
-  };
 
-  const executeMfaSuccess = () => {
-    if (!pendingAuthUser) {
-      setLoginError('Authentication context expired. Please login again.');
+    try {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: loginForm.email,
+          password: loginForm.password
+        })
+      });
+
+      if (!response.ok) {
+        const errData = await response.json();
+        setLoginError(errData.detail || 'Invalid ID or password.');
+        setIsWebAuthnSimulating(false);
+        return;
+      }
+
+      const data = await response.json();
+
+      setTimeout(() => {
+        setWebauthnSuccess(true);
+        setTimeout(() => {
+          setAuthUser({
+            id: data.user.id,
+            name: data.user.username,
+            role: data.user.role.toUpperCase(),
+            clearance: clearanceForRole(data.user.role),
+          });
+          setIsWebAuthnSimulating(false);
+          setWebauthnSuccess(false);
+        }, 800);
+      }, 1000);
+
+    } catch (err) {
+      setLoginError('Telemetry security system offline. Connection failed.');
       setIsWebAuthnSimulating(false);
-      return;
     }
-
-    setWebauthnSuccess(true);
-    setTimeout(() => {
-      setAuthUser(pendingAuthUser);
-      setPendingAuthUser(null);
-      setIsWebAuthnSimulating(false);
-      setWebauthnSuccess(false);
-    }, 800);
   };
 
   const handleCredentialUpdate = async (event: React.FormEvent<HTMLFormElement>) => {
@@ -1935,9 +1970,13 @@ function App() {
     }
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } catch (err) {
+      console.warn('Logout request failed:', err);
+    }
     setAuthUser(null);
-    setPendingAuthUser(null);
     setLoginForm({ email: '', password: '' });
     setIsWebAuthnSimulating(false);
     setWebauthnSuccess(false);
@@ -2321,7 +2360,7 @@ function App() {
                   onClick={() => {
                     setPanelView('worldMap');
                     setIsCountrySelected(false);
-                    setIsWorldMapFullscreen(true);
+                    setIsWorldMapFullscreen(false);
                   }}
                   className={`w-full text-left px-3 py-2 border transition-colors ${
                     panelView === 'worldMap'
@@ -2375,13 +2414,13 @@ function App() {
             </div>
 
             {isWorldMapFullscreen && (
-              <div className={`fixed inset-0 z-50 ${isDarkMode ? 'bg-black/95' : 'bg-white/95'} backdrop-blur-sm p-4 md:p-6`}>
-                <div className="mx-auto flex h-full max-w-7xl flex-col">
+              <div className={`fixed inset-0 z-50 ${isDarkMode ? 'bg-black/95' : 'bg-white/95'} backdrop-blur-sm p-4 md:p-6 flex flex-col`}>
+                <div className="mx-auto flex h-full w-full max-w-7xl flex-col min-h-0">
                   <div className="flex items-center justify-between border-b border-white/20 pb-3">
                     <div>
                       <h2 className="text-2xl font-semibold">Live World Map</h2>
                       <p className={`text-sm mt-1 ${isDarkMode ? 'text-white/60' : 'text-black/60'}`}>
-                        Superpower and India-neighbour high-priority alerts. Hover countries for country and capital. Click dots for source links.
+                        Geopolitical threat wire. Hover countries/nodes to see detailed alerts. Click to navigate directly to the original live source.
                       </p>
                     </div>
                     <button
@@ -2392,19 +2431,37 @@ function App() {
                     </button>
                   </div>
 
-                  <div className="mt-4 flex items-center gap-3 text-[11px] uppercase tracking-[0.2em]">
-                    <span className="inline-flex items-center gap-1.5">
-                      <span className="h-2.5 w-2.5 rounded-full bg-red-500" /> High alert
-                    </span>
-                    <span className="inline-flex items-center gap-1.5">
-                      <span className="h-2.5 w-2.5 rounded-full bg-yellow-400" /> Medium alert
-                    </span>
-                    <span className={`${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>
-                      Updated: {worldAlertsUpdatedAt ? new Date(worldAlertsUpdatedAt).toLocaleTimeString() : 'pending'}
-                    </span>
-                    <span className={`${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>
-                      Zoom: {worldMapZoom.toFixed(1)}x
-                    </span>
+                  <div className="mt-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-white/10 pb-2">
+                    <div className="flex items-center gap-3 text-[11px] uppercase tracking-[0.2em]">
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="h-2.5 w-2.5 rounded-full bg-red-500" /> High alert
+                      </span>
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="h-2.5 w-2.5 rounded-full bg-yellow-400" /> Medium alert
+                      </span>
+                      <span className={`${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>
+                        Updated: {worldAlertsUpdatedAt ? new Date(worldAlertsUpdatedAt).toLocaleTimeString() : 'pending'}
+                      </span>
+                      <span className={`${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>
+                        Zoom: {worldMapZoom.toFixed(1)}x
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap gap-1">
+                      {['All', 'Asia', 'Europe', 'Africa', 'North America', 'South America', 'Oceania'].map((cont) => (
+                        <button
+                          key={cont}
+                          onClick={() => setSelectedContinent(cont)}
+                          className={`px-2 py-0.5 text-[9px] font-mono rounded border transition-all uppercase tracking-wider ${
+                            selectedContinent === cont
+                              ? 'bg-[#00e5ff] text-black border-[#00e5ff] font-bold shadow-[0_0_8px_rgba(0,229,255,0.3)]'
+                              : 'border-white/10 hover:border-white/30 text-[#bec6e0] hover:bg-white/5'
+                          }`}
+                        >
+                          {cont}
+                        </button>
+                      ))}
+                    </div>
                   </div>
 
                   <div
@@ -2473,7 +2530,7 @@ function App() {
                     </div>
 
                     <WorldGeoMap
-                      markers={effectiveWorldMapMarkers}
+                      markers={filteredWorldMapMarkers}
                       interactive
                       showMarkers
                       fitMode="meet"
@@ -2481,6 +2538,7 @@ function App() {
                       panX={worldMapPan.x}
                       panY={worldMapPan.y}
                       selectedCountryName={selectedCountry.name}
+                      selectedContinent={selectedContinent}
                       onCountryClick={handleMapCountryClick}
                       className="absolute inset-0 h-full w-full opacity-95"
                     />
@@ -2502,30 +2560,56 @@ function App() {
                     <div>
                       <h2 className="text-xl font-semibold">Live World Map</h2>
                       <p className={`text-sm mt-1 ${isDarkMode ? 'text-white/60' : 'text-black/60'}`}>
-                        Live alerts from trusted global reporting. Red = high alert, yellow = medium alert.
+                        Geopolitical threat wire. Hover countries/nodes to see detailed alerts. Click to navigate directly to the original live source.
                       </p>
                     </div>
-                    <button
-                      onClick={() => setRefreshTrigger((prev) => prev + 1)}
-                      className={`border px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] ${isDarkMode ? 'border-white/30 hover:bg-white/10' : 'border-black/30 hover:bg-black/10'}`}
-                    >
-                      Refresh map
-                    </button>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setIsWorldMapFullscreen(true)}
+                        className={`border px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] ${isDarkMode ? 'border-white/30 hover:bg-white/10' : 'border-black/30 hover:bg-black/10'}`}
+                      >
+                        Maximize Map
+                      </button>
+                      <button
+                        onClick={() => setRefreshTrigger((prev) => prev + 1)}
+                        className={`border px-2.5 py-1 text-[10px] uppercase tracking-[0.2em] ${isDarkMode ? 'border-white/30 hover:bg-white/10' : 'border-black/30 hover:bg-black/10'}`}
+                      >
+                        Refresh
+                      </button>
+                    </div>
                   </div>
 
-                  <div className="mt-4 flex items-center gap-3 text-[11px] uppercase tracking-[0.2em]">
-                    <span className="inline-flex items-center gap-1.5">
-                      <span className="h-2.5 w-2.5 rounded-full bg-red-500" /> High alert
-                    </span>
-                    <span className="inline-flex items-center gap-1.5">
-                      <span className="h-2.5 w-2.5 rounded-full bg-yellow-400" /> Medium alert
-                    </span>
-                    <span className={`${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>
-                      Updated: {worldAlertsUpdatedAt ? new Date(worldAlertsUpdatedAt).toLocaleTimeString() : 'pending'}
-                    </span>
-                    <span className={`${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>
-                      Zoom: {worldMapZoom.toFixed(1)}x
-                    </span>
+                  <div className="mt-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-white/10 pb-2">
+                    <div className="flex items-center gap-3 text-[11px] uppercase tracking-[0.2em]">
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="h-2.5 w-2.5 rounded-full bg-red-500" /> High alert
+                      </span>
+                      <span className="inline-flex items-center gap-1.5">
+                        <span className="h-2.5 w-2.5 rounded-full bg-yellow-400" /> Medium alert
+                      </span>
+                      <span className={`${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>
+                        Updated: {worldAlertsUpdatedAt ? new Date(worldAlertsUpdatedAt).toLocaleTimeString() : 'pending'}
+                      </span>
+                      <span className={`${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>
+                        Zoom: {worldMapZoom.toFixed(1)}x
+                      </span>
+                    </div>
+
+                    <div className="flex flex-wrap gap-1">
+                      {['All', 'Asia', 'Europe', 'Africa', 'North America', 'South America', 'Oceania'].map((cont) => (
+                        <button
+                          key={cont}
+                          onClick={() => setSelectedContinent(cont)}
+                          className={`px-2 py-0.5 text-[9px] font-mono rounded border transition-all uppercase tracking-wider ${
+                            selectedContinent === cont
+                              ? 'bg-[#00e5ff] text-black border-[#00e5ff] font-bold shadow-[0_0_8px_rgba(0,229,255,0.3)]'
+                              : 'border-white/10 hover:border-white/30 text-[#bec6e0] hover:bg-white/5'
+                          }`}
+                        >
+                          {cont}
+                        </button>
+                      ))}
+                    </div>
                   </div>
 
                   <div
@@ -2594,13 +2678,14 @@ function App() {
                     </div>
 
                     <WorldGeoMap
-                      markers={effectiveWorldMapMarkers}
+                      markers={filteredWorldMapMarkers}
                       interactive
                       showMarkers
                       zoom={worldMapZoom}
                       panX={worldMapPan.x}
                       panY={worldMapPan.y}
                       selectedCountryName={selectedCountry.name}
+                      selectedContinent={selectedContinent}
                       onCountryClick={handleMapCountryClick}
                       className="absolute inset-0 h-full w-full opacity-95"
                     />
@@ -2613,10 +2698,10 @@ function App() {
 
                   <div className={`mt-4 rounded border p-3 ${isDarkMode ? 'border-white/20 bg-white/5' : 'border-black/20 bg-black/5'}`}>
                     <p className={`text-xs uppercase tracking-[0.2em] ${isDarkMode ? 'text-white/60' : 'text-black/60'}`}>
-                      Latest world alerts
+                      Latest world alerts ({filteredWorldMapMarkers.length})
                     </p>
                     <div className="mt-2 max-h-[180px] space-y-2 overflow-y-auto">
-                      {effectiveWorldMapMarkers.slice(0, 12).map((alert) => {
+                      {filteredWorldMapMarkers.slice(0, 12).map((alert) => {
                         const isLive = alert.timestamp ? (new Date().getTime() - new Date(alert.timestamp).getTime()) / 60000 < 60 : false;
                         return (
                           <a
@@ -3024,24 +3109,22 @@ function App() {
                     </div>
                   </div>
 
-                  <div className="relative w-24 h-24 mx-auto mb-6 group cursor-pointer" id="auth-trigger" onClick={executeMfaSuccess}>
-                    <div className="absolute inset-0 rounded-full bg-[#7bd0ff]/10 blur-xl group-hover:bg-[#7bd0ff]/20 transition-all duration-500" />
-                    <div className="absolute inset-0 border border-[#7bd0ff]/40 rounded-full border-dashed spin-dashed-custom" />
-                    <div className="relative w-full h-full border border-[#7bd0ff] flex items-center justify-center rounded-full bg-[#010f1f] transition-transform duration-300 group-hover:scale-105 active:scale-95">
-                      <span
-                        className={`material-symbols-outlined text-4xl transition-colors duration-300 ${
-                          webauthnSuccess ? 'text-[#4edea3]' : 'text-[#7bd0ff]'
-                        }`}
-                        style={{ fontVariationSettings: "'FILL' 0" }}
-                      >
-                        {webauthnSuccess ? 'verified' : 'fingerprint'}
-                      </span>
-                    </div>
+                  <div className="relative w-24 h-24 mx-auto mb-6 flex items-center justify-center">
+                    <div className="absolute inset-0 rounded-full bg-[#7bd0ff]/5 blur-lg" />
+                    {webauthnSuccess ? (
+                      <div className="relative w-16 h-16 border border-[#4edea3]/40 flex items-center justify-center rounded-full bg-[#010f1f] animate-bounce">
+                        <span className="material-symbols-outlined text-2xl text-[#4edea3]">verified</span>
+                      </div>
+                    ) : (
+                      <div className="relative w-16 h-16 border-2 border-t-[#7bd0ff] border-r-transparent border-[#7bd0ff]/20 flex items-center justify-center rounded-full bg-[#010f1f] animate-spin">
+                        <span className="material-symbols-outlined text-xl text-[#7bd0ff]">sync</span>
+                      </div>
+                    )}
                   </div>
 
-                  <h2 className="text-[#d4e4fa] text-lg font-bold mb-1">MFA Verification</h2>
+                  <h2 className="text-[#d4e4fa] text-lg font-bold mb-1">STRATCOM Authentication</h2>
                   <p className="text-xs text-[#c6c6cd] max-w-xs mx-auto mb-6 leading-relaxed">
-                    Touch your <span className="text-[#7bd0ff] font-semibold">Security Key</span> or simulate biometrics above to initialize STRATCOM access.
+                    Establishing secure encrypted tunnel. Verifying digital identity parameters...
                   </p>
 
                   <div className="space-y-2 bg-[#0d1c2d] p-4 border border-[#45464d] text-left text-xs">
@@ -3087,6 +3170,20 @@ function App() {
       className="theme-rgb-all min-h-screen bg-[#051424] text-[#d4e4fa] flex flex-col font-sans overflow-hidden select-none relative z-10"
       style={{ ['--theme-rgb' as string]: `${uiTheme.r}, ${uiTheme.g}, ${uiTheme.b}` }}
     >
+      {systemStatus?.mode === 'demo' && !isDemoBannerDismissed && (
+        <div className="bg-amber-500/10 border-b border-amber-500/30 text-amber-400 px-6 py-2.5 text-xs font-mono flex items-center justify-between z-50 shrink-0">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-sm text-amber-400">warning</span>
+            <span><strong>DEMO DATA MODE</strong> — no live news providers configured. Telemetry is simulated.</span>
+          </div>
+          <button
+            onClick={() => setIsDemoBannerDismissed(true)}
+            className="text-amber-400 hover:text-white font-bold px-2 py-0.5 border border-amber-500/30 hover:border-amber-400/50 rounded transition-all text-[10px]"
+          >
+            DISMISS
+          </button>
+        </div>
+      )}
       {renderWorldMapBackdrop(0.16)}
       {/* Global Backdrop Tooltip Element */}
       {hoveredEntity && (

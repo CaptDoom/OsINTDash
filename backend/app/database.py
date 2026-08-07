@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timezone
 import uuid
 from typing import AsyncGenerator, List, Optional
-from sqlalchemy import Column, String, Text, DateTime, TypeDecorator, select, func
+from sqlalchemy import Column, String, Text, DateTime, TypeDecorator, select, func, Float
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from backend.app.config import settings
@@ -77,6 +77,8 @@ class Article(Base):
     impact_level: Mapped[str] = mapped_column(String(32), default="High Impact")
     department: Mapped[str] = mapped_column(String(64), nullable=False)
     embedding = Column(VectorType, nullable=True)
+    source_reputation: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, default="Unrated")
+    confidence_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=0.98)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 # Archive Summary Model
@@ -87,6 +89,15 @@ class ArchiveSummary(Base):
     timeframe: Mapped[str] = mapped_column(String(8), unique=True, nullable=False) # '1M', '6M', '1Y'
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     generated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+# User Model
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    username: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(256), nullable=False)
+    role: Mapped[str] = mapped_column(String(64), default="Operator")
 
 # Engine initialization with automatic fallback
 engine = None
@@ -234,21 +245,7 @@ async def seed_data_if_empty(session: AsyncSession):
             src_list = sources_map.get(dept, ["bbc.com"])
             source = random.choice(src_list)
 
-            url_map = {
-                "reuters.com": "https://www.reuters.com/world/",
-                "apnews.com": "https://apnews.com/hub/world-news",
-                "aljazeera.com": "https://www.aljazeera.com/news/",
-                "bloomberg.com": "https://www.bloomberg.com/",
-                "bbc.com": "https://www.bbc.com/news",
-                "dw.com": "https://www.dw.com/en/",
-                "france24.com": "https://www.france24.com/en/",
-                "theguardian.com": "https://www.theguardian.com/world",
-                "nytimes.com": "https://www.nytimes.com/section/world",
-                "techcrunch.com": "https://techcrunch.com/",
-                "wired.com": "https://www.wired.com/",
-                "theverge.com": "https://www.theverge.com/"
-            }
-            url = f"{url_map.get(source, 'https://www.bbc.com/news')}?feed_id={cc.lower()}-{dept.lower().split()[0]}-{idx}-{random.randint(10000, 99999)}"
+            url = f"https://demo.drishya.local/article/{cc.lower()}/{dept.lower().split()[0]}-{idx}-{random.randint(10000, 99999)}"
 
             # 1 High, 2 Medium, 2 Normal
             if idx == 0:
@@ -288,13 +285,33 @@ async def create_tables():
                 logger.warning(f"[Database] Failed to enable pgvector extension: {e}")
         await conn.run_sync(Base.metadata.create_all)
         logger.info("[Database] Tables created successfully.")
-        
-    # Run seeding if empty
+
+    # Always ensure user account is seeded
     async with SessionLocal() as session:
         try:
-            await seed_data_if_empty(session)
+            user_check = await session.execute(select(User).limit(1))
+            if not user_check.scalars().first():
+                import bcrypt
+                logger.info("[Database] Seeding default STRATCOM operator account...")
+                password = "password123"
+                hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+                default_user = User(
+                    username="operator",
+                    password_hash=hashed,
+                    role="Operator"
+                )
+                session.add(default_user)
+                await session.commit()
         except Exception as e:
-            logger.error(f"[Database] Seeding failed: {e}")
+            logger.error(f"[Database] User seeding failed: {e}")
+        
+    # Run seeding if empty and enable_demo_seed_data is True
+    if settings.enable_demo_seed_data:
+        async with SessionLocal() as session:
+            try:
+                await seed_data_if_empty(session)
+            except Exception as e:
+                logger.error(f"[Database] Seeding failed: {e}")
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     if SessionLocal is None:

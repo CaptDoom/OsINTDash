@@ -84,6 +84,82 @@ async def _bump_archive_version() -> None:
         return
 
 
+def compute_source_reputation(source: Optional[str]) -> str:
+    if not source:
+        return "Unrated"
+    src = source.lower().strip()
+    
+    # Wire agencies and major outlets
+    verified = [
+        "reuters.com", "apnews.com", "aljazeera.com", "bbc.com", "dw.com",
+        "france24.com", "theguardian.com", "nytimes.com", "bloomberg.com",
+        "reuters", "apnews", "aljazeera", "bbc", "dw", "france24", "theguardian",
+        "nytimes", "bloomberg", "reuters (seeded)", "bbc.com (demo)"
+    ]
+    for v in verified:
+        if v in src:
+            return "Verified Source"
+            
+    # Known aggregators
+    aggregators = [
+        "yahoo.com", "msn.com", "google.com", "news.google.com", "reddit.com",
+        "feedburner", "rss", "aggregator"
+    ]
+    for a in aggregators:
+        if a in src:
+            return "Developing"
+            
+    # Unknown/new domains
+    return "Unverified"
+
+
+_transformer = None
+def get_transformer():
+    global _transformer
+    if _transformer is None:
+        from sentence_transformers import SentenceTransformer
+        _transformer = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
+    return _transformer
+
+DEPT_CENTROIDS = {
+    "Military & Defense": [
+        "military troop deployment navy combat missile attack army military base exercise troops air force soldiers carrier strike weapons border clash",
+        "clashes skirmish casualties gunfire shelling troop movements artillery defense system defense ministry jets fighters drone strike war conflict"
+    ],
+    "Economic & Financial": [
+        "economic growth trade agreement inflation gdp tariffs interest rates trade deal financial market stocks bonds central bank investments business port",
+        "currency devaluation fiscal policy economic cooperation imports exports industrial production supply chain trade deficit commerce recession budget"
+    ],
+    "Social Affairs & Welfare": [
+        "humanitarian aid refugee relief migration human rights protests civil unrest social welfare healthcare public education community displacement",
+        "disaster response epidemic disease outbreaks labor union strike citizen rights religious freedom housing food security social assistance census"
+    ],
+    "Political & Diplomatic": [
+        "diplomatic relations bilateral summit ambassador treaty signing geopolitical talks state visit embassy opening administration foreign policy minister",
+        "elections political parties parliament legislation policy debate government formation coalition leadership transition constitutional reform diplomatic protest"
+    ],
+    "Technology & Cyber": [
+        "cyberattack ransomware malware hacking computer networks database breach artificial intelligence machine learning semiconductor chips technology innovation",
+        "telecom 5g network fiber optics digital surveillance encryption data privacy software system cloud computing cyber espionage high-tech hardware drone tech"
+    ]
+}
+
+IMPACT_CENTROIDS = {
+    "High Impact": [
+        "war conflict invasion troop deployment casualties missiles nuclear attack defense mobilization border clash air strike declaration of war emergency coup martial law security threat navy fleet airspace violation tactical",
+        "extreme security threat defense operations military escalation weapons nuclear capabilities troops combat military drills critical border standoff aircraft interception submarine"
+    ],
+    "Medium Impact": [
+        "trade deals bilateral summits summits talks trade tariff cooperation agreements embassy protest political meeting state visit political reform ministers election cabinet change",
+        "foreign relations cooperation agreement international summit policy reform border crossing trade partnership investment projects infrastructure diplomatic talks"
+    ],
+    "Normal Impact": [
+        "weather forecast sports tournament entertainment celebrities movie reviews stock price changes cultural festivals travel guide tourism museum opening local news daily routines consumer product releases features games",
+        "daily weather forecast domestic league cricket football quiz show music release food recipe lifestyle tips holiday destinations science trivia tech gadget review"
+    ]
+}
+
+
 class ImpactClassifier:
     def __init__(self) -> None:
         self.impact_labels = ["High Impact", "Medium Impact", "Normal Impact"]
@@ -92,6 +168,7 @@ class ImpactClassifier:
             "Economic & Financial",
             "Social Affairs & Welfare",
             "Political & Diplomatic",
+            "Technology & Cyber",
         ]
         self.label_keywords = {
             "High Impact": r"\b(troop|deployment|missile|clash|invasion|drill|sanction|nuclear|navy|air force|border conflict|skirmish|casualty|coup|strike)s?\b",
@@ -103,33 +180,37 @@ class ImpactClassifier:
             "Economic & Financial": r"\b(economic|trade|finance|tariff|port|investment|infrastructure|road|highway|corridor|inflation|currency|gdp|aid)s?\b",
             "Social Affairs & Welfare": r"\b(social|refugee|community|migration|protest|settlement|civilian|health|disease|aid|disaster|religion|citizenship)s?\b",
             "Political & Diplomatic": r"\b(political|diplomat|embassy|border crossing|government|summit|treaty|talks|meeting|minister|president|signing)s?\b",
+            "Technology & Cyber": r"\b(cyber|ransomware|malware|hacker|cyberattack|semiconductor|chip|ai|artificial intelligence|robotics|quantum|satellite|surveillance)s?\b"
         }
+        self._dept_centroids = None
+        self._impact_centroids = None
 
-    @staticmethod
-    def _text(article_data: Dict[str, Any]) -> str:
-        return f"{article_data.get('title', '')} {article_data.get('headline', '')} {article_data.get('content', '')}".lower()
+    def get_centroids(self):
+        if self._dept_centroids is None:
+            import numpy as np
+            transformer = get_transformer()
+            self._dept_centroids = {}
+            for dept, exemplars in DEPT_CENTROIDS.items():
+                vectors = transformer.encode(exemplars, convert_to_numpy=True)
+                mean_vector = vectors.mean(axis=0)
+                norm = np.linalg.norm(mean_vector)
+                self._dept_centroids[dept] = mean_vector / norm if norm > 0 else mean_vector
+        return self._dept_centroids
 
-    @staticmethod
-    def _preview(article_data: Dict[str, Any], size: int = 280) -> str:
-        content = article_data.get("content") or ""
-        preview = re.sub(r"\s+", " ", content[:size]).strip()
-        return preview.lower()
+    def get_impact_centroids(self):
+        if self._impact_centroids is None:
+            import numpy as np
+            transformer = get_transformer()
+            self._impact_centroids = {}
+            for imp, exemplars in IMPACT_CENTROIDS.items():
+                vectors = transformer.encode(exemplars, convert_to_numpy=True)
+                mean_vector = vectors.mean(axis=0)
+                norm = np.linalg.norm(mean_vector)
+                self._impact_centroids[imp] = mean_vector / norm if norm > 0 else mean_vector
+        return self._impact_centroids
 
-    async def is_duplicate(self, article_data: Dict[str, Any]) -> bool:
-        fingerprint = hashlib.sha256(
-            f"{article_data.get('url','')}|{self._preview(article_data)}".encode("utf-8")
-        ).hexdigest()
-        redis_conn = await _get_redis()
-        if not redis_conn:
-            return False
-        if await redis_conn.set(f"drishya:dedup:{fingerprint}", "1", ex=24 * 60 * 60, nx=True):
-            return False
-        return True
-
-    def classify_shared(self, title: str, content: str) -> Tuple[str, str]:
-        text = f"{title} {content}".lower()
+    def classify_regex(self, text: str) -> Tuple[Optional[str], Optional[str]]:
         scores = Counter()
-
         for label, pattern in self.label_keywords.items():
             scores[label] += len(re.findall(pattern, text))
 
@@ -137,23 +218,111 @@ class ImpactClassifier:
         for label, pattern in self.dept_keywords.items():
             dept_scores[label] += len(re.findall(pattern, text))
 
-        # Relaxed classification for abundant high-fidelity operational signals
+        impact = None
         if scores["High Impact"] >= 1:
             impact = "High Impact"
-        elif scores["Medium Impact"] > 0 or scores["Normal Impact"] == 0:
+        elif scores["Medium Impact"] > 0:
             impact = "Medium Impact"
-        else:
+        elif scores["Normal Impact"] > 0:
             impact = "Normal Impact"
 
-        dept = dept_scores.most_common(1)[0][0] if dept_scores else "Political & Diplomatic"
+        dept = dept_scores.most_common(1)[0][0] if dept_scores and dept_scores.most_common(1)[0][1] > 0 else None
         return impact, dept
 
+    def classify_centroid(self, text: str) -> Tuple[str, str]:
+        import numpy as np
+        centroids = self.get_centroids()
+        transformer = get_transformer()
+        text_vec = transformer.encode(text, convert_to_numpy=True)
+        text_norm = np.linalg.norm(text_vec)
+        if text_norm > 0:
+            text_vec = text_vec / text_norm
+        else:
+            return "Normal Impact", "Political & Diplomatic"
+
+        best_dept = "Political & Diplomatic"
+        best_dept_score = -1.0
+        for dept, centroid in centroids.items():
+            score = float(np.dot(text_vec, centroid))
+            if score > best_dept_score:
+                best_dept_score = score
+                best_dept = dept
+
+        impact_centroids = self.get_impact_centroids()
+        best_impact = "Normal Impact"
+        best_impact_score = -1.0
+        for imp, centroid in impact_centroids.items():
+            score = float(np.dot(text_vec, centroid))
+            if score > best_impact_score:
+                best_impact_score = score
+                best_impact = imp
+
+        return best_impact, best_dept
+
+    async def classify_llm_fallback(self, title: str, content: str) -> Tuple[str, str]:
+        metrics.state.classification_llm_fallback_total += 1
+        
+        prompt = f"""
+        Analyze this article and classify it.
+        Categories: "Military & Defense", "Economic & Financial", "Social Affairs & Welfare", "Political & Diplomatic", "Technology & Cyber".
+        Impact: "High Impact", "Medium Impact", "Normal Impact".
+        
+        Return JSON format with keys "impact" and "department". Example:
+        {{"impact": "High Impact", "department": "Military & Defense"}}
+        
+        ARTICLE TITLE: {title}
+        ARTICLE CONTENT: {content[:1000]}
+        """
+        
+        summary = ""
+        if settings.llm_provider == "ollama" and settings.ollama_base_url:
+            try:
+                from backend.app.services.summarizer import call_ollama
+                summary = await call_ollama(prompt, "You are a classification assistant.")
+            except Exception:
+                pass
+        if not summary and settings.openai_api_key:
+            try:
+                from backend.app.services.summarizer import call_openai
+                summary = await call_openai(prompt, "You are a classification assistant.")
+            except Exception:
+                pass
+        if not summary and settings.google_api_key:
+            try:
+                from backend.app.services.summarizer import call_gemini
+                summary = await call_gemini(prompt, "You are a classification assistant.")
+            except Exception:
+                pass
+                
+        if summary:
+            try:
+                import json
+                match = re.search(r"\{.*?\}", summary, re.DOTALL)
+                if match:
+                    parsed = json.loads(match.group(0))
+                    imp = parsed.get("impact")
+                    dept = parsed.get("department")
+                    if imp in self.impact_labels and dept in self.dept_labels:
+                        return imp, dept
+            except Exception as e:
+                logger.warning(f"Failed to parse LLM classification: {e}")
+                
+        metrics.state.classification_regex_fallback_total += 1
+        return self.classify_centroid(f"{title} {content}")
+
     def classify(self, title: str, content: str) -> Tuple[str, str]:
-        # Single shared pass over the article text for both labels.
-        return self.classify_shared(title, content[:1200])
+        text = f"{title} {content[:1200]}".lower()
+        imp, dept = self.classify_regex(text)
+        if not imp or not dept:
+            imp_sem, dept_sem = self.classify_centroid(text)
+            imp = imp or imp_sem
+            dept = dept or dept_sem
+        return imp, dept
 
     async def route_article(self, article_data: Dict[str, Any]) -> Tuple[str, str]:
-        impact, dept = self.classify(article_data.get("title", ""), article_data.get("content", ""))
+        title = article_data.get("title", "")
+        content = article_data.get("content", "")
+        impact, dept = self.classify(title, content)
         article_data["impact_level"] = impact
         article_data["department"] = dept
         return impact, dept
@@ -177,11 +346,85 @@ class ImpactClassifier:
         articles: List[Dict[str, Any]],
         embeddings: Optional[List[Optional[List[float]]]] = None,
     ) -> int:
+        if not embeddings:
+            try:
+                transformer = get_transformer()
+                texts = [f"{art['title']} {art.get('summary', '') or art['content'][:300]}" for art in articles]
+                vectors = transformer.encode(texts, convert_to_numpy=True).tolist()
+                embeddings = [vec for vec in vectors]
+            except Exception as e:
+                logger.error(f"[Classifier] Failed to compute batch embeddings: {e}")
+                embeddings = [None] * len(articles)
+                
         inserted = 0
         rows: List[Article] = []
         for idx, article_data in enumerate(articles):
             impact, dept = await self.route_article(article_data)
             
+            source = article_data.get("source")
+            reputation = compute_source_reputation(source)
+            confidence = article_data.get("confidence_score") or 0.98
+            cand_embedding = embeddings[idx] if embeddings and idx < len(embeddings) else None
+
+            # Check near-duplicates inside same country bucket
+            near_dup_found = False
+            if cand_embedding:
+                try:
+                    import numpy as np
+                    from sqlalchemy import select
+                    country_code = article_data["country_code"]
+                    
+                    stmt_ex = select(Article).where(Article.country_code == country_code)
+                    res_ex = await db.execute(stmt_ex)
+                    existing_articles = res_ex.scalars().all()
+                    
+                    cand_vec = np.array(cand_embedding, dtype=np.float32)
+                    cand_norm = np.linalg.norm(cand_vec)
+                    if cand_norm > 0:
+                        cand_vec_norm = cand_vec / cand_norm
+                        for existing_art in existing_articles:
+                            ex_vec_val = existing_art.embedding
+                            if not ex_vec_val:
+                                continue
+                                
+                            if isinstance(ex_vec_val, str):
+                                try:
+                                    import json
+                                    ex_vec_list = json.loads(ex_vec_val)
+                                except Exception:
+                                    continue
+                            elif isinstance(ex_vec_val, (list, tuple)):
+                                ex_vec_list = ex_vec_val
+                            else:
+                                try:
+                                    ex_vec_list = list(ex_vec_val)
+                                except Exception:
+                                    continue
+                                    
+                            if len(ex_vec_list) != len(cand_vec):
+                                continue
+                                
+                            ex_vec = np.array(ex_vec_list, dtype=np.float32)
+                            ex_norm = np.linalg.norm(ex_vec)
+                            if ex_norm <= 0:
+                                continue
+                                
+                            ex_vec_norm = ex_vec / ex_norm
+                            similarity = float(np.dot(cand_vec_norm, ex_vec_norm))
+                            if similarity > 0.92:
+                                near_dup_found = True
+                                current_conf = existing_art.confidence_score or 0.98
+                                existing_art.confidence_score = min(1.00, current_conf + 0.05)
+                                db.add(existing_art)
+                                metrics.state.dedup_near_duplicate_dropped_total += 1
+                                logger.info(f"[Classifier] Near-duplicate dropped. URL: {article_data['url']}. Boosted existing confidence.")
+                                break
+                except Exception as ex_err:
+                    logger.error(f"[Classifier] Near-duplicate check error: {ex_err}")
+                    
+            if near_dup_found:
+                continue
+
             # Send real-time updates for all ingested articles
             await self._publish_realtime(
                 {
@@ -190,27 +433,38 @@ class ImpactClassifier:
                     "summary": article_data.get("summary") or article_data["title"],
                     "content": article_data["content"],
                     "url": article_data["url"],
-                    "source": article_data.get("source"),
+                    "source": source,
                     "country_code": article_data["country_code"],
                     "published_at": article_data["published_at"].isoformat() if isinstance(article_data["published_at"], datetime) else str(article_data["published_at"]),
                     "impact_level": impact,
                     "department": dept,
+                    "source_reputation": reputation,
+                    "confidence_score": confidence,
                 }
             )
+
+            summary_text = article_data.get("summary")
+            if not summary_text or not summary_text.strip():
+                content_text = article_data.get("content") or ""
+                summary_text = content_text.strip()[:180] + "..." if len(content_text.strip()) > 180 else content_text.strip()
+            if not summary_text:
+                summary_text = "Tactical intelligence briefing restricted."
 
             rows.append(
                 Article(
                     title=article_data["title"],
                     headline=article_data.get("headline") or article_data["title"],
-                    summary=article_data.get("summary"),
+                    summary=summary_text,
                     content=article_data["content"],
                     url=article_data["url"],
-                    source=article_data.get("source"),
+                    source=source,
                     country_code=article_data["country_code"],
                     published_at=article_data["published_at"],
                     impact_level=impact,
                     department=dept,
-                    embedding=(embeddings[idx] if embeddings and idx < len(embeddings) else None),
+                    embedding=(cand_embedding if cand_embedding else None),
+                    source_reputation=reputation,
+                    confidence_score=confidence,
                 )
             )
 

@@ -30,6 +30,7 @@ export type CountryAlertGroup = {
   lowCount: number;
   x: number;
   y: number;
+  continent: string;
 };
 
 type WorldGeoMapProps = {
@@ -42,6 +43,7 @@ type WorldGeoMapProps = {
   panY?: number;
   fitMode?: 'meet' | 'slice';
   selectedCountryName?: string;
+  selectedContinent?: string;
   onCountryClick?: (name: string, code: string) => void;
 };
 
@@ -49,6 +51,9 @@ type CountryHoverMeta = {
   name: string;
   capital: string;
   cca2: string;
+  region: string;
+  subregion: string;
+  continent: string;
 };
 
 // Helper to convert country code to emoji flag
@@ -65,6 +70,21 @@ function getFlagEmoji(countryCode: string): string {
   }
 }
 
+// Maps region/subregion from world-countries npm package to standard continents
+export function getContinentName(region: string, subregion: string): string {
+  const reg = region || '';
+  const sub = subregion || '';
+  if (reg === 'Asia') return 'Asia';
+  if (reg === 'Europe') return 'Europe';
+  if (reg === 'Africa') return 'Africa';
+  if (reg === 'Oceania') return 'Oceania';
+  if (reg === 'Americas') {
+    if (sub === 'South America') return 'South America';
+    return 'North America'; // Northern America, Central America, Caribbean
+  }
+  return 'Other';
+}
+
 export function WorldGeoMap({
   markers,
   interactive = true,
@@ -75,10 +95,10 @@ export function WorldGeoMap({
   panY = 0,
   fitMode = 'meet',
   selectedCountryName,
+  selectedContinent = 'All',
   onCountryClick,
 }: WorldGeoMapProps) {
   const [hoveredGroup, setHoveredGroup] = useState<CountryAlertGroup | null>(null);
-  const [selectedGroup, setSelectedGroup] = useState<CountryAlertGroup | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
 
   const { countryPaths, alertGroups } = useMemo(() => {
@@ -88,17 +108,24 @@ export function WorldGeoMap({
     ) as any;
 
     const countryMetaByNumericCode = new Map<string, CountryHoverMeta>();
-    (worldCountries as Array<{ ccn3?: string; cca2?: string; name?: { common?: string }; capital?: string[] }>).forEach((country) => {
+    (worldCountries as Array<{ ccn3?: string; cca2?: string; name?: { common?: string }; capital?: string[]; region?: string; subregion?: string }>).forEach((country) => {
       const code = country.ccn3?.padStart(3, '0');
       if (!code) return;
+      
+      const region = country.region || 'Global';
+      const subregion = country.subregion || '';
+      const continent = getContinentName(region, subregion);
+
       countryMetaByNumericCode.set(code, {
         name: country.name?.common || 'Unknown country',
         capital: country.capital?.[0] || 'Capital unavailable',
         cca2: country.cca2 || '',
+        region,
+        subregion,
+        continent,
       });
     });
 
-    // Reconfigured to geoMercator full world boundaries fit to viewport
     const projection = geoMercator().fitSize([1200, 620], { type: 'Sphere' } as never);
     const pathGenerator = geoPath(projection);
 
@@ -108,7 +135,14 @@ export function WorldGeoMap({
         const path = pathGenerator(item as never);
         if (!path) return null;
         const code = String(featureItem.id ?? '').padStart(3, '0');
-        const meta = countryMetaByNumericCode.get(code) || { name: 'Unknown country', capital: 'Capital unavailable', cca2: '' };
+        const meta = countryMetaByNumericCode.get(code) || { 
+          name: 'Unknown country', 
+          capital: 'Capital unavailable', 
+          cca2: '', 
+          region: '', 
+          subregion: '', 
+          continent: 'Other' 
+        };
         return { id: `country-${index}`, d: path, meta };
       })
       .filter((item: { id: string; d: string; meta: CountryHoverMeta } | null): item is { id: string; d: string; meta: CountryHoverMeta } => Boolean(item));
@@ -130,6 +164,10 @@ export function WorldGeoMap({
 
       let group = groupsMap.get(key);
       if (!group) {
+        // Resolve continent for group
+        const countryObj = (worldCountries as any[]).find(c => c.cca2 === cca2Code);
+        const groupContinent = countryObj ? getContinentName(countryObj.region, countryObj.subregion) : 'Other';
+
         group = {
           countryCode: cca2Code || '',
           location: locName,
@@ -140,6 +178,7 @@ export function WorldGeoMap({
           highCount: 0,
           mediumCount: 0,
           lowCount: 0,
+          continent: groupContinent
         };
         groupsMap.set(key, group);
       }
@@ -163,13 +202,18 @@ export function WorldGeoMap({
 
     const alertGroups: CountryAlertGroup[] = [];
     groupsMap.forEach((group) => {
+      // Apply continent filter
+      if (selectedContinent !== 'All' && group.continent !== selectedContinent) {
+        return;
+      }
+
       const point = projection([group.lon, group.lat]);
       if (point) {
         alertGroups.push({
           ...group,
           x: point[0],
           y: point[1],
-        });
+        } as CountryAlertGroup);
       }
     });
 
@@ -182,28 +226,9 @@ export function WorldGeoMap({
       return b.alerts.length - a.alerts.length;
     });
 
-    // Reduce the news flags by 30% (keep the top 70% most critical/active) to prevent map crowding
-    const targetCount = Math.max(1, Math.round(sortedGroups.length * 0.7));
-    const reducedAlertGroups = sortedGroups.slice(0, targetCount);
-
-    return { countryPaths, alertGroups: reducedAlertGroups };
-  }, [markers]);
-
-  // Keep track of the currently selected country name to keep popup open / synced
-  useMemo(() => {
-    if (selectedCountryName) {
-      const foundGroup = alertGroups.find(
-        (g) => g.location.toLowerCase() === selectedCountryName.toLowerCase()
-      );
-      if (foundGroup) {
-        setSelectedGroup(foundGroup);
-      } else {
-        setSelectedGroup(null);
-      }
-    } else {
-      setSelectedGroup(null);
-    }
-  }, [selectedCountryName, alertGroups]);
+    // Geographical Coverage: Display all alert groups (100%) to preserve full data coverage
+    return { countryPaths, alertGroups: sortedGroups };
+  }, [markers, selectedContinent]);
 
   return (
     <div className="relative w-full h-full">
@@ -216,31 +241,67 @@ export function WorldGeoMap({
       >
         <rect x="0" y="0" width="1200" height="620" fill="transparent" />
         <g transform={`translate(${panX} ${panY}) translate(600 310) scale(${zoom}) translate(-600 -310)`}>
+          
+          {/* Countries Paths */}
           {countryPaths.map((country: { id: string; d: string; meta: CountryHoverMeta }) => {
             const isSelected = selectedCountryName && country.meta.name.toLowerCase() === selectedCountryName.toLowerCase();
+            const isInFilteredContinent = selectedContinent === 'All' || country.meta.continent === selectedContinent;
+            
+            // Dim countries that do not match the active continent filter
+            const pathFill = !isInFilteredContinent
+              ? "rgba(15, 23, 30, 0.15)"
+              : isSelected 
+              ? "rgba(0, 229, 255, 0.35)" 
+              : "rgba(45, 65, 85, 0.4)";
+              
+            const pathStroke = !isInFilteredContinent
+              ? "rgba(35, 45, 55, 0.1)"
+              : isSelected 
+              ? "#00e5ff" 
+              : "rgba(75, 105, 135, 0.4)";
+
+            // Scale strokeWidth reactively with zoom to keep borders sharp and clean
+            const calculatedStrokeWidth = isSelected 
+              ? 1.5 / Math.sqrt(zoom) 
+              : 0.8 / Math.sqrt(zoom);
+
             return (
               <path
                 key={country.id}
                 d={country.d}
-                fill={isSelected ? "rgba(0, 229, 255, 0.35)" : "rgba(45, 65, 85, 0.4)"}
-                stroke={isSelected ? "#00e5ff" : "rgba(75, 105, 135, 0.4)"}
-                strokeWidth={isSelected ? 1.5 : 0.8}
+                fill={pathFill}
+                stroke={pathStroke}
+                strokeWidth={calculatedStrokeWidth}
                 onClick={() => {
-                  if (interactive && onCountryClick && country.meta.name !== 'Unknown country') {
-                    onCountryClick(country.meta.name, country.meta.cca2);
+                  if (!isInFilteredContinent) return;
+                  if (interactive && country.meta.name !== 'Unknown country') {
+                    // Clicking country redirects to the real-time link of the latest news item
+                    const matchingGroup = alertGroups.find(
+                      (g) => g.location.toLowerCase() === country.meta.name.toLowerCase() || g.countryCode.toUpperCase() === country.meta.cca2.toUpperCase()
+                    );
+                    if (matchingGroup && matchingGroup.alerts && matchingGroup.alerts.length > 0) {
+                      const latestAlert = matchingGroup.alerts[0];
+                      if (latestAlert && latestAlert.url) {
+                        window.open(latestAlert.url, '_blank', 'noopener,noreferrer');
+                      }
+                    }
+                    if (onCountryClick) {
+                      onCountryClick(country.meta.name, country.meta.cca2);
+                    }
                   }
                 }}
                 style={{
-                  cursor: (interactive && country.meta.name !== 'Unknown country') ? 'pointer' : 'default',
+                  cursor: (interactive && isInFilteredContinent && country.meta.name !== 'Unknown country') ? 'pointer' : 'default',
                   transition: 'fill 0.25s ease, stroke 0.25s ease'
                 }}
-                className="hover:fill-[#00e5ff]/20"
+                className={isInFilteredContinent ? "hover:fill-[#00e5ff]/20" : ""}
               >
-                <title>{`${country.meta.name} - Capital: ${country.meta.capital}`}</title>
+                <title>{`${country.meta.name} - Capital: ${country.meta.capital} [${country.meta.continent}]`}</title>
               </path>
             );
           })}
 
+          {/* Alert news nodes (Markers) */}
           {showMarkers &&
             alertGroups.map((group) => {
               const color =
@@ -253,11 +314,17 @@ export function WorldGeoMap({
               return (
                 <g
                   key={group.countryCode || group.location}
-                  transform={`translate(${group.x}, ${group.y})`}
+                  transform={`translate(${group.x}, ${group.y}) scale(${1.0 / Math.pow(zoom, 0.75)})`}
                   style={{ cursor: interactive ? 'pointer' : 'default' }}
                   onClick={(e) => {
                     e.stopPropagation();
-                    setSelectedGroup(group);
+                    // Redirect directly to the respective external link of the latest news item upon click
+                    if (group.alerts && group.alerts.length > 0) {
+                      const latestAlert = group.alerts[0];
+                      if (latestAlert && latestAlert.url) {
+                        window.open(latestAlert.url, '_blank', 'noopener,noreferrer');
+                      }
+                    }
                     if (interactive && onCountryClick) {
                       onCountryClick(group.location, group.countryCode || '');
                     }
@@ -274,60 +341,27 @@ export function WorldGeoMap({
                   }}
                 >
                   {/* Glowing Radar Beacons */}
-                  <circle r={20} fill="none" stroke={color} strokeWidth="1" opacity={0.15} />
-                  <circle r={14} fill="none" stroke={color} strokeWidth="1.5" className="animate-ping" opacity={0.4} style={{ animationDuration: '3s' }} />
+                  <circle r={14} fill={color} opacity={0.12} />
+                  <circle r={8} fill="none" stroke={color} strokeWidth="1" className="animate-ping" opacity={0.35} style={{ animationDuration: '3s' }} />
 
-                  {/* Tactically Styled pill-shape Badge (Slightly resized for clean visibility) */}
-                  <rect
-                    x={-19}
-                    y={-9}
-                    width={38}
-                    height={18}
-                    rx={3}
-                    ry={3}
-                    fill="#051424"
-                    stroke={color}
-                    strokeWidth={1.5}
-                    filter="drop-shadow(0px 2px 4px rgba(0,0,0,0.6))"
-                    className="transition-all duration-200 hover:scale-105"
-                  />
-
-                  {/* Country Code Label */}
-                  <text
-                    x={-9}
-                    y={3.5}
-                    textAnchor="middle"
-                    fill="#7bd0ff"
-                    fontSize="8.5"
-                    fontWeight="bold"
-                    fontFamily="monospace"
-                    letterSpacing="0.02em"
-                  >
-                    {group.countryCode || group.location.substring(0, 2).toUpperCase()}
-                  </text>
-
-                  {/* Badge Vertical Separator */}
-                  <line x1={0} y1={-5} x2={0} y2={5} stroke="rgba(123, 208, 255, 0.25)" strokeWidth="1" />
-
-                  {/* Total Alerts Count */}
-                  <text
-                    x={9}
-                    y={3.5}
-                    textAnchor="middle"
+                  {/* Sleek tactical glowing circular dot (Decluttered) */}
+                  <circle
+                    r={5}
                     fill={color}
-                    fontSize="8.5"
-                    fontWeight="black"
-                    fontFamily="monospace"
-                  >
-                    {group.alerts.length}
-                  </text>
+                    stroke="#ffffff"
+                    strokeWidth={0.8}
+                    style={{
+                      filter: `drop-shadow(0 0 3px ${color})`
+                    }}
+                    className="transition-all duration-200 hover:scale-125"
+                  />
                 </g>
               );
             })}
         </g>
       </svg>
 
-      {/* Floating Tactical Tooltip on Hover */}
+      {/* Floating Tactical Tooltip on Hover showing news headlines and links */}
       {hoveredGroup && (
         <div
           style={{
@@ -335,12 +369,12 @@ export function WorldGeoMap({
             left: tooltipPos.x + 15,
             top: tooltipPos.y + 15,
             zIndex: 9999,
-            pointerEvents: 'none',
+            pointerEvents: 'auto', // Enable clicking links within the tooltip
             fontFamily: 'monospace',
           }}
-          className="bg-[#051424]/95 border border-[#7bd0ff]/40 p-3 rounded shadow-2xl text-xs max-w-xs text-[#d4e4fa] backdrop-blur-sm"
+          className="bg-[#051424]/95 border border-[#7bd0ff]/40 p-3 rounded shadow-2xl text-xs w-80 text-[#d4e4fa] backdrop-blur-sm select-text"
         >
-          <div className="font-bold text-[#7bd0ff] uppercase tracking-widest mb-1 border-b border-[#7bd0ff]/20 pb-1 flex justify-between items-center gap-4">
+          <div className="font-bold text-[#7bd0ff] uppercase tracking-widest mb-2 border-b border-[#7bd0ff]/20 pb-1 flex justify-between items-center gap-4">
             <span className="flex items-center gap-1.5">
               <span>{getFlagEmoji(hoveredGroup.countryCode)}</span>
               <span>{hoveredGroup.location}</span>
@@ -349,89 +383,28 @@ export function WorldGeoMap({
               {hoveredGroup.alerts.length} {hoveredGroup.alerts.length > 1 ? 'ALERTS' : 'ALERT'}
             </span>
           </div>
-          <div className="opacity-90 leading-relaxed font-semibold mb-2">
-            {hoveredGroup.alerts[0]?.headline}
-          </div>
-          <div className="text-[10px] text-white/50 flex justify-between items-center pt-1.5 border-t border-white/10">
-            <span>MAX SEVERITY: {hoveredGroup.maxSeverity.toUpperCase()}</span>
-            <span>{hoveredGroup.highCount} High, {hoveredGroup.mediumCount} Med</span>
-          </div>
-        </div>
-      )}
-
-      {/* Slide-out Interactive Intel Transmissions Sidebar */}
-      {selectedGroup && (
-        <div className="absolute top-4 right-4 bottom-4 w-80 bg-[#051424]/95 border border-[#7bd0ff]/40 p-4 rounded z-30 flex flex-col backdrop-blur-md text-[#d4e4fa] font-mono shadow-2xl">
-          <div className="flex items-center justify-between border-b border-[#7bd0ff]/30 pb-2 mb-3">
-            <h3 className="font-bold text-sm tracking-wider text-[#7bd0ff] uppercase flex items-center gap-1.5">
-              <span>{getFlagEmoji(selectedGroup.countryCode)}</span>
-              <span>{selectedGroup.location} INTEL WIRE</span>
-            </h3>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                setSelectedGroup(null);
-              }}
-              className="text-[#7bd0ff] hover:text-white hover:bg-white/10 px-1.5 py-0.5 rounded text-xs transition border border-[#7bd0ff]/20"
-            >
-              [CLOSE]
-            </button>
-          </div>
-
-          <div className="flex gap-1.5 text-[9px] uppercase tracking-wider mb-3">
-            {selectedGroup.highCount > 0 && (
-              <span className="bg-red-500/20 text-red-400 px-1.5 py-0.5 rounded border border-red-500/30 font-bold">
-                HIGH: {selectedGroup.highCount}
-              </span>
-            )}
-            {selectedGroup.mediumCount > 0 && (
-              <span className="bg-yellow-500/20 text-yellow-400 px-1.5 py-0.5 rounded border border-yellow-500/30 font-bold">
-                MED: {selectedGroup.mediumCount}
-              </span>
-            )}
-            {selectedGroup.lowCount > 0 && (
-              <span className="bg-green-500/20 text-green-400 px-1.5 py-0.5 rounded border border-green-500/30 font-bold">
-                LOW: {selectedGroup.lowCount}
-              </span>
-            )}
-          </div>
-
-          <div className="flex-1 overflow-y-auto space-y-3.5 pr-1" style={{ scrollbarWidth: 'thin', scrollbarColor: '#7bd0ff/30 transparent' }}>
-            {selectedGroup.alerts.map((alert, idx) => {
-              const severityColor =
-                alert.severity === 'high'
-                  ? 'text-red-400 border-red-500/30 bg-red-500/10'
-                  : alert.severity === 'medium'
-                  ? 'text-yellow-400 border-yellow-500/30 bg-yellow-500/10'
-                  : 'text-green-400 border-green-500/30 bg-green-500/10';
-
-              return (
-                <div key={alert.id || idx} className="border-b border-white/5 pb-3 last:border-0">
-                  <div className="flex items-center justify-between gap-2 mb-1.5">
-                    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border ${severityColor} uppercase shrink-0`}>
-                      {alert.severity}
-                    </span>
-                    <span className="text-[9px] text-white/40 font-mono">
-                      {alert.timestamp ? new Date(alert.timestamp).toLocaleTimeString() : ''}
-                    </span>
-                  </div>
-                  <p className="text-xs leading-relaxed font-semibold text-white/90 mb-2">
-                    {alert.headline}
-                  </p>
-                  <div className="flex items-center justify-between text-[10px] text-white/50 pt-1">
-                    <span>VIA: {alert.source}</span>
-                    <a
-                      href={alert.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-[#00e5ff] hover:text-[#7bd0ff] hover:underline flex items-center gap-0.5 font-bold transition-colors"
-                    >
-                      SOURCE LINK ↗
-                    </a>
-                  </div>
+          
+          <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+            {hoveredGroup.alerts.map((alert, idx) => (
+              <div key={alert.id || idx} className="border-b border-white/5 pb-2 last:border-0 last:pb-0">
+                <a
+                  href={alert.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="hover:underline font-semibold block text-white/90 hover:text-[#00e5ff] text-[11px] leading-tight transition-colors"
+                >
+                  • {alert.headline} ↗
+                </a>
+                <div className="text-[9px] text-white/40 mt-1 flex justify-between uppercase">
+                  <span>VIA: {alert.source}</span>
+                  <span>{alert.severity}</span>
                 </div>
-              );
-            })}
+              </div>
+            ))}
+          </div>
+          <div className="text-[9px] text-[#7bd0ff]/60 border-t border-white/10 mt-2 pt-1 flex justify-between uppercase">
+            <span>REGION: {hoveredGroup.continent}</span>
+            <span>CLICK TO GO TO LATEST</span>
           </div>
         </div>
       )}

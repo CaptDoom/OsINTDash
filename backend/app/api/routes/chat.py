@@ -15,6 +15,12 @@ from backend.app.services.summarizer import call_openai, call_gemini, call_ollam
 from backend.app.config import settings
 from backend.app.services.job_store import job_store
 
+try:
+    from pgvector.sqlalchemy import cosine_distance
+    HAS_PGVECTOR = True
+except ImportError:
+    HAS_PGVECTOR = False
+
 RE_TOKENIZER = re.compile(r"[A-Za-z0-9']{3,}")
 
 def re_split(text: str) -> List[str]:
@@ -67,29 +73,72 @@ def score_article_similarity(doc_text: str, article: Article) -> float:
 
 
 async def search_relevant_articles(db: AsyncSession, doc_text: str, limit: int = 5) -> List[Article]:
-    """
-    Ranking pipeline:
-    - Local term overlap and document similarity search across all articles
-    - Applies impact level score boost
-    - Falls back to the most recent articles if no term overlap matches
-    """
+    from backend.app.services.classifier import get_transformer
+    import numpy as np
+    
+    try:
+        transformer = get_transformer()
+        query_vector = transformer.encode(doc_text, convert_to_numpy=True)
+    except Exception as e:
+        logger.error(f"[Chat] Failed to encode query text: {e}")
+        stmt = select(Article).order_by(Article.published_at.desc()).limit(limit)
+        res = await db.execute(stmt)
+        return list(res.scalars().all())
+
+    if db.bind.dialect.name == "postgresql" and HAS_PGVECTOR:
+        try:
+            stmt = select(Article).order_by(cosine_distance(Article.embedding, query_vector.tolist())).limit(limit)
+            result = await db.execute(stmt)
+            return list(result.scalars().all())
+        except Exception as pg_err:
+            logger.warning(f"[Chat] pgvector query failed, falling back to local numpy similarity: {pg_err}")
+    
     stmt = select(Article)
     result = await db.execute(stmt)
     articles = result.scalars().all()
-
     if not articles:
         return []
 
     scored_articles = []
+    query_norm = np.linalg.norm(query_vector)
+    if query_norm <= 0:
+        return sorted(articles, key=lambda x: x.published_at, reverse=True)[:limit]
+
+    query_vec_norm = query_vector / query_norm
+
     for art in articles:
-        score = score_article_similarity(doc_text, art)
-        if score > 0:
-            scored_articles.append((score, art))
+        embedding_val = art.embedding
+        if not embedding_val:
+            continue
+            
+        if isinstance(embedding_val, str):
+            try:
+                import json
+                vec_list = json.loads(embedding_val)
+            except Exception:
+                continue
+        elif isinstance(embedding_val, (list, tuple)):
+            vec_list = embedding_val
+        else:
+            try:
+                vec_list = list(embedding_val)
+            except Exception:
+                continue
+                
+        if len(vec_list) != len(query_vector):
+            continue
+            
+        art_vec = np.array(vec_list, dtype=np.float32)
+        art_norm = np.linalg.norm(art_vec)
+        if art_norm <= 0:
+            continue
+            
+        art_vec_norm = art_vec / art_norm
+        similarity = float(np.dot(query_vec_norm, art_vec_norm))
+        scored_articles.append((similarity, art))
 
     if not scored_articles:
-        # Fall back to returning the 5 most recent articles
-        sorted_recent = sorted(articles, key=lambda x: x.published_at, reverse=True)
-        return sorted_recent[:limit]
+        return sorted(articles, key=lambda x: x.published_at, reverse=True)[:limit]
 
     scored_articles.sort(key=lambda x: x[0], reverse=True)
     return [art for _, art in scored_articles[:limit]]
@@ -151,16 +200,20 @@ async def process_fusion_job(job_id: str, temp_file_path: str, filename: str, in
             extracted_text = result.document.export_to_markdown()
         except Exception as docling_err:
             logger.warning("[RAG] Docling parsing failed for %s: %s", filename, docling_err)
-            if filename.lower().endswith(".pdf"):
+            ext = filename.lower().split('.')[-1]
+            if ext == "pdf":
                 extracted_text = extract_simple_pdf_text(temp_file_path)
-            elif filename.lower().endswith(".docx"):
+            elif ext in ["docx", "doc"]:
                 extracted_text = extract_simple_docx_text(temp_file_path)
             else:
-                with open(temp_file_path, "r", encoding="utf-8", errors="ignore") as handle:
-                    extracted_text = handle.read()
+                try:
+                    with open(temp_file_path, "r", encoding="utf-8", errors="ignore") as handle:
+                        extracted_text = handle.read()
+                except Exception as read_err:
+                    extracted_text = f"Fallback raw reader error: {read_err}"
 
         if not extracted_text.strip():
-            raise HTTPException(status_code=400, detail="The uploaded document contains no readable text.")
+            extracted_text = "Empty document payload or unreadable file format."
 
         await job_store.update(job_id, "fusion", status="searching", progress=45, step="searching")
         matching_articles: List[Article] = []
@@ -222,6 +275,7 @@ async def process_fusion_job(job_id: str, temp_file_path: str, filename: str, in
         3. You must use a passive, objective, and authoritative tone. Avoid conversational fillers, jokes, or first-person pronouns.
         4. You MUST cite the news sources where applicable using markdown links (e.g. "[Title of news article](URL)").
         5. If the document has no relation to the news reports, state "NO CORRELATION ESTABLISHED" and write a helpful brief.
+        6. Deliver a highly detailed, comprehensive response. Elaborate fully on all strategic implications, key details, actors, and timelines. Do not summarize briefly; aim for a deep intelligence briefing.
         """
 
         fused_summary = ""
@@ -394,6 +448,7 @@ async def chat_query(payload: ChatQuery):
     3. You must use a passive, objective, and authoritative tone. Avoid conversational fillers, jokes, or first-person pronouns.
     4. You MUST cite the news sources where applicable using markdown links (e.g. "[Title of news article](URL)").
     5. If no relevant information is available in the provided reports, state "NO LIVE OSINT FEEDS IN SPECIFIED SECTOR" and provide a brief general security assessment.
+    6. Deliver a highly detailed, comprehensive response. Elaborate fully on all strategic implications, key details, actors, and timelines. Do not summarize briefly; aim for a deep intelligence briefing.
     """
 
     fused_summary = ""

@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     use_sqlite_fallback: bool = True
     enable_inline_job_processing: bool = True
     enable_redis_dedup: bool = True
+    enable_demo_seed_data: Optional[bool] = None
 
     ingestion_batch_size: int = 50
     scrape_limit_per_country: int = 50
@@ -69,7 +70,7 @@ class Settings(BaseSettings):
     archive_max_tokens: int = 100_000
     archive_cache_ttl_seconds: int = 3 * 60 * 60
     archive_summary_chunk_size: int = 5
-    fusion_top_k: int = 5
+    fusion_top_k: int = 15
     fusion_cache_ttl_seconds: int = 24 * 60 * 60
 
     critical_countries: List[str] = Field(default_factory=lambda: ["CN", "PK", "AF", "MM"])
@@ -97,6 +98,11 @@ def get_settings() -> Settings:
         data_dir = project_root / "data"
         data_dir.mkdir(exist_ok=True)
         settings.sqlite_url = f"sqlite+aiosqlite:///{(data_dir / 'articles_v2.db').as_posix()}"
+
+    # Default to False to ensure the zero-key RSS crawler fallback runs in Live Mode
+    if settings.enable_demo_seed_data is None:
+        settings.enable_demo_seed_data = False
+
     return settings
 
 

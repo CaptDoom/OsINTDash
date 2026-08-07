@@ -884,3 +884,59 @@ header, .top-bar {
   }
 }
 
+/* Premium Typography, Spacings & Layout Refinements */
+h1, h2, h3, h4, h5, h6 {
+  letter-spacing: 0.05em;
+  font-weight: 700;
+  color: #ffffff;
+  text-shadow: 0 0 10px rgba(0, 229, 255, 0.15);
+}
+
+.text-xs {
+  font-size: 0.75rem; /* 12px */
+  line-height: 1.25rem; /* 20px */
+}
+
+.text-sm {
+  font-size: 0.875rem; /* 14px */
+  line-height: 1.375rem; /* 22px */
+}
+
+/* Micro-animations and professional hover effects */
+button, a {
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+button:hover {
+  transform: translateY(-1px);
+}
+
+button:active {
+  transform: translateY(0);
+}
+
+/* Elegant scrollbar style overrides for all lists */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 229, 255, 0.25);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(0, 229, 255, 0.45);
+}
+
+/* Beautiful hover tooltips and continent dropdown enhancements */
+.tooltip-fade-in {
+  animation: fadeIn 0.18s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: scale(0.97); }
+  to { opacity: 1; transform: scale(1); }
+}
+

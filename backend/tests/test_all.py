@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 # Set sys.path to workspace root
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
+os.environ["TESTING"] = "1"
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select, func

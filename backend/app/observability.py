@@ -50,6 +50,12 @@ class MetricsState:
     fusion_jobs_total: int = 0
     fusion_jobs_completed_total: int = 0
     fusion_jobs_failed_total: int = 0
+    classification_llm_fallback_total: int = 0
+    classification_regex_fallback_total: int = 0
+    dedup_near_duplicate_dropped_total: int = 0
+    auth_login_failures_total: int = 0
+    scrape_real_fetch_total: int = 0
+    scrape_fetch_failures_total: int = 0
 
 
 class MetricsRegistry:
@@ -93,6 +99,24 @@ class MetricsRegistry:
             "# HELP drishya_fusion_jobs_failed_total Fusion jobs failed",
             "# TYPE drishya_fusion_jobs_failed_total counter",
             f"drishya_fusion_jobs_failed_total {self.state.fusion_jobs_failed_total}",
+            "# HELP drishya_classification_llm_fallback_total Total times LLM classification fallback was triggered",
+            "# TYPE drishya_classification_llm_fallback_total counter",
+            f"drishya_classification_llm_fallback_total {self.state.classification_llm_fallback_total}",
+            "# HELP drishya_classification_regex_fallback_total Total times regex classification fallback was triggered",
+            "# TYPE drishya_classification_regex_fallback_total counter",
+            f"drishya_classification_regex_fallback_total {self.state.classification_regex_fallback_total}",
+            "# HELP drishya_dedup_near_duplicate_dropped_total Total near-duplicate articles skipped during dedup",
+            "# TYPE drishya_dedup_near_duplicate_dropped_total counter",
+            f"drishya_dedup_near_duplicate_dropped_total {self.state.dedup_near_duplicate_dropped_total}",
+            "# HELP drishya_auth_login_failures_total Total failed login attempts",
+            "# TYPE drishya_auth_login_failures_total counter",
+            f"drishya_auth_login_failures_total {self.state.auth_login_failures_total}",
+            "# HELP drishya_scrape_real_fetch_total Total real scraper download attempts started",
+            "# TYPE drishya_scrape_real_fetch_total counter",
+            f"drishya_scrape_real_fetch_total {self.state.scrape_real_fetch_total}",
+            "# HELP drishya_scrape_fetch_failures_total Total real scraper download attempts failed",
+            "# TYPE drishya_scrape_fetch_failures_total counter",
+            f"drishya_scrape_fetch_failures_total {self.state.scrape_fetch_failures_total}",
         ]
         return "\n".join(lines) + "\n"
 

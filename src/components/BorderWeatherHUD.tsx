@@ -101,7 +101,12 @@ export function BorderWeatherHUD() {
 
               <div className="flex-1 min-w-0">
                 <div className="flex justify-between items-center gap-2">
-                  <span className="text-[10px] font-bold text-white truncate uppercase">{w.sector}</span>
+                  <div className="flex items-center gap-1 min-w-0">
+                    <span className="text-[10px] font-bold text-white truncate uppercase">{w.sector}</span>
+                    {w.source === 'TACTICAL-SIMULATOR' && (
+                      <span className="bg-amber-500/20 text-amber-400 text-[6px] px-1 rounded border border-amber-500/30 tracking-widest font-bold font-mono">SIM</span>
+                    )}
+                  </div>
                   <span className={`text-[10px] font-bold ${getTemperatureColor(w.temperature)}`}>
                     {w.temperature}°C
                   </span>

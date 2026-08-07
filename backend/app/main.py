@@ -15,10 +15,10 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.config import settings
-from backend.app.database import create_tables, get_db, Article
-from backend.app.api.routes import archive, chat, weather
+from backend.app.database import create_tables, get_db, Article, User
+from backend.app.api.routes import archive, chat, weather, auth
 from backend.app.services.ingestion import fetch_global_news
-from backend.app.services.classifier import ImpactClassifier, classify_and_store_batch, memory_stream
+from backend.app.services.classifier import ImpactClassifier, classify_and_store_batch, memory_stream, compute_source_reputation
 from backend.app.services.summarizer import call_openai, call_gemini
 from backend.app.observability import configure_logging, metrics, request_id_var
 from backend.app.services.job_store import job_store
@@ -41,8 +41,22 @@ app.add_middleware(
 app.include_router(archive.router)
 app.include_router(chat.router)
 app.include_router(weather.router)
+app.include_router(auth.router)
 
 
+@app.middleware("http")
+async def enforce_auth_middleware(request: Request, call_next):
+    path = request.url.path
+    if path.startswith("/api/") and not path.startswith("/api/auth/") and path != "/api/system/status":
+        if os.environ.get("TESTING") != "1":
+            from backend.app.api.routes.auth import SESSION_STORE
+            token = request.cookies.get("session_token")
+            if not token or token not in SESSION_STORE:
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Unauthorized. Active session token is missing or expired."}
+                )
+    return await call_next(request)
 
 
 @app.middleware("http")
@@ -296,6 +310,35 @@ async def periodic_ingestion_loop():
 
         await asyncio.sleep(5 * 60)
 
+def data_to_signal(data: dict) -> dict:
+    country_code = data.get("country_code") or "GL"
+    country_name = country_name_from_code(country_code)
+    category = get_frontend_category(data.get("department"), data.get("title", ""), data.get("source", ""))
+    
+    impact = "Low"
+    if data.get("impact_level") == "High Impact":
+        impact = "High"
+    elif data.get("impact_level") == "Medium Impact":
+        impact = "Medium"
+        
+    return {
+        "type": "signal",
+        "country": country_name,
+        "signal": {
+            "id": data.get("id") or f"{country_name}-{int(time.time())}",
+            "country": country_name,
+            "category": category,
+            "impact": impact,
+            "headline": data.get("title", ""),
+            "summary": data.get("summary") or data.get("content", "")[:180],
+            "source": data.get("source") or "OSINT Feed",
+            "timestamp": data.get("published_at"),
+            "url": data.get("url"),
+            "verification_status": data.get("source_reputation") or "Verified Source",
+            "confidence_score": data.get("confidence_score") or 0.98,
+        }
+    }
+
 async def redis_listener_task():
     """
     Subscribes to Redis 'live_stream' channel and broadcasts received articles
@@ -323,10 +366,8 @@ async def redis_listener_task():
                 if message["type"] == "message":
                     try:
                         data = json.loads(message["data"])
-                        await manager.broadcast({
-                            "type": "live_article",
-                            "article": data
-                        })
+                        sig_msg = data_to_signal(data)
+                        await manager.broadcast(sig_msg)
                     except Exception as ex:
                         logger.error(f"[Main] Error parsing pubsub message: {ex}")
         except Exception as e:
@@ -335,10 +376,8 @@ async def redis_listener_task():
                 logger.info("[Main] Falling back to local in-memory event stream.")
                 # Fallback to local memory stream
                 def on_live_signal(article):
-                    asyncio.create_task(manager.broadcast({
-                        "type": "live_article",
-                        "article": article
-                    }))
+                    sig_msg = data_to_signal(article)
+                    asyncio.create_task(manager.broadcast(sig_msg))
                 memory_stream.subscribe(on_live_signal)
                 break
             else:
@@ -354,6 +393,41 @@ async def startup_event():
     # Start periodic ingestion to keep the local news mesh updated automatically.
     asyncio.create_task(periodic_ingestion_loop())
     logger.info("[Main] API startup complete; background ingestion and redis listener started.")
+
+@app.get("/api/system/status")
+async def get_system_status():
+    configured = []
+    if settings.newsapi_key: configured.append("NewsAPI")
+    if settings.world_news_api_key: configured.append("WorldNewsAPI")
+    if settings.newsdata_api_key: configured.append("NewsDataAPI")
+    if settings.finnhub_api_key: configured.append("FinnhubAPI")
+    if settings.gnews_api_key: configured.append("GNewsAPI")
+    if settings.currents_api_key: configured.append("CurrentsAPI")
+    if settings.thenews_api_key: configured.append("TheNewsAPI")
+    if settings.mediastack_api_key: configured.append("MediaStackAPI")
+    if settings.newscatcher_api_key: configured.append("NewsCatcherAPI")
+    if settings.bing_news_api_key: configured.append("BingNewsAPI")
+
+    weather_key = os.getenv("OPENWEATHERMAP_API_KEY") or os.getenv("OPENWEATHER_API_KEY")
+    weather_prov = "OpenWeatherMap" if weather_key else "simulated"
+
+    llm_prov = settings.llm_provider or "none"
+    if llm_prov == "none":
+        if settings.google_api_key:
+            llm_prov = "gemini"
+        elif settings.openai_api_key:
+            llm_prov = "openai"
+        elif settings.ollama_base_url:
+            llm_prov = "ollama"
+
+    mode = "demo" if settings.enable_demo_seed_data else "live"
+
+    return {
+        "mode": mode,
+        "configured_providers": configured,
+        "llm_provider": llm_prov,
+        "weather_provider": weather_prov
+    }
 
 @app.get("/api/news/all")
 async def get_all_news(
@@ -452,15 +526,16 @@ async def get_all_news(
                 "country": country,
                 "category": get_frontend_category(art.department, art.title, art.source),
                 "impact": "High" if art.impact_level == "High Impact" else ("Medium" if art.impact_level == "Medium Impact" else "Low"),
-                "headline": art.title,
-                "summary": art.summary or art.content[:150],
+                "headline": art.title.strip(),
+                "summary": (art.summary.strip() if art.summary and art.summary.strip() else (art.content.strip()[:150] + "..." if art.content and art.content.strip() else "Tactical intelligence briefing restricted.")),
                 "source": art.source or "OSINT Mesh",
                 "timestamp": art.published_at.isoformat(),
                 "url": art.url,
-                "verification_status": "Verified Source",
-                "confidence_score": 0.98,
+                "verification_status": getattr(art, "source_reputation", None) or "Verified Source",
+                "confidence_score": getattr(art, "confidence_score", None) or 0.98,
             }
             for art in sorted(filtered_articles, key=lambda item: item.published_at, reverse=True)
+            if art.title and art.title.strip() and art.url and (art.url.startswith("http://") or art.url.startswith("https://")) and (art.summary or art.content or "").strip()
         ]
  
         # Dynamic region & threat level resolution
@@ -563,42 +638,52 @@ async def get_specific_country_news(
                     # Save to DB (this handles duplicates and only saves High/Medium Impact)
                     await classify_and_store_batch(db, raw_articles)
                     
-                    # Also classify them for our immediate response
                     classifier = ImpactClassifier()
                     for art in raw_articles:
-                        impact, dept = classifier.classify(art.get("title", ""), art.get("content", ""))
+                        url = art.get("url")
+                        title = art.get("title")
+                        content = art.get("content") or ""
+                        summary = art.get("summary") or (content[:150] + "..." if content else "")
+                        if not title or not title.strip():
+                            continue
+                        if not url or not url.strip() or not (url.startswith("http://") or url.startswith("https://")):
+                            continue
+                        if not summary.strip():
+                            continue
+
+                        impact, dept = classifier.classify(title, content)
                         fetched_signals.append({
-                            "id": f"dyn-{hashlib.md5(art['url'].encode()).hexdigest()}",
+                            "id": f"dyn-{hashlib.md5(url.encode()).hexdigest()}",
                             "country": name,
-                            "category": get_frontend_category(dept, art.get("title", ""), art.get("source", "")),
+                            "category": get_frontend_category(dept, title, art.get("source", "")),
                             "impact": "High" if impact == "High Impact" else ("Medium" if impact == "Medium Impact" else "Low"),
-                            "headline": art.get("title", "Untitled"),
-                            "summary": art.get("summary") or art.get("content", "")[:150],
+                            "headline": title.strip(),
+                            "summary": summary.strip(),
                             "source": art.get("source") or "OSINT Feed",
                             "timestamp": art.get("published_at").isoformat() if isinstance(art.get("published_at"), datetime) else str(art.get("published_at")),
-                            "url": art["url"],
-                            "verification_status": "Verified Source",
+                            "url": url,
+                            "verification_status": compute_source_reputation(art.get("source")),
                             "confidence_score": 0.98,
                         })
             except Exception as e:
                 logger.error(f"Error fetching real-time news for {name} ({code}): {e}")
                 
-    # 3. Format database articles
     db_signals = [
         {
             "id": art.id,
             "country": name,
             "category": get_frontend_category(art.department, art.title, art.source),
             "impact": "High" if art.impact_level == "High Impact" else ("Medium" if art.impact_level == "Medium Impact" else "Low"),
-            "headline": art.title,
-            "summary": art.summary or art.content[:150],
+            "headline": art.title.strip(),
+            "summary": (art.summary.strip() if art.summary and art.summary.strip() else (art.content.strip()[:150] + "..." if art.content and art.content.strip() else "Tactical intelligence briefing restricted.")),
             "source": art.source or "OSINT Mesh",
             "timestamp": art.published_at.isoformat(),
             "url": art.url,
-            "verification_status": "Verified Source",
-            "confidence_score": 0.98,
+            "verification_status": getattr(art, "source_reputation", None) or "Verified Source",
+            "confidence_score": getattr(art, "confidence_score", None) or 0.98,
         }
         for art in db_articles
+        if art.title and art.title.strip() and art.url and (art.url.startswith("http://") or art.url.startswith("https://")) and (art.summary or art.content or "").strip()
     ]
     
     # 4. Merge database and fetched signals, keeping unique URLs
@@ -627,21 +712,6 @@ async def get_specific_country_news(
         "signals": all_signals,
         "source_status": "normal"
     }
-
-
-@app.get("/api/news/stream")
-async def sse_news_stream():
-    """
-    SSE stream endpoint broadcasting events.
-    """
-    async def event_generator():
-        yield f"data: {json.dumps({'type': 'connected'})}\n\n"
-        while True:
-            # Keep-alive ping
-            await asyncio.sleep(20)
-            yield f"data: {json.dumps({'type': 'ping'})}\n\n"
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.get("/api/world/alerts")
@@ -709,26 +779,139 @@ async def trigger_scrape_endpoint(payload: dict):
             asyncio.create_task(run_mock_scrape_job(job.job_id, url, payload.get("platform", "news")))
     return {"success": True, "jobIds": job_ids}
 
-# Scrape Job Worker Simulation for testing
-async def run_mock_scrape_job(job_id: str, url: str, platform: str):
+def is_safe_url(url: str) -> bool:
+    import urllib.parse
+    import socket
+    import ipaddress
     try:
-        await job_store.update(job_id, "scrape", status="scraping", progress=20, step="scraping")
-        await asyncio.sleep(2)
-        await job_store.update(job_id, "scrape", status="summarizing", progress=50, step="summarizing")
-        await asyncio.sleep(2)
-        await job_store.update(job_id, "scrape", status="saving", progress=80, step="saving")
-        await asyncio.sleep(1)
+        parsed = urllib.parse.urlparse(url)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        ips = socket.getaddrinfo(hostname, None)
+        for ip_info in ips:
+            ip_str = ip_info[4][0]
+            ip = ipaddress.ip_address(ip_str)
+            if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified:
+                return False
+        return True
+    except Exception:
+        return False
+
+# Scrape Job Worker doing real scraping
+async def run_mock_scrape_job(job_id: str, url: str, platform: str):
+    from backend.app.observability import metrics
+    from bs4 import BeautifulSoup
+    from datetime import datetime, timezone
+    from backend.app.services.classifier import ImpactClassifier
+    import httpx
+    
+    metrics.state.scrape_real_fetch_total += 1
+    
+    try:
+        # 1. SSRF Protection
+        if not is_safe_url(url):
+            metrics.state.scrape_fetch_failures_total += 1
+            raise ValueError(f"Forbidden URL: Access to local/private network ranges is restricted.")
         
-        # Simulate finalized article output
-        result_payload = {
-            "title": f"Strategic Analysis of {url.split('//')[-1].split('/')[0]}",
-            "url": url,
-            "source": "CRAWLER",
-            "country_code": "Global",
-            "platform": platform,
+        # 2. Scraping stage
+        await job_store.update(job_id, "scrape", status="scraping", progress=20, step="fetching URL")
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
+            response = await client.get(url, headers=headers)
+            if response.status_code != 200:
+                metrics.state.scrape_fetch_failures_total += 1
+                raise ValueError(f"Failed to fetch site: HTTP Status {response.status_code}")
+        
+        html = response.text
+        soup = BeautifulSoup(html, "html.parser")
+        
+        # Get Title
+        title = "Untitled Scraped Article"
+        if soup.title and soup.title.string:
+            title = soup.title.string.strip()
+        
+        # Clean HTML content
+        for element in soup(["script", "style", "nav", "header", "footer", "form", "aside"]):
+            element.extract()
+            
+        lines = (line.strip() for line in soup.get_text().splitlines())
+        chunks = (phrase.strip() for line in lines for phrase in line.split("  "))
+        extracted_text = "\n".join(chunk for chunk in chunks if chunk)
+        
+        if not extracted_text.strip():
+            metrics.state.scrape_fetch_failures_total += 1
+            raise ValueError("Empty or unreadable text content extracted from page.")
+            
+        # 3. Summarization stage
+        await job_store.update(job_id, "scrape", status="summarizing", progress=50, step="summarizing content")
+        
+        prompt = f"Summarize this raw article text for strategic intelligence briefing. Keep it short (under 3 sentences). Return ONLY the brief summary.\n\nRAW TEXT:\n{extracted_text[:4000]}"
+        summary = ""
+        
+        # Try LLMs
+        if settings.llm_provider == "ollama" and settings.ollama_base_url:
+            try:
+                from backend.app.services.summarizer import call_ollama
+                summary = await call_ollama(prompt, "You are a strategic intelligence officer.")
+            except Exception:
+                pass
+        if not summary and settings.openai_api_key:
+            try:
+                from backend.app.services.summarizer import call_openai
+                summary = await call_openai(prompt, "You are a strategic intelligence officer.")
+            except Exception:
+                pass
+        if not summary and settings.google_api_key:
+            try:
+                from backend.app.services.summarizer import call_gemini
+                summary = await call_gemini(prompt, "You are a strategic intelligence officer.")
+            except Exception:
+                pass
+        
+        if not summary:
+            summary = extracted_text.strip()[:180] + "..." if len(extracted_text.strip()) > 180 else extracted_text.strip()
+            
+        # 4. Classification & Saving stage
+        await job_store.update(job_id, "scrape", status="saving", progress=80, step="classifying and saving")
+        
+        classifier = ImpactClassifier()
+        impact, dept = classifier.classify(title, summary)
+        
+        article_dict = {
+            "title": title,
+            "headline": title,
+            "summary": summary,
+            "content": extracted_text,
+            "url": url,
+            "source": "user-submitted",
+            "country_code": "GL",
+            "published_at": datetime.now(timezone.utc),
+            "impact_level": impact,
+            "department": dept
+        }
+        
+        # Persist inside database
+        async for db in get_db():
+            await classifier.save_article(db, article_dict)
+            break
+            
+        result_payload = {
+            "title": title,
+            "url": url,
+            "source": "user-submitted",
+            "country_code": "GL",
+            "impact_level": impact,
+            "department": dept,
+            "summary": summary
+        }
+        
         await job_store.update(job_id, "scrape", status="completed", progress=100, step="completed", result=result_payload)
     except Exception as e:
+        logger.error(f"[Scraper] Real scrape job failed: {e}")
         await job_store.update(job_id, "scrape", status="failed", progress=100, step="failed", error=str(e))
 
 # Utility helper mapping functions
