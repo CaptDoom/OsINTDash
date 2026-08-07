@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { WorldGeoMap, type WorldGeoMapMarker, getContinentName } from './components/WorldGeoMap';
-import { BorderWeatherHUD } from './components/BorderWeatherHUD';
+import { BorderWeatherHUD, type WeatherInfo } from './components/BorderWeatherHUD';
 import worldCountries from 'world-countries';
 
 type TimeWindow = '1h' | '1d' | '1w' | '1m';
@@ -723,6 +723,12 @@ function App() {
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [uiTheme, setUiTheme] = useState<RgbTheme>(defaultTheme);
 
+  // 5.5. Global Weather Overlay States
+  const [weatherData, setWeatherData] = useState<Record<string, WeatherInfo> | null>(null);
+  const [weatherLoading, setWeatherLoading] = useState<boolean>(true);
+  const [weatherError, setWeatherError] = useState<string | null>(null);
+  const [showWeatherOverlay, setShowWeatherOverlay] = useState<boolean>(true);
+
   // 6. Derived Values
   const newsAutoRefreshMs = timeWindow === '1h' ? 30000 : 120000;
   const newsAutoRefreshSeconds = timeWindow === '1h' ? 30 : 120;
@@ -935,6 +941,28 @@ function App() {
       }
     }
     void fetchSystemStatus();
+  }, []);
+
+  useEffect(() => {
+    async function fetchWeather() {
+      try {
+        const response = await fetch('/api/weather/border');
+        if (response.ok) {
+          const data = await response.json();
+          setWeatherData(data);
+          setWeatherError(null);
+        } else {
+          throw new Error();
+        }
+      } catch (err) {
+        setWeatherError('Telemetry connection offline');
+      } finally {
+        setWeatherLoading(false);
+      }
+    }
+    void fetchWeather();
+    const interval = setInterval(fetchWeather, 5 * 60 * 1000);
+    return () => clearInterval(interval);
   }, []);
 
   // 7. WebSocket Listener Effect
@@ -2527,6 +2555,18 @@ function App() {
                       >
                         Reset
                       </button>
+                      <button
+                        onClick={() => setShowWeatherOverlay(prev => !prev)}
+                        className={`rounded border px-2 text-[10px] uppercase tracking-[0.2em] flex items-center gap-1.5 transition-all ${
+                          showWeatherOverlay 
+                            ? 'border-[#00e5ff] bg-[#00e5ff]/20 text-[#00e5ff] font-bold shadow-[0_0_8px_rgba(0,229,255,0.2)]' 
+                            : isDarkMode ? 'border-white/30 bg-black/70 text-[#bec6e0]' : 'border-black/30 bg-white/80 text-black'
+                        }`}
+                        title="Toggle Tactical Weather Layer"
+                      >
+                        <span className="material-symbols-outlined text-[13px]">filter_drama</span>
+                        <span>Weather HUD Overlay</span>
+                      </button>
                     </div>
 
                     <WorldGeoMap
@@ -2541,6 +2581,8 @@ function App() {
                       selectedContinent={selectedContinent}
                       onCountryClick={handleMapCountryClick}
                       className="absolute inset-0 h-full w-full opacity-95"
+                      weatherData={weatherData}
+                      showWeatherOverlay={showWeatherOverlay}
                     />
 
                     {worldAlertsLoading && (
@@ -2675,6 +2717,18 @@ function App() {
                       >
                         Reset
                       </button>
+                      <button
+                        onClick={() => setShowWeatherOverlay(prev => !prev)}
+                        className={`rounded border px-2 text-[10px] uppercase tracking-[0.2em] flex items-center gap-1.5 transition-all ${
+                          showWeatherOverlay 
+                            ? 'border-[#00e5ff] bg-[#00e5ff]/20 text-[#00e5ff] font-bold shadow-[0_0_8px_rgba(0,229,255,0.2)]' 
+                            : isDarkMode ? 'border-white/30 bg-black/70 text-[#bec6e0]' : 'border-black/30 bg-white/80 text-black'
+                        }`}
+                        title="Toggle Tactical Weather Layer"
+                      >
+                        <span className="material-symbols-outlined text-[13px]">filter_drama</span>
+                        <span>Weather HUD Overlay</span>
+                      </button>
                     </div>
 
                     <WorldGeoMap
@@ -2688,6 +2742,8 @@ function App() {
                       selectedContinent={selectedContinent}
                       onCountryClick={handleMapCountryClick}
                       className="absolute inset-0 h-full w-full opacity-95"
+                      weatherData={weatherData}
+                      showWeatherOverlay={showWeatherOverlay}
                     />
                     {worldAlertsLoading && (
                       <div className="absolute inset-0 flex items-center justify-center text-sm">
@@ -3254,7 +3310,7 @@ function App() {
       </header>
 
       {/* Border Weather HUD */}
-      <BorderWeatherHUD />
+      <BorderWeatherHUD weatherData={weatherData} loading={weatherLoading} error={weatherError} />
 
       {/* Primary Workspace */}
       <div className="flex-grow flex overflow-hidden">

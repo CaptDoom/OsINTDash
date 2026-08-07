@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-type WeatherInfo = {
+export type WeatherInfo = {
   sector: string;
   latitude: number;
   longitude: number;
@@ -11,34 +11,51 @@ type WeatherInfo = {
   source: string;
 };
 
-export function BorderWeatherHUD() {
-  const [weatherData, setWeatherData] = useState<Record<string, WeatherInfo> | null>(null);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [error, setError] = useState<string | null>(null);
+export type BorderWeatherHUDProps = {
+  weatherData?: Record<string, WeatherInfo> | null;
+  loading?: boolean;
+  error?: string | null;
+};
+
+export function BorderWeatherHUD({ 
+  weatherData: propsWeatherData, 
+  loading: propsLoading, 
+  error: propsError 
+}: BorderWeatherHUDProps = {}) {
+  const [localWeatherData, setLocalWeatherData] = useState<Record<string, WeatherInfo> | null>(null);
+  const [localLoading, setLocalLoading] = useState<boolean>(true);
+  const [localError, setLocalError] = useState<string | null>(null);
+
+  const isExternal = propsWeatherData !== undefined;
+  const weatherData = isExternal ? propsWeatherData : localWeatherData;
+  const loading = isExternal ? (propsLoading ?? false) : localLoading;
+  const error = isExternal ? (propsError ?? null) : localError;
 
   const fetchWeather = async () => {
+    if (isExternal) return;
     try {
       const response = await fetch('/api/weather/border');
       if (!response.ok) {
         throw new Error(`Server returned status ${response.status}`);
       }
       const data = await response.json();
-      setWeatherData(data);
-      setError(null);
+      setLocalWeatherData(data);
+      setLocalError(null);
     } catch (err) {
       console.error('[WeatherHUD] Fetch error:', err);
-      setError('Telemetry connection offline');
+      setLocalError('Telemetry connection offline');
     } finally {
-      setLoading(false);
+      setLocalLoading(false);
     }
   };
 
   useEffect(() => {
     fetchWeather();
-    // Poll weather data every 5 minutes
-    const interval = setInterval(fetchWeather, 5 * 60 * 1000);
-    return () => clearInterval(interval);
-  }, []);
+    if (!isExternal) {
+      const interval = setInterval(fetchWeather, 5 * 60 * 1000);
+      return () => clearInterval(interval);
+    }
+  }, [isExternal]);
 
   const getWeatherIcon = (cond: string) => {
     const c = cond.toLowerCase();

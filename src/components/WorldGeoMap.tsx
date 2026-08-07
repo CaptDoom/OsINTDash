@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { geoMercator, geoPath } from 'd3-geo';
+import { geoMercator, geoPath, geoGraticule } from 'd3-geo';
 import { feature } from 'topojson-client';
 import worldAtlas from 'world-atlas/countries-110m.json';
 import worldCountries from 'world-countries';
@@ -45,6 +45,8 @@ type WorldGeoMapProps = {
   selectedCountryName?: string;
   selectedContinent?: string;
   onCountryClick?: (name: string, code: string) => void;
+  weatherData?: Record<string, any> | null;
+  showWeatherOverlay?: boolean;
 };
 
 type CountryHoverMeta = {
@@ -97,8 +99,11 @@ export function WorldGeoMap({
   selectedCountryName,
   selectedContinent = 'All',
   onCountryClick,
+  weatherData,
+  showWeatherOverlay = false,
 }: WorldGeoMapProps) {
   const [hoveredGroup, setHoveredGroup] = useState<CountryAlertGroup | null>(null);
+  const [hoveredWeather, setHoveredWeather] = useState<any | null>(null);
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
 
   const { countryPaths, alertGroups } = useMemo(() => {
@@ -230,6 +235,46 @@ export function WorldGeoMap({
     return { countryPaths, alertGroups: sortedGroups };
   }, [markers, selectedContinent]);
 
+  // Projected coordinate graticule layer using d3-geo
+  const graticulePath = useMemo(() => {
+    const projection = geoMercator().fitSize([1200, 620], { type: 'Sphere' } as never);
+    const pathGenerator = geoPath(projection);
+    try {
+      const graticule = geoGraticule();
+      return pathGenerator(graticule() as any);
+    } catch (e) {
+      console.error("Graticule generation failed", e);
+      return null;
+    }
+  }, []);
+
+  // Projected weather coordinates for the 15 tactical stations
+  const projectedWeatherStations = useMemo(() => {
+    if (!weatherData) return [];
+    const projection = geoMercator().fitSize([1200, 620], { type: 'Sphere' } as never);
+    return Object.values(weatherData)
+      .map((w: any) => {
+        const point = projection([w.longitude, w.latitude]);
+        if (!point) return null;
+        return {
+          ...w,
+          x: point[0],
+          y: point[1]
+        };
+      })
+      .filter((item): item is any => Boolean(item));
+  }, [weatherData]);
+
+  // Weather icon selector
+  const getWeatherIconSvg = (cond: string) => {
+    const c = (cond || '').toLowerCase();
+    if (c.includes('snow') || c.includes('blizzard')) return 'ac_unit';
+    if (c.includes('fog') || c.includes('mist') || c.includes('haze') || c.includes('overcast')) return 'blur_on';
+    if (c.includes('rain') || c.includes('shower')) return 'grain';
+    if (c.includes('wind') || c.includes('storm')) return 'air';
+    return 'sunny';
+  };
+
   return (
     <div className="relative w-full h-full">
       <svg
@@ -239,8 +284,29 @@ export function WorldGeoMap({
         aria-label="World map"
         preserveAspectRatio={`xMidYMid ${fitMode}`}
       >
+        <defs>
+          <filter id="map-glow" x="-20%" y="-20%" width="140%" height="140%">
+            <feGaussianBlur stdDeviation="3" result="blur" />
+            <feComposite in="SourceGraphic" in2="blur" operator="over" />
+          </filter>
+          <filter id="weather-glow" x="-20%" y="-20%" width="140%" height="140%">
+            <feGaussianBlur stdDeviation="1.5" result="blur" />
+            <feComposite in="SourceGraphic" in2="blur" operator="over" />
+          </filter>
+        </defs>
         <rect x="0" y="0" width="1200" height="620" fill="transparent" />
         <g transform={`translate(${panX} ${panY}) translate(600 310) scale(${zoom}) translate(-600 -310)`}>
+          
+          {/* Graticule Grid Layer */}
+          {graticulePath && (
+            <path
+              d={graticulePath}
+              fill="none"
+              stroke="rgba(0, 229, 255, 0.05)"
+              strokeWidth={0.5 / Math.sqrt(zoom)}
+              pointerEvents="none"
+            />
+          )}
           
           {/* Countries Paths */}
           {countryPaths.map((country: { id: string; d: string; meta: CountryHoverMeta }) => {
@@ -358,6 +424,48 @@ export function WorldGeoMap({
                 </g>
               );
             })}
+
+          {/* Weather station beacons overlay */}
+          {showWeatherOverlay && projectedWeatherStations.map((w: any) => {
+            const isExtreme = w.temperature <= -10 || w.temperature >= 35 || w.visibility_km < 1.0;
+            const markerColor = isExtreme ? '#FF5252' : '#00E5FF';
+            
+            return (
+              <g
+                key={w.sector}
+                transform={`translate(${w.x}, ${w.y}) scale(${1.0 / Math.pow(zoom, 0.75)})`}
+                style={{ cursor: 'pointer' }}
+                onMouseEnter={(e) => {
+                  setHoveredWeather(w);
+                  setTooltipPos({ x: e.clientX, y: e.clientY });
+                }}
+                onMouseMove={(e) => {
+                  setTooltipPos({ x: e.clientX, y: e.clientY });
+                }}
+                onMouseLeave={() => {
+                  setHoveredWeather(null);
+                }}
+              >
+                <circle r={9} fill={markerColor} opacity={0.08} />
+                <circle r={6} fill="none" stroke={markerColor} strokeWidth="0.8" className="animate-ping" opacity={0.25} style={{ animationDuration: '4s' }} />
+                <circle r={4.5} fill="#010912" stroke={markerColor} strokeWidth="1" />
+                <text
+                  style={{
+                    fontFamily: 'Material Symbols Outlined',
+                    fontSize: '8px',
+                    fill: markerColor,
+                    textAnchor: 'middle',
+                    dominantBaseline: 'central',
+                    fontWeight: 'bold',
+                    pointerEvents: 'none'
+                  }}
+                  y={0.5}
+                >
+                  {getWeatherIconSvg(w.condition)}
+                </text>
+              </g>
+            );
+          })}
         </g>
       </svg>
 
@@ -405,6 +513,54 @@ export function WorldGeoMap({
           <div className="text-[9px] text-[#7bd0ff]/60 border-t border-white/10 mt-2 pt-1 flex justify-between uppercase">
             <span>REGION: {hoveredGroup.continent}</span>
             <span>CLICK TO GO TO LATEST</span>
+          </div>
+        </div>
+      )}
+
+      {/* Floating Tactical Weather Tooltip */}
+      {hoveredWeather && (
+        <div
+          style={{
+            position: 'fixed',
+            left: tooltipPos.x + 15,
+            top: tooltipPos.y + 15,
+            zIndex: 9999,
+            pointerEvents: 'none',
+            fontFamily: 'monospace',
+          }}
+          className="bg-[#010912]/95 border border-[#00e5ff]/50 p-3 rounded shadow-2xl text-xs w-64 text-[#d4e4fa] backdrop-blur-sm animate-pulse-slow"
+        >
+          <div className="font-bold text-[#00e5ff] uppercase tracking-widest mb-1.5 border-b border-[#00e5ff]/20 pb-1 flex justify-between items-center">
+            <span className="flex items-center gap-1">
+              <span className="material-symbols-outlined text-xs animate-pulse">sensors</span>
+              <span>{hoveredWeather.sector}</span>
+            </span>
+            {hoveredWeather.source === 'TACTICAL-SIMULATOR' && (
+              <span className="bg-amber-500/20 text-amber-400 text-[7px] px-1 rounded border border-amber-500/30 font-bold">SIM</span>
+            )}
+          </div>
+          
+          <div className="space-y-1 text-[10px]">
+            <div className="flex justify-between">
+              <span className="opacity-60">COORDINATES:</span>
+              <span>{hoveredWeather.latitude.toFixed(4)}°N, {hoveredWeather.longitude.toFixed(4)}°E</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="opacity-60">TEMPERATURE:</span>
+              <span className="font-bold text-white">{hoveredWeather.temperature}°C</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="opacity-60">CONDITION:</span>
+              <span className="uppercase text-[#00e5ff]">{hoveredWeather.condition}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="opacity-60">VISIBILITY:</span>
+              <span>{hoveredWeather.visibility_km} KM</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="opacity-60">WIND VELOCITY:</span>
+              <span>{hoveredWeather.wind_speed_kmh} KM/H</span>
+            </div>
           </div>
         </div>
       )}
