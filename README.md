@@ -34,12 +34,14 @@ graph TD
 
 ## 2. Key Features
 
+- **D3 Live World Map Overlays**: Projected coordinate graticule grid lines, pulsing active warning beacons, and interactive weather station icons mapping localized sectors. Hovering weather sensors displays localized real-time conditions while clicking active country beacons highlights the border and triggers the details sidebar.
+- **Meteorological Border Sector HUD**: Tracks 15 tactical border monitoring weather stations (including Siachen Glacier, Kargil, Nathu La, Sir Creek, and Minicoy Island) displaying temperatures, conditions, and wind metrics.
+- **Secure STRATCOM Auth Accounts**: Embedded database seeding with role-based clearance credentials (`analyst@intel.local`, `operator@intel.local`, `admin@intel.local`) simulating secure WebAuthn cryptographic biometric handshake.
+- **Dual-Database Resilient Pipeline**: Connects to high-performance PostgreSQL (using pgvector) with automatic zero-configuration SQLite local database fallback (`articles_v2.db`) for offline air-gapped environments.
 - **OSINT Tactical Intelligence Chatbot**: Replaced file uploading with an interactive scrolling chatbot. Query border alerts, trade deals, and troop movements in real-time. Supports markdown parsing (bold and hyperlinks) and lists reference news card links directly under responses.
-- **Real-Time Meteorological Boundary HUD**: Real-time weather telemetry monitoring across 15 stations along the entire Indian international border sectors (including Jammu, Kargil, Rann of Kutch, Lipulekh, Nathu La, Moreh, and Minicoy Island) using the OpenWeatherMap API.
-- **Expanded Live Worldmap Coverage**: Real-time alert markers and news feeds expanded beyond immediate neighbors to cover key global strategic partners and regions (India, United States, Russia, Iran, Israel, Taiwan).
 - **Abundant News & fallbacks**: Increased seeding to 1125 high-quality articles, ensuring a minimum of 10 articles per category for every monitored country. Implemented frontend and backend fallbacks to prevent empty feed or archive views.
 - **Unified Ingestion & High Density**: Consolidates news queries into unified API searches, saving 90% key quota. The ingestion pipeline scrapes up to **500 raw articles** per sweep cycle (up to 50 articles per border country) to guarantee high-fidelity operational signals.
-- **Precise Classification Matching**: Uses standalone word boundaries (`\b...s?\b`) inside the classification regex engine to ensure zero false positive match collisions on common English terms (e.g. word *sports* matching *port*, *said* matching *aid*).
+- **Precise Classification Matching**: Uses standalone word boundaries (`\b...s?\b`) inside the classification regex engine to ensure zero false positive match collisions on common English terms.
 - **Local LLM Synthesis (Ollama)**: Natively supports local Ollama API queries (using `llama3.1:8b-instruct`) for chatbot summaries and executive briefings, falling back to local rule-based Markdown synthesis only when the local model is offline.
 - **Automated Test Suite**: Equipped with a comprehensive unittest suite validating database connections, classification rules, summarizer heuristics, and FastAPI endpoint routes.
 
