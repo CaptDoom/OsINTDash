@@ -43,7 +43,11 @@ graph TD
 - **Unified Ingestion & High Density**: Consolidates news queries into unified API searches, saving 90% key quota. The ingestion pipeline scrapes up to **500 raw articles** per sweep cycle (up to 50 articles per border country) to guarantee high-fidelity operational signals.
 - **Precise Classification Matching**: Uses standalone word boundaries (`\b...s?\b`) inside the classification regex engine to ensure zero false positive match collisions on common English terms.
 - **Local LLM Synthesis (Ollama)**: Natively supports local Ollama API queries (using `llama3.1:8b-instruct`) for chatbot summaries and executive briefings, falling back to local rule-based Markdown synthesis only when the local model is offline.
+- **Context-Ingesting AI Summarizer**: Dynamic geopolitical summarizer that scrapes URLs, extracts text from uploaded PDF and Word documents on-the-fly, and blends it with internal database wires to output structured intelligence briefings conforming to elite analyst guidelines.
+- **Collaborative Ephemeral Notes Feed**: Real-time collaborative announcement feed where operators can pin wire updates directly from feeds or post manual notes. Cards automatically self-destruct after exactly 24 hours via live-updating countdown timers.
 - **Automated Test Suite**: Equipped with a comprehensive unittest suite validating database connections, classification rules, summarizer heuristics, and FastAPI endpoint routes.
+
+Please refer to the [USER_GUIDE.md](file:///c:/Users/Asus/Desktop/DashNews/USER_GUIDE.md) in the project root for detailed instructions on operating these interfaces.
 
 ---
 
