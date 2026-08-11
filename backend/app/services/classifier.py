@@ -327,6 +327,35 @@ class ImpactClassifier:
         article_data["department"] = dept
         return impact, dept
 
+    async def is_duplicate(self, db: AsyncSession, article: Dict[str, Any]) -> bool:
+        url = article.get("url")
+        if not url:
+            return False
+            
+        # 1. Try Redis deduplication if enabled
+        redis_conn = await _get_redis()
+        if redis_conn:
+            url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()
+            key = f"drishya:dedup:{url_hash}"
+            try:
+                exists = await redis_conn.exists(key)
+                if exists:
+                    return True
+                # Set key with 7 days expiry
+                await redis_conn.setex(key, 604800, "1")
+                return False
+            except Exception as e:
+                logger.debug(f"[Classifier] Redis dedup check failed: {e}")
+
+        # 2. Database fallback check
+        try:
+            stmt = select(Article.id).where(Article.url == url)
+            res = await db.execute(stmt)
+            return res.scalar_one_or_none() is not None
+        except Exception as e:
+            logger.warning(f"[Classifier] DB duplicate check failed: {e}")
+            return False
+
     async def _publish_realtime(self, payload: Dict[str, Any]) -> None:
         memory_stream.publish(payload)
         redis_conn = await _get_redis()
@@ -513,7 +542,7 @@ async def classify_and_store_batch(
     unique_embeddings: List[Optional[List[float]]] = []
 
     for index, article in enumerate(articles):
-        if await classifier.is_duplicate(article):
+        if await classifier.is_duplicate(db, article):
             skipped_duplicates += 1
             metrics.state.ingestion_duplicates_total += 1
             continue

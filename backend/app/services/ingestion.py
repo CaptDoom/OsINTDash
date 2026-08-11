@@ -80,6 +80,9 @@ class CircuitState:
         self.open_until = 0.0
 
 
+SOURCE_BREAKERS: Dict[str, CircuitState] = {}
+
+
 def encode_query(query: str) -> str:
     return quote_plus(query)
 
@@ -494,20 +497,20 @@ async def fetch_bing_news_feed(client: httpx.AsyncClient, country_code: str, cou
 async def _fetch_all_news_sources(client: httpx.AsyncClient, country_code: str, country_name: str, limit: int) -> List[Dict[str, Any]]:
     source_limit = max(limit, 10)
     sources = [
-        fetch_newsapi_feed,
-        fetch_gnews_feed,
-        fetch_newsdata_feed,
-        fetch_worldnews_feed,
-        fetch_finnhub_feed,
-        fetch_currents_feed,
-        fetch_thenews_feed,
-        fetch_mediastack_feed,
-        fetch_newscatcher_feed,
-        fetch_bing_news_feed,
+        (fetch_newsapi_feed, "NewsAPI"),
+        (fetch_gnews_feed, "GNews"),
+        (fetch_newsdata_feed, "NewsData"),
+        (fetch_worldnews_feed, "WorldNewsAPI"),
+        (fetch_finnhub_feed, "Finnhub"),
+        (fetch_currents_feed, "Currents"),
+        (fetch_thenews_feed, "TheNews"),
+        (fetch_mediastack_feed, "Mediastack"),
+        (fetch_newscatcher_feed, "Newscatcher"),
+        (fetch_bing_news_feed, "BingNews"),
     ]
     tasks = [
-        fetch(client, country_code, country_name, source_limit, CircuitState())
-        for fetch in sources
+        fetch_func(client, country_code, country_name, source_limit, SOURCE_BREAKERS.setdefault(name, CircuitState()))
+        for fetch_func, name in sources
     ]
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -536,11 +539,13 @@ async def _fetch_all_news_sources(client: httpx.AsyncClient, country_code: str, 
 
 
 async def fetch_rss_feed(client: httpx.AsyncClient, country_code: str, country_name: str, budget: int, breaker: CircuitState) -> List[Dict[str, Any]]:
-    query = f"{country_name} border OR {country_name} security OR {country_name} conflict"
-    if country_code in {"BT", "MV", "LK", "NP"}:
-        query = f"{country_name} geopolitical OR {country_name} relations OR {country_name}"
-    if _country_priority(country_code) in {"medium", "low"}:
-        query = f"{country_name} news OR {country_name} update OR {country_name} politics"
+    priority = _country_priority(country_code)
+    if priority in {"critical", "high"}:
+        query = f'"{country_name}" (border OR security OR conflict OR military OR defense OR geopolitical)'
+    elif country_code in {"BT", "MV", "LK", "NP"}:
+        query = f'"{country_name}" (geopolitical OR relations OR security OR trade)'
+    else:
+        query = f'"{country_name}" (news OR politics OR economic)'
 
     url = f"https://news.google.com/rss/search?q={encode_query(query)}&hl=en-US&gl=US&ceid=US:en"
     response = await _get_with_retry(client, url, source_name="RSS", breaker=breaker)
