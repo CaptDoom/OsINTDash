@@ -16,7 +16,7 @@ from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.config import settings
 from backend.app.database import create_tables, get_db, Article, User
-from backend.app.api.routes import archive, chat, weather, auth
+from backend.app.api.routes import archive, chat, weather, auth, summarizer, notes
 from backend.app.services.ingestion import fetch_global_news
 from backend.app.services.classifier import ImpactClassifier, classify_and_store_batch, memory_stream, compute_source_reputation
 from backend.app.services.summarizer import call_openai, call_gemini
@@ -42,6 +42,8 @@ app.include_router(archive.router)
 app.include_router(chat.router)
 app.include_router(weather.router)
 app.include_router(auth.router)
+app.include_router(summarizer.router)
+app.include_router(notes.router)
 
 
 @app.middleware("http")

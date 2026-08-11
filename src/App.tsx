@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { WorldGeoMap, type WorldGeoMapMarker, getContinentName } from './components/WorldGeoMap';
 import { BorderWeatherHUD, type WeatherInfo } from './components/BorderWeatherHUD';
+import AiSummarizer from './components/AiSummarizer';
+import SharedNotes from './components/SharedNotes';
 import worldCountries from 'world-countries';
 
 type TimeWindow = '1h' | '1d' | '1w' | '1m';
@@ -114,7 +116,7 @@ type WorldAlert = {
   timestamp: string;
 };
 
-type PanelView = 'country' | 'worldMap' | 'archive' | 'chatFusion';
+type PanelView = 'country' | 'worldMap' | 'archive' | 'chatFusion' | 'aiSummarizer' | 'sharedNotes';
 
 type WorldMapPan = {
   x: number;
@@ -675,6 +677,29 @@ const buildSourceSearchUrl = (headline: string, countryName?: string, sourceName
 
 const getSignalSourceUrl = (signal: { url?: string; headline: string }) => {
   return signal.url || buildSourceSearchUrl(signal.headline);
+};
+
+const pinToNotes = async (content: string, author?: string) => {
+  try {
+    const res = await fetch('/api/notes', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        content,
+        author: author || 'STRATCOM Ops',
+      }),
+    });
+    if (res.ok) {
+      alert('Operational signal successfully pinned to Shared Notes board.');
+    } else {
+      const err = await res.json();
+      alert(`Pinning failed: ${err.detail || 'Unknown error'}`);
+    }
+  } catch (err) {
+    alert(`Error pinning signal: ${String(err)}`);
+  }
 };
 
 function App() {
@@ -2438,6 +2463,42 @@ function App() {
                 >
                   OSINT AI Chatbot
                 </button>
+                <button
+                  onClick={() => {
+                    setPanelView('aiSummarizer');
+                    setIsCountrySelected(false);
+                    setIsWorldMapFullscreen(false);
+                  }}
+                  className={`w-full text-left px-3 py-2 border transition-colors ${
+                    panelView === 'aiSummarizer'
+                      ? isDarkMode
+                        ? 'bg-white text-black border-white'
+                        : 'bg-black text-white border-black'
+                      : isDarkMode
+                        ? 'border-white/20 hover:bg-white/10'
+                        : 'border-black/20 hover:bg-black/10'
+                  }`}
+                >
+                  AI Summarizer
+                </button>
+                <button
+                  onClick={() => {
+                    setPanelView('sharedNotes');
+                    setIsCountrySelected(false);
+                    setIsWorldMapFullscreen(false);
+                  }}
+                  className={`w-full text-left px-3 py-2 border transition-colors ${
+                    panelView === 'sharedNotes'
+                      ? isDarkMode
+                        ? 'bg-white text-black border-white'
+                        : 'bg-black text-white border-black'
+                      : isDarkMode
+                        ? 'border-white/20 hover:bg-white/10'
+                        : 'border-black/20 hover:bg-black/10'
+                  }`}
+                >
+                  Shared Notes
+                </button>
               </div>
             </div>
 
@@ -2767,7 +2828,20 @@ function App() {
                             rel="noopener noreferrer"
                             className={`block rounded border px-3 py-2 text-sm text-left ${isDarkMode ? 'border-white/20 hover:bg-white/10' : 'border-black/20 hover:bg-black/10'}`}
                           >
-                            <div className="font-medium">{alert.headline}</div>
+                            <div className="flex justify-between items-start gap-2">
+                              <div className="font-medium text-xs leading-snug">{alert.headline}</div>
+                              <button
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  pinToNotes(`[ALERT] ${alert.headline} (Source: ${alert.source} | Location: ${alert.location})`, authUser?.name);
+                                }}
+                                className="text-white/40 hover:text-[#7bd0ff] transition-colors shrink-0"
+                                title="Pin to shared notes"
+                              >
+                                <span className="material-symbols-outlined text-[14px]">campaign</span>
+                              </button>
+                            </div>
                             <div className="flex justify-between items-center text-[10px] font-mono mt-1.5 uppercase">
                               <span className={isDarkMode ? 'text-white/50' : 'text-black/50'}>
                                 {alert.location} • {alert.source} ↗ • {alert.severity.toUpperCase()}
@@ -2797,6 +2871,10 @@ function App() {
                 <ArchiveView />
               ) : panelView === 'chatFusion' ? (
                 <LiveChatFusion />
+              ) : panelView === 'aiSummarizer' ? (
+                <AiSummarizer isDarkMode={isDarkMode} />
+              ) : panelView === 'sharedNotes' ? (
+                <SharedNotes isDarkMode={isDarkMode} />
               ) : !isCountrySelected ? (
                 <div className="h-full flex items-center justify-center text-center text-white/70">
                   <p className={isDarkMode ? 'text-white/70' : 'text-black/70'}>Select a country to view its latest news categories.</p>
@@ -2834,16 +2912,25 @@ function App() {
                       <span>Impact: {currentCategoryData.impact}</span>
                       <span>Signal: {currentCategoryData.signal}</span>
                     </div>
-                    <div className={`mt-4 border-t pt-3 ${isDarkMode ? 'border-white/10' : 'border-black/10'}`}>
-                      <p className="text-xs uppercase tracking-[0.3em] text-white/50">Source</p>
-                      <a
-                        href={sourceUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className={`mt-2 inline-block text-sm underline underline-offset-4 break-all ${isDarkMode ? 'text-white' : 'text-black'}`}
+                    <div className={`mt-4 border-t pt-3 ${isDarkMode ? 'border-white/10' : 'border-black/10'} flex items-center justify-between`}>
+                      <div>
+                        <p className="text-xs uppercase tracking-[0.3em] text-white/50">Source</p>
+                        <a
+                          href={sourceUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className={`mt-2 inline-block text-sm underline underline-offset-4 break-all ${isDarkMode ? 'text-white' : 'text-black'}`}
+                        >
+                          {sourceLabel}
+                        </a>
+                      </div>
+                      <button
+                        onClick={() => pinToNotes(`[${selectedCategory}] ${currentCategoryData.title} - ${currentCategoryData.summary} (Source: ${sourceLabel} | Target: ${selectedCountry.name})`, authUser?.name)}
+                        className="flex items-center gap-1.5 border border-[#7bd0ff]/40 hover:bg-[#7bd0ff]/10 text-[#7bd0ff] px-2.5 py-1 text-[10px] font-mono uppercase tracking-wider rounded transition-colors"
                       >
-                        {sourceLabel}
-                      </a>
+                        <span className="material-symbols-outlined text-[12px]">campaign</span>
+                        Pin to Notes
+                      </button>
                     </div>
                   </div>
 
@@ -4515,6 +4602,17 @@ function ArchiveView() {
                       <span className="flex items-center gap-0.5">Source: {art.source || 'OSINT'} ↗</span>
                       <span>Target: {art.country_code}</span>
                       <span>Dept: {art.department}</span>
+                      <button
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          pinToNotes(`[${art.department}] ${art.title} - ${art.summary || art.content.substring(0, 200)} (Source: ${art.source || 'OSINT'} | Target: ${art.country_code})`);
+                        }}
+                        className="flex items-center gap-0.5 border border-[#7bd0ff]/40 hover:bg-[#7bd0ff]/10 text-[#7bd0ff] px-1.5 py-0.5 text-[8px] font-mono uppercase rounded transition-colors"
+                      >
+                        <span className="material-symbols-outlined text-[10px]">campaign</span>
+                        Pin
+                      </button>
                     </div>
                     <span className="flex items-center gap-1">
                       {isLive && (

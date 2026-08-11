@@ -137,5 +137,38 @@ class TestFastAPIRoutes(unittest.TestCase):
         self.assertIn("summary", data)
         self.assertIn("relevant_articles", data)
 
+    def test_custom_summarizer_route(self):
+        response = self.client.post(
+            "/api/summarizer/generate",
+            data={"country_code": "CN", "timeframe": "1M"}
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("summary", data)
+
+    def test_shared_notes_lifecycle(self):
+        # 1. Create a note
+        post_resp = self.client.post(
+            "/api/notes",
+            json={"content": "Strategic alert: LAC patrol checks completed.", "author": "CEO"}
+        )
+        self.assertEqual(post_resp.status_code, 200)
+        note_data = post_resp.json()
+        self.assertIn("id", note_data)
+        self.assertEqual(note_data["author"], "CEO")
+        self.assertEqual(note_data["content"], "Strategic alert: LAC patrol checks completed.")
+        note_id = note_data["id"]
+
+        # 2. Get active notes
+        get_resp = self.client.get("/api/notes")
+        self.assertEqual(get_resp.status_code, 200)
+        notes_list = get_resp.json()
+        self.assertTrue(any(n["id"] == note_id for n in notes_list))
+
+        # 3. Delete the note
+        del_resp = self.client.delete(f"/api/notes/{note_id}")
+        self.assertEqual(del_resp.status_code, 200)
+        self.assertEqual(del_resp.json(), {"status": "deleted"})
+
 if __name__ == "__main__":
     unittest.main()
