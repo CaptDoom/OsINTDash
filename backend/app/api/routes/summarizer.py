@@ -70,16 +70,15 @@ async def scrape_url(url: str) -> str:
         return f"URL Source ({url}) failed: {str(e)}"
 
 def generate_fallback_summary(country_name: str, timeframe_label: str, articles: list, external_context: str) -> str:
-    md = f"CLASSIFICATION: UNCLASSIFIED // OSINT FOR INTERNAL STRATCOM USE ONLY\n"
-    md += f"GEOPOLITICAL INTELLIGENCE BRIEFING: {country_name.upper()} ({timeframe_label.upper()})\n\n"
+    md = f"NEWS AND STABILITY BRIEFING: {country_name.upper()} ({timeframe_label.upper()})\n\n"
     
-    md += "### **1. EXECUTIVE SUMMARY**\n"
+    md += "### **1. SUMMARY**\n"
     if articles:
-        md += f"Geopolitical intelligence sweep for {country_name} over the last {timeframe_label} has compiled {len(articles)} active security events. Operational signals indicate shifting strategic parameters requiring continuous monitoring.\n\n"
+        md += f"We have found {len(articles)} new updates for {country_name} over the last {timeframe_label}. General activity is running normally.\n\n"
     else:
-        md += f"Geopolitical intelligence sweep for {country_name} over the last {timeframe_label} indicates baseline stability. Operational parameters remain within expected strategic tolerances, with no major alert escalations registered.\n\n"
+        md += f"The situation in {country_name} over the last {timeframe_label} is quiet and stable. No major alerts or changes have been reported.\n\n"
     
-    md += "### **2. CORE ANALYSIS / SECTORAL BREAKDOWN**\n"
+    md += "### **2. SECTOR DETAILS**\n"
     
     # Group by dept
     by_dept = {}
@@ -98,20 +97,20 @@ def generate_fallback_summary(country_name: str, timeframe_label: str, articles:
             dept_arts = by_dept.get(dept, [])
             
         if not dept_arts:
-            md += f"- **Contextual Analysis**: Geopolitical and defense metrics for this sector are currently stable, maintaining standard readiness baselines. Historical tracking indicates cooperative regional frameworks remain active.\n"
-            md += f"- **Information Gap**: High-fidelity real-time wire signals for this specific sector are currently limited in the local cache window. Continuous scanning of regional telemetry feeds is recommended.\n\n"
+            md += f"- **General Status**: The situation in this sector is quiet and normal. Precautionary measures and normal routines are in place.\n"
+            md += f"- **Data Update**: No new reports have been received in this time period. We are continuing to watch for updates.\n\n"
         else:
             for art in dept_arts[:4]:
                 md += f"- **[{art.title}]({art.url})** ({art.source}): {art.summary or art.content[:180]}...\n"
             md += "\n"
             
     if external_context.strip() and "No external documents" not in external_context:
-        md += "#### **External Ingested Context**\n"
-        md += f"Parsed supplementary records show the following details:\n"
+        md += "#### **Extra Shared Details**\n"
+        md += f"Additional documents show the following details:\n"
         md += f"> {external_context[:1000]}...\n\n"
         
-    md += "### **3. STRATEGIC IMPLICATIONS & INDICATORS**\n"
-    md += "Verify all news alerts against secure intelligence nodes. Maintain baseline security posture, monitor alerts continuously, and track upcoming bilateral triggers or regional defense adjustments.\n"
+    md += "### **3. WHAT THIS MEANS FOR ORDINARY PEOPLE**\n"
+    md += "Everything is running as usual. There is no immediate threat to public safety, and trade and travel are normal. We recommend keeping an eye on normal daily updates.\n"
     return md
 
 @router.post("/generate")
@@ -199,18 +198,18 @@ async def generate_custom_summary(
     # 3. LLM Generation
     prompt = f"""
 ROLE:
-You are an Elite Intelligence Analyst and Lead Technical Communicator. Your objective is to transform raw context, unstructured data, or high-level queries into high-precision, executive-ready, and deeply analytical responses.
+You are an expert communicator who translates complex news into simple, plain English. Your goal is to explain what happened in clear terms without using any technical, political, or military jargon.
 
 GOAL:
-Eliminate superficial summaries, empty boilerplate ("No active telemetry", "N/A"), generic placeholders, and hallucinations. Every summary must be authentic, actionable, and richly structured.
+Eliminate superficial summaries, empty placeholders, and technical terminology. Every summary must be clear, easy to understand, and richly structured in plain language.
 
 ---
 
-GEOPOLITICAL INTELLIGENCE BRIEFING: {country_name.upper()}
+NEWS AND STABILITY BRIEFING: {country_name.upper()}
 TIMEFRAME: {timeframe_label}
 
 INPUT SOURCES:
-1. INTERNAL OSINT DATABASE (Stored articles matching target country and timeframe):
+1. INTERNAL NEWS DATABASE:
 -----------------------------------------------------
 {db_articles_context}
 -----------------------------------------------------
@@ -224,29 +223,28 @@ INPUT SOURCES:
 
 ### INSTRUCTION SET & STANDARDS
 
-1. DENSITY & GRANULARITY:
-   - Provide concrete facts, dates, names, metrics, and technical/geopolitical/economic context.
-   - Avoid generic fluff or conversational filler (e.g., "In conclusion," "It is important to note").
-   - Synthesize underlying patterns, strategic implications, and key takeaways rather than just listing headlines.
+1. SIMPLIFIED LANGUAGE:
+   - Use simple, everyday words. Avoid any jargon, such as "OSINT," "telemetry," "bilaterals," "strategic meetings," "tactical," "reconnaissance," "frontier," etc.
+   - Explain everything in plain English so an average person can easily understand it.
+   - Do not use conversational filler (e.g., "In conclusion," "It is important to note").
 
 2. MANDATORY STRUCTURE:
    Unless specified otherwise, every comprehensive summary must include:
-   - **1. EXECUTIVE SUMMARY**: A 2-3 sentence strategic takeaway framing the big picture (including overarching geopolitical trajectory, stability index, and critical alerts).
-   - **2. CORE ANALYSIS / SECTORAL BREAKDOWN**: Group key information under distinct, thematic headings:
-     - **Military & Defense**
-     - **Economic & Financial**
-     - **Political & Diplomatic**
-     - **Social Affairs & Welfare / Technology**
-   - **3. STRATEGIC IMPLICATIONS & INDICATORS**: What this means for future trajectory, risk factors, or actionable next steps/recommendations.
+   - **1. SUMMARY**: A 2-3 sentence overview explaining what is happening and how it affects general stability.
+   - **2. SECTOR DETAILS**: Group key information under distinct, thematic headings:
+     - **Military & Defense** (explain guard work, safety drills, or patrol adjustments in simple terms)
+     - **Economic & Financial** (explain trade, prices, or infrastructure developments in simple terms)
+     - **Political & Diplomatic** (explain leadership meetings or agreements in simple terms)
+     - **Social Affairs & Welfare / Technology** (explain community welfare, clinics, or network safety in simple terms)
+   - **3. WHAT THIS MEANS FOR ORDINARY PEOPLE**: Explain in 1-2 sentences how this directly affects average citizen safety, costs, travel, or stability.
 
-3. ZERO-TELEMETRY & ACCURACY FALLBACK PROTOCOL:
-   - NEVER output phrases like "0 active events," "No signals captured," or "Fallback report."
-   - If direct data for a sub-sector is sparse in the provided context, infer broader context, historical baselines, or macro trends explicitly tagged as "Contextual Analysis."
-   - If information is missing, highlight it as an "Information Gap" rather than generating an empty section.
+3. ACCURACY FALLBACK PROTOCOL:
+   - If direct data for a sector is sparse in the provided context, describe the general situation using simple terms.
+   - If information is missing, highlight it as a "Missing Info" note.
 
 4. FORMATTING RULES:
-   - Use scannable markdown: Bold key entities, utilize structured tables where data comparison is relevant, and use bullet points for lists.
-   - Maintain a direct, objective, and executive tone.
+   - Use scannable markdown: Bold key entities, utilize simple bullet points for lists.
+   - Maintain a direct, objective, and clear tone.
    - Highlight links and citations from the database articles where appropriate.
 
 ---
@@ -254,7 +252,6 @@ INPUT SOURCES:
 ### INPUT CONTEXT PROTOCOL
 1. Extract primary entities, key metrics, and time-bound events.
 2. Cross-reference provided external sources (PDFs, URLs, Notes) with internal context to create a unified narrative.
-3. Highlight contradictions or conflicts in the source material if any exist.
 """
 
     summary_text = ""

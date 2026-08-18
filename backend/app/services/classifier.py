@@ -89,12 +89,20 @@ def compute_source_reputation(source: Optional[str]) -> str:
         return "Unrated"
     src = source.lower().strip()
     
-    # Wire agencies and major outlets
+    # Wire agencies, major global and regional outlets
     verified = [
         "reuters.com", "apnews.com", "aljazeera.com", "bbc.com", "dw.com",
         "france24.com", "theguardian.com", "nytimes.com", "bloomberg.com",
         "reuters", "apnews", "aljazeera", "bbc", "dw", "france24", "theguardian",
-        "nytimes", "bloomberg", "reuters (seeded)", "bbc.com (demo)"
+        "nytimes", "bloomberg", "reuters (seeded)", "bbc.com (demo)",
+        "pti", "press trust of india", "ptinews.com",
+        "ani", "asian news international", "aninews.in",
+        "xinhua", "xinhuanet.com", "scmp.com", "south china morning post",
+        "app.com.pk", "associated press of pakistan",
+        "thehindu.com", "the hindu",
+        "timesofindia", "times of india", "indiatimes.com",
+        "dawn.com", "dawn news", "interfax.com", "tass.com", "tass",
+        "irna.ir", "irna"
     ]
     for v in verified:
         if v in src:
@@ -113,6 +121,7 @@ def compute_source_reputation(source: Optional[str]) -> str:
     return "Unverified"
 
 
+
 _transformer = None
 def get_transformer():
     global _transformer
@@ -120,6 +129,65 @@ def get_transformer():
         from sentence_transformers import SentenceTransformer
         _transformer = SentenceTransformer('all-MiniLM-L6-v2', device='cpu')
     return _transformer
+
+
+_embedding_cache = {}
+
+async def get_embeddings_cached(texts: List[str]) -> List[List[float]]:
+    redis_conn = await _get_redis()
+    embeddings = [None] * len(texts)
+    missing_indices = []
+    missing_texts = []
+    
+    for idx, text in enumerate(texts):
+        # Key on text SHA-256 hash
+        text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        
+        # 1. Check in-memory cache
+        if text_hash in _embedding_cache:
+            embeddings[idx] = _embedding_cache[text_hash]
+            continue
+            
+        # 2. Check Redis cache
+        if redis_conn:
+            try:
+                val = await redis_conn.get(f"drishya:emb:{text_hash}")
+                if val:
+                    vec = json.loads(val)
+                    embeddings[idx] = vec
+                    _embedding_cache[text_hash] = vec  # Sync to in-memory
+                    continue
+            except Exception:
+                pass
+                
+        # 3. Add to missing list
+        missing_indices.append(idx)
+        missing_texts.append(text)
+        
+    # 4. Generate missing embeddings
+    if missing_texts:
+        try:
+            transformer = get_transformer()
+            computed = transformer.encode(missing_texts, convert_to_numpy=True).tolist()
+            for local_idx, vec in enumerate(computed):
+                orig_idx = missing_indices[local_idx]
+                embeddings[orig_idx] = vec
+                text_hash = hashlib.sha256(missing_texts[local_idx].encode("utf-8")).hexdigest()
+                # Save to in-memory
+                _embedding_cache[text_hash] = vec
+                # Save to Redis with 7-day TTL
+                if redis_conn:
+                    try:
+                        await redis_conn.setex(f"drishya:emb:{text_hash}", 604800, json.dumps(vec))
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.error(f"[Classifier] Failed to compute batch embeddings: {e}")
+            for orig_idx in missing_indices:
+                embeddings[orig_idx] = [0.0] * settings.embedding_dimensions
+                
+    return embeddings
+
 
 DEPT_CENTROIDS = {
     "Military & Defense": [
@@ -158,6 +226,53 @@ IMPACT_CENTROIDS = {
         "daily weather forecast domestic league cricket football quiz show music release food recipe lifestyle tips holiday destinations science trivia tech gadget review"
     ]
 }
+
+
+def extract_first_real_sentence(text: str) -> str:
+    if not text:
+        return "Tactical intelligence briefing restricted."
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    banned_phrases = [
+        "Factual OSINT telemetry signal",
+        "Surveillance networks report normal stability",
+        "Strategic deployment of border patrol sweeps",
+        "Monitoring feeds detect active parameters",
+        "Strategic deployment of tactical operations"
+    ]
+    for s in sentences:
+        if not any(phrase.lower() in s.lower() for phrase in banned_phrases):
+            words = s.split()
+            if len(words) > 35:
+                return " ".join(words[:35]) + "..."
+            return s
+    return "Tactical intelligence briefing restricted."
+
+
+def clean_news_output(raw_title: str, raw_snippet: str) -> dict:
+    # 1. Strip synthetic alert tags
+    clean_title = re.sub(r"\(Telemetry Alert #\d+\)", "", raw_title).strip()
+    clean_title = re.sub(r"\b(Telemetry|Intel)\s+Alert\s*#\s*\d+\s*[-:]?\s*", "", clean_title, flags=re.IGNORECASE)
+    
+    # 2. Prevent static boilerplate sentences from populating the DB
+    banned_phrases = [
+        "Factual OSINT telemetry signal",
+        "Surveillance networks report normal stability",
+        "Strategic deployment of border patrol sweeps",
+        "Monitoring feeds detect active parameters",
+        "Strategic deployment of tactical operations"
+    ]
+    
+    summary = raw_snippet
+    for phrase in banned_phrases:
+        if phrase.lower() in summary.lower():
+            # Replace placeholder with actual first sentence of scraped article
+            summary = extract_first_real_sentence(raw_snippet)
+            break
+
+    return {
+        "title": clean_title,
+        "summary": summary
+    }
 
 
 class ImpactClassifier:
@@ -319,13 +434,278 @@ class ImpactClassifier:
             dept = dept or dept_sem
         return imp, dept
 
+
+    async def extract_intelligence(self, title: str, content: str, country_code: str) -> dict:
+        """
+        Extracts structured intelligence according to the Production Intelligence Formatter.
+        If LLM is available, queries it with prompt constraints.
+        Otherwise, falls back to local rule-based heuristic parsing.
+        """
+        from backend.app.services.ingestion import ISO_COUNTRIES
+        country_name = ISO_COUNTRIES.get(country_code, country_code)
+        
+        prompt = f"""
+        ### System Instructions: Production Intelligence Formatter
+
+        You are a concise, factual news editor for a real-time geopolitical intelligence dashboard.
+
+        Your goal is to parse raw news articles into clean, high-signal alerts. You must preserve real facts, dates, locations, and actions while eliminating synthetic filler, robotic labels, and unnecessary jargon.
+
+        ---
+
+        ### BANNED PATTERNS & JARGON (NEVER USE)
+        1. Synthetic IDs & Counters: Never invent codes or tags like "Telemetry Alert #200", "OSINT Signal #42", "Feed ID 901".
+        2. Boilerplate Filler: Never output generic phrases such as:
+           - "Factual OSINT telemetry signal indicating..."
+           - "Surveillance networks report normal stability."
+           - "Strategic deployment of tactical operations..."
+           - "Monitoring feeds detect active parameters..."
+        3. Unverified Speculation: Do not invent units, equipment, or troop numbers if they are not explicitly present in the source text.
+
+        ---
+
+        ### WRITING RULES
+        - Title: Write a direct, clear headline stating who did what and where (Max 10 words). Use standard active voice.
+        - Summary: Exactly 1 to 2 sentences describing the core development and its immediate impact (Max 35 words).
+        - Location: The specific border, sector, town, or body of water mentioned (e.g., "Eastern Ladakh (LAC)", "Tawang Sector", "Line of Control").
+        - Entities: Extracted names of official bodies, units, nations, or leaders directly mentioned.
+
+        ---
+
+        ### OUTPUT FORMAT (Strict JSON)
+        {{
+          "clean_title": "Direct factual headline without IDs or filler words",
+          "summary": "1-2 sentence concise factual summary of what actually happened.",
+          "location": "Specific border sector or geographic point",
+          "category": "Military | Diplomacy | Infrastructure | Trade | Cyber",
+          "impact": "HIGH | MEDIUM | LOW",
+          "source_domain": "e.g. reuters.com",
+          "entities": ["List", "of", "extracted", "official", "entities"]
+        }}
+
+        ARTICLE TITLE: {title}
+        ARTICLE CONTENT: {content[:4000]}
+        COUNTRY CONTEXT: {country_name} ({country_code})
+        """
+        
+        extracted_data = None
+        
+        # 1. Try LLM extraction
+        llm_prov = settings.llm_provider
+        if not llm_prov:
+            if settings.google_api_key:
+                llm_prov = "gemini"
+            elif settings.openai_api_key:
+                llm_prov = "openai"
+            elif settings.ollama_base_url:
+                llm_prov = "ollama"
+                
+        if llm_prov:
+            llm_response = ""
+            try:
+                if llm_prov == "ollama" and settings.ollama_base_url:
+                    from backend.app.services.summarizer import call_ollama
+                    llm_response = await call_ollama(prompt, "You are a border security intelligence editor.")
+                elif llm_prov == "openai" and settings.openai_api_key:
+                    from backend.app.services.summarizer import call_openai
+                    llm_response = await call_openai(prompt, "You are a border security intelligence editor.")
+                elif llm_prov == "gemini" and settings.google_api_key:
+                    from backend.app.services.summarizer import call_gemini
+                    llm_response = await call_gemini(prompt, "You are a border security intelligence editor.")
+            except Exception as e:
+                logger.warning(f"[Classifier] LLM extraction call failed: {e}")
+                
+            if llm_response:
+                try:
+                    match = re.search(r"\{.*?\}", llm_response, re.DOTALL)
+                    if match:
+                        parsed = json.loads(match.group(0))
+                        required_keys = ["clean_title", "summary", "location", "category", "impact", "source_domain"]
+                        if all(k in parsed for k in required_keys):
+                            # Map clean output properties to DB fields
+                            impact_map = {
+                                "high": "High Impact", "medium": "Medium Impact", "low": "Normal Impact",
+                                "normal": "Normal Impact"
+                            }
+                            category_map = {
+                                "military": "Military & Defense",
+                                "diplomacy": "Political & Diplomatic",
+                                "infrastructure": "Military & Defense",
+                                "trade": "Economic & Financial",
+                                "cyber": "Technology & Cyber"
+                            }
+                            
+                            entities_list = parsed.get("entities") or []
+                            if not isinstance(entities_list, list):
+                                entities_list = [str(entities_list)]
+                            else:
+                                entities_list = [str(x) for x in entities_list]
+                                
+                            extracted_data = {
+                                "title": parsed["clean_title"],
+                                "sector": parsed["location"],
+                                "department": category_map.get(parsed["category"].lower(), "Political & Diplomatic"),
+                                "impact_level": impact_map.get(parsed["impact"].lower(), "Normal Impact"),
+                                "tactical_summary": parsed["summary"],
+                                "entities": entities_list,
+                                "action_type": "Surveillance" # Default fallback action
+                            }
+                            
+                            # Heuristically classify action type for DB
+                            sum_lower = parsed["summary"].lower()
+                            if any(k in sum_lower for k in ["drill", "exercise", "maneuver"]):
+                                extracted_data["action_type"] = "Drill"
+                            elif any(k in sum_lower for k in ["buildup", "deploy", "movement", "transfer"]):
+                                extracted_data["action_type"] = "Deployment"
+                            elif any(k in sum_lower for k in ["clash", "skirmish", "incident", "fired"]):
+                                extracted_data["action_type"] = "Border Incident"
+                            elif any(k in sum_lower for k in ["summit", "meet", "talks", "diplomatic"]):
+                                extracted_data["action_type"] = "Diplomatic Meeting"
+                            elif any(k in sum_lower for k in ["road", "highway", "bridge", "port", "construction"]):
+                                extracted_data["action_type"] = "Infrastructure"
+                                
+                            logger.info(f"[Classifier] Production Intelligence Extractor successful: {parsed['clean_title']}")
+                except Exception as parse_err:
+                    logger.warning(f"[Classifier] Failed to parse LLM response: {parse_err}")
+
+        # 2. Rule-Based Fallback Heuristic
+        if not extracted_data:
+            logger.info(f"[Classifier] Running clean rule-based heuristic extraction fallback for: {title}")
+            
+            cleaned = clean_news_output(title, content)
+            clean_title = cleaned["title"]
+            tactical_summary = cleaned["summary"]
+            
+            words = clean_title.split()
+            if len(words) > 10:
+                clean_title = " ".join(words[:10]) + "..."
+            if not clean_title or clean_title.lower() == "untitled":
+                clean_title = f"Security Update near {country_name} border"
+
+            impact_val, dept_val = self.classify(title, content)
+
+            sector_name = f"{country_name} Border"
+            content_lower = content.lower()
+            if country_code == "CN":
+                if "galwan" in content_lower: sector_name = "Galwan Valley (LAC)"
+                elif "doklam" in content_lower: sector_name = "Doklam Sector (LAC)"
+                elif "depsang" in content_lower: sector_name = "Depsang Plains (LAC)"
+                elif "arunachal" in content_lower: sector_name = "Arunachal Sector (LAC)"
+                elif "chumbi" in content_lower: sector_name = "Chumbi Valley (LAC)"
+                elif "siliguri" in content_lower: sector_name = "Siliguri Corridor"
+                elif "ladakh" in content_lower: sector_name = "Eastern Ladakh (LAC)"
+                else: sector_name = "Northern Sector (LAC)"
+            elif country_code == "PK":
+                if "kashmir" in content_lower: sector_name = "Kashmir Sector (LOC)"
+                elif "gwadar" in content_lower: sector_name = "Gwadar Port Sector"
+                elif "siachen" in content_lower: sector_name = "Siachen Glacier (LOC)"
+                elif "creek" in content_lower: sector_name = "Sir Creek Sector"
+                else: sector_name = "Western Sector (LOC)"
+            elif country_code == "AF":
+                sector_name = "Khyber Pass Sector"
+            elif country_code == "MM":
+                sector_name = "Southeastern Land Boundary"
+            elif country_code == "BD":
+                sector_name = "Eastern Sector border"
+            elif country_code == "LK":
+                sector_name = "Palk Strait Sector"
+            elif country_code == "MV":
+                sector_name = "Indian Ocean Maldives Exclusive Zone"
+            elif country_code == "IN":
+                if "lac" in content_lower: sector_name = "LAC Frontier"
+                elif "loc" in content_lower: sector_name = "LOC Frontier"
+                else: sector_name = "Border Defense Zone"
+
+            entity_list = []
+            known_entities = [
+                "PLA", "IAF", "Indian Army", "Pakistan Army", "Su-30MKI", "Rafale",
+                "Western Theater Command", "Northern Command", "LOC", "LAC", "UAV", "drone",
+                "Taliban", "Border Security Force", "BSF", "Coast Guard", "Ministry of Defense"
+            ]
+            for ent in known_entities:
+                if re.search(r'\b' + re.escape(ent) + r'\b', content, re.IGNORECASE):
+                    entity_list.append(ent)
+            matches = re.findall(r'\b[A-Z][a-zA-Z0-9]{2,}\b', content)
+            for m in matches:
+                if m not in entity_list and m not in ("The", "And", "For", "This", country_name):
+                    entity_list.append(m)
+                if len(entity_list) >= 8:
+                    break
+            
+            action_type = "Surveillance"
+            if any(k in content_lower for k in ["drill", "exercise", "maneuver", "tactical training"]):
+                action_type = "Drill"
+            elif any(k in content_lower for k in ["buildup", "deploy", "movement", "transfer", "convoy"]):
+                action_type = "Deployment"
+            elif any(k in content_lower for k in ["clash", "skirmish", "incident", "dispute", "standoff", "fired"]):
+                action_type = "Border Incident"
+            elif any(k in content_lower for k in ["summit", "meet", "talks", "diplomatic", "bilateral"]):
+                action_type = "Diplomatic Meeting"
+            elif any(k in content_lower for k in ["road", "highway", "bridge", "infrastructure", "port", "construction"]):
+                action_type = "Infrastructure"
+            elif any(k in content_lower for k in ["radar", "satellite", "uav", "drone", "patrol", "reconnaissance"]):
+                action_type = "Surveillance"
+
+            extracted_data = {
+                "title": clean_title,
+                "sector": sector_name,
+                "department": dept_val,
+                "impact_level": impact_val,
+                "tactical_summary": tactical_summary,
+                "entities": entity_list[:6],
+                "action_type": action_type
+            }
+
+        return extracted_data
+
+    async def rewrite_headline_to_tactical_brief(self, headline: str, country_name: str) -> str:
+        if settings.ollama_base_url:
+            try:
+                from backend.app.services.summarizer import call_ollama
+                prompt = (
+                    f"Rewrite this news headline into a 'Tactical Brief'. It should be a single, short, clear, "
+                    f"active-voice summary of the action and location (e.g. 'Troop movement detected near Tawang Sector'). "
+                    f"Do not use conversational filler, do not use quotes, and do not use the words 'Tactical Brief'. "
+                    f"Output only the rewritten headline.\n\n"
+                    f"HEADLINE: {headline}\n"
+                    f"COUNTRY: {country_name}"
+                )
+                rewritten = await call_ollama(prompt, "You are a concise military and news editor.")
+                if rewritten and rewritten.strip():
+                    clean_brief = rewritten.strip().replace('"', '').replace("'", "")
+                    if clean_brief.lower().startswith("tactical brief:"):
+                        clean_brief = clean_brief[15:].strip()
+                    return clean_brief
+            except Exception as e:
+                logger.warning(f"[Classifier] Ollama headline rewrite failed: {e}")
+        # Fallback to local rewrite if Ollama is unavailable
+        return f"Tactical Brief: {headline}"
+
     async def route_article(self, article_data: Dict[str, Any]) -> Tuple[str, str]:
         title = article_data.get("title", "")
         content = article_data.get("content", "")
-        impact, dept = self.classify(title, content)
-        article_data["impact_level"] = impact
-        article_data["department"] = dept
-        return impact, dept
+        cc = article_data.get("country_code", "")
+        
+        intel = await self.extract_intelligence(title, content, cc)
+        
+        # Override original placeholder summaries and headlines with structured, clean data
+        article_data["title"] = intel["title"]
+        
+        # Generate the Tactical Brief using Ollama
+        from backend.app.services.ingestion import ISO_COUNTRIES
+        country_name = ISO_COUNTRIES.get(cc, cc)
+        tactical_brief = await self.rewrite_headline_to_tactical_brief(intel["title"], country_name)
+        article_data["headline"] = tactical_brief
+        
+        article_data["summary"] = intel["tactical_summary"]
+        article_data["impact_level"] = intel["impact_level"]
+        article_data["department"] = intel["department"]
+        article_data["sector"] = intel["sector"]
+        article_data["entities"] = intel["entities"]
+        article_data["action_type"] = intel["action_type"]
+        
+        return intel["impact_level"], intel["department"]
+
 
     async def is_duplicate(self, db: AsyncSession, article: Dict[str, Any]) -> bool:
         url = article.get("url")
@@ -351,10 +731,34 @@ class ImpactClassifier:
         try:
             stmt = select(Article.id).where(Article.url == url)
             res = await db.execute(stmt)
-            return res.scalar_one_or_none() is not None
+            if res.scalar_one_or_none() is not None:
+                return True
         except Exception as e:
             logger.warning(f"[Classifier] DB duplicate check failed: {e}")
-            return False
+
+        # 3. Database-level Fuzzy Title Deduplication Check (last 24 hours)
+        title = article.get("title")
+        if title:
+            try:
+                from datetime import datetime, timezone, timedelta
+                import difflib
+                one_day_ago = datetime.now(timezone.utc) - timedelta(days=1)
+                
+                # Fetch recent titles from the database
+                stmt = select(Article.title).where(Article.published_at >= one_day_ago)
+                res = await db.execute(stmt)
+                recent_titles = res.scalars().all()
+                
+                normalized_title = "".join(c for c in title.lower() if c.isalnum())
+                for r_title in recent_titles:
+                    r_norm = "".join(c for c in r_title.lower() if c.isalnum())
+                    if normalized_title == r_norm or difflib.SequenceMatcher(None, title.lower(), r_title.lower()).ratio() > 0.80:
+                        logger.info(f"[Classifier] Dropping fuzzy title duplicate in DB: '{title}' matched '{r_title}'")
+                        return True
+            except Exception as e:
+                logger.warning(f"[Classifier] Fuzzy title duplicate check failed: {e}")
+
+        return False
 
     async def _publish_realtime(self, payload: Dict[str, Any]) -> None:
         memory_stream.publish(payload)
@@ -377,10 +781,8 @@ class ImpactClassifier:
     ) -> int:
         if not embeddings:
             try:
-                transformer = get_transformer()
                 texts = [f"{art['title']} {art.get('summary', '') or art['content'][:300]}" for art in articles]
-                vectors = transformer.encode(texts, convert_to_numpy=True).tolist()
-                embeddings = [vec for vec in vectors]
+                embeddings = await get_embeddings_cached(texts)
             except Exception as e:
                 logger.error(f"[Classifier] Failed to compute batch embeddings: {e}")
                 embeddings = [None] * len(articles)
@@ -440,13 +842,74 @@ class ImpactClassifier:
                                 
                             ex_vec_norm = ex_vec / ex_norm
                             similarity = float(np.dot(cand_vec_norm, ex_vec_norm))
-                            if similarity > 0.92:
+                            if similarity > 0.86:
                                 near_dup_found = True
-                                current_conf = existing_art.confidence_score or 0.98
-                                existing_art.confidence_score = min(1.00, current_conf + 0.05)
-                                db.add(existing_art)
+                                
+                                # Lead Article Election
+                                def get_rep_priority(rep: str) -> int:
+                                    if rep == "Verified Source":
+                                        return 3
+                                    if rep == "Developing":
+                                        return 2
+                                    if rep == "Unverified":
+                                        return 1
+                                    return 0
+                                
+                                cand_pri = get_rep_priority(reputation)
+                                ex_pri = get_rep_priority(existing_art.source_reputation)
+                                
+                                # Prepare also_reported_by lists
+                                existing_also_reported_by = []
+                                if existing_art.also_reported_by:
+                                    try:
+                                        existing_also_reported_by = json.loads(existing_art.also_reported_by)
+                                        if not isinstance(existing_also_reported_by, list):
+                                            existing_also_reported_by = []
+                                    except Exception:
+                                        existing_also_reported_by = []
+                                
+                                if cand_pri > ex_pri:
+                                    # Candidate is elected as the lead article!
+                                    # Demote existing URL to also_reported_by
+                                    if existing_art.url not in existing_also_reported_by:
+                                        existing_also_reported_by.append(existing_art.url)
+                                        
+                                    # Update existing article row with candidate data
+                                    existing_art.title = article_data["title"]
+                                    existing_art.headline = article_data.get("headline") or article_data["title"]
+                                    existing_art.summary = article_data.get("summary")
+                                    existing_art.content = article_data["content"]
+                                    existing_art.url = article_data["url"]
+                                    existing_art.source = source
+                                    existing_art.source_reputation = reputation
+                                    existing_art.embedding = json.dumps(cand_embedding) if isinstance(existing_art.embedding, str) else cand_embedding
+                                    existing_art.sector = article_data.get("sector")
+                                    existing_art.entities = json.dumps(article_data.get("entities") or [])
+                                    existing_art.action_type = article_data.get("action_type")
+                                    
+                                    # Boost confidence
+                                    current_conf = existing_art.confidence_score or 0.98
+                                    existing_art.confidence_score = min(1.00, current_conf + 0.05)
+                                    existing_art.also_reported_by = json.dumps(existing_also_reported_by)
+                                    
+                                    db.add(existing_art)
+                                    logger.info(f"[Classifier] Near-duplicate detected. New candidate {article_data['url']} elected as lead. Old lead {existing_art.url} demoted to also_reported_by list.")
+                                else:
+                                    # Existing remains lead article
+                                    # Append candidate URL to also_reported_by
+                                    if article_data["url"] not in existing_also_reported_by:
+                                        existing_also_reported_by.append(article_data["url"])
+                                        
+                                    existing_art.also_reported_by = json.dumps(existing_also_reported_by)
+                                    
+                                    # Boost confidence
+                                    current_conf = existing_art.confidence_score or 0.98
+                                    existing_art.confidence_score = min(1.00, current_conf + 0.05)
+                                    
+                                    db.add(existing_art)
+                                    logger.info(f"[Classifier] Near-duplicate detected. Existing lead {existing_art.url} remains. New candidate {article_data['url']} appended to also_reported_by list.")
+                                
                                 metrics.state.dedup_near_duplicate_dropped_total += 1
-                                logger.info(f"[Classifier] Near-duplicate dropped. URL: {article_data['url']}. Boosted existing confidence.")
                                 break
                 except Exception as ex_err:
                     logger.error(f"[Classifier] Near-duplicate check error: {ex_err}")
@@ -469,6 +932,10 @@ class ImpactClassifier:
                     "department": dept,
                     "source_reputation": reputation,
                     "confidence_score": confidence,
+                    "sector": article_data.get("sector"),
+                    "entities": article_data.get("entities") or [],
+                    "action_type": article_data.get("action_type"),
+                    "also_reported_by": article_data.get("also_reported_by") or []
                 }
             )
 
@@ -478,6 +945,10 @@ class ImpactClassifier:
                 summary_text = content_text.strip()[:180] + "..." if len(content_text.strip()) > 180 else content_text.strip()
             if not summary_text:
                 summary_text = "Tactical intelligence briefing restricted."
+
+            # Build row
+            entities_json = json.dumps(article_data.get("entities") or [])
+            also_rep_json = json.dumps(article_data.get("also_reported_by") or [])
 
             rows.append(
                 Article(
@@ -494,8 +965,13 @@ class ImpactClassifier:
                     embedding=(cand_embedding if cand_embedding else None),
                     source_reputation=reputation,
                     confidence_score=confidence,
+                    sector=article_data.get("sector"),
+                    entities=entities_json,
+                    action_type=article_data.get("action_type"),
+                    also_reported_by=also_rep_json,
                 )
             )
+
 
         if rows:
             # Remove any records that already exist in the database by URL to avoid batch integrity errors.
@@ -550,6 +1026,20 @@ async def classify_and_store_batch(
         if embeddings:
             unique_embeddings.append(embeddings[index] if index < len(embeddings) else None)
 
+    # Phase 1: Full-Text scraping for unique articles
+    if unique_articles:
+        import httpx
+        from backend.app.services.ingestion import scrape_full_text
+        try:
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+                scrape_tasks = [scrape_full_text(client, art.get("url")) for art in unique_articles]
+                scraped_contents = await asyncio.gather(*scrape_tasks)
+            for idx, content in enumerate(scraped_contents):
+                if content:
+                    unique_articles[idx]["content"] = content
+        except Exception as e:
+            logger.error(f"[Classifier] Full-text scraping error: {e}")
+
     high_impact = await classifier.persist_high_impact_batch(
         db,
         unique_articles,
@@ -563,3 +1053,4 @@ async def classify_and_store_batch(
         "streamed": streamed,
         "duplicates": skipped_duplicates,
     }
+

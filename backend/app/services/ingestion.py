@@ -83,6 +83,68 @@ class CircuitState:
 SOURCE_BREAKERS: Dict[str, CircuitState] = {}
 
 
+def sanitize_article_text(text: str) -> str:
+    if not text:
+        return ""
+    # Remove lines matching common boilerplate patterns (case-insensitive)
+    lines = text.split("\n")
+    cleaned_lines = []
+    boilerplate_patterns = [
+        r"sign up for (our )?newsletter",
+        r"subscribe to (our )?newsletter",
+        r"read more:",
+        r"follow us on",
+        r"copyright \u00a9",
+        r"all rights reserved",
+        r"contributed to this report",
+        r"reporting by",
+        r"editing by",
+        r"click here to",
+    ]
+    for line in lines:
+        line_stripped = line.strip()
+        if not line_stripped:
+            continue
+        line_lower = line_stripped.lower()
+        if any(re.search(pat, line_lower) for pat in boilerplate_patterns):
+            continue
+        cleaned_lines.append(line_stripped)
+        
+    text = "\n".join(cleaned_lines)
+    
+    # Strip wire service prefixes at the beginning of the text, e.g. "REUTERS -", "AP -", "NEW DELHI (Reuters) -"
+    wire_pattern = r"^\s*(?:[A-Z\s]+(?:\([A-Z\s,]+\))?\s*[-—]\s*|[A-Z\s]+(?:\([A-Z\s,]+\))?\s*-\s*|[A-Z\s]+\s*:\s*)"
+    text = re.sub(wire_pattern, "", text, count=1)
+    
+    return text.strip()
+
+
+async def scrape_full_text(client: httpx.AsyncClient, url: str) -> str:
+    if not url or not (url.startswith("http://") or url.startswith("https://")):
+        return ""
+    import trafilatura
+    try:
+        # Fetch HTML asynchronously with realistic User-Agent
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        response = await client.get(url, timeout=10.0, headers=headers, follow_redirects=True)
+        if response.status_code == 200:
+            # Extract main text using trafilatura
+            text = trafilatura.extract(response.text)
+            if text:
+                cleaned = sanitize_article_text(text)
+                # Keep first 1,500 words
+                words = cleaned.split()
+                if len(words) > 1500:
+                    cleaned = " ".join(words[:1500])
+                return cleaned
+    except Exception as e:
+        logger.debug(f"[Ingestion] Failed to scrape full text from {url}: {e}")
+    return ""
+
+
+
 def encode_query(query: str) -> str:
     return quote_plus(query)
 
@@ -195,6 +257,34 @@ def _normalize_gdelt_record(article: Dict[str, Any], country_code: str, country_
     }
 
 
+async def notify_circuit_breaker(source_name: str, action: str, reason: str):
+    """
+    Publishes a circuit breaker state change to Redis 'live_stream' channel
+    so that WebSocket clients are instantly notified.
+    """
+    payload = {
+        "type": "mesh_status",
+        "status": "degraded_mesh" if action == "tripped" else "normal",
+        "source": source_name,
+        "action": action,
+        "reason": reason,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    
+    try:
+        from backend.app.services.classifier import memory_stream
+        memory_stream.publish(payload)
+    except Exception:
+        pass
+        
+    try:
+        import redis.asyncio as aioredis
+        redis_conn = aioredis.from_url(settings.redis_url, decode_responses=True)
+        await redis_conn.publish("live_stream", json.dumps(payload))
+    except Exception as e:
+        logger.debug("[Ingestion] Redis breaker notification failed: %s", e)
+
+
 async def _get_with_retry(client: httpx.AsyncClient, url: str, *, source_name: str, breaker: CircuitState, params: Optional[dict] = None, headers: Optional[dict] = None) -> Optional[httpx.Response]:
     if not breaker.allow():
         return None
@@ -207,24 +297,38 @@ async def _get_with_retry(client: httpx.AsyncClient, url: str, *, source_name: s
                 logger.warning("[Ingestion] %s key unauthorized/forbidden (HTTP %d). Tripping circuit breaker for 30m.", source_name, response.status_code)
                 breaker.failures = 3
                 breaker.open_until = asyncio.get_event_loop().time() + 1800  # 30 minutes cooldown
+                await notify_circuit_breaker(source_name, "tripped", f"HTTP {response.status_code} Unauthorized")
                 return response
             if response.status_code == 429 or 500 <= response.status_code < 600:
                 raise httpx.HTTPStatusError("retryable status", request=response.request, response=response)
+            
+            # Reset and notify recovery if previously tripped
+            was_tripped = breaker.failures >= 3
             breaker.reset()
+            if was_tripped:
+                await notify_circuit_breaker(source_name, "recovered", "Requests succeeded")
+                
             return response
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
             logger.info("[Ingestion] %s connection/DNS failure: %s. Tripping circuit breaker for 5m.", source_name, exc)
             breaker.failures = 3
             breaker.open_until = asyncio.get_event_loop().time() + 300  # 5 minutes cooldown
+            await notify_circuit_breaker(source_name, "tripped", "Connection/DNS Failure")
             return None
         except Exception as exc:
             logger.info("[Ingestion] %s request failed (attempt %s/%s): %s", source_name, attempt, settings.request_retry_count, exc)
+            
+            was_tripped_before = breaker.failures >= 3
             breaker.record_failure(settings.request_backoff_max_seconds)
+            if breaker.failures >= 3 and not was_tripped_before:
+                await notify_circuit_breaker(source_name, "tripped", "Max Retries Exceeded")
+                
             if attempt == settings.request_retry_count:
                 return None
             await asyncio.sleep(min(delay, settings.request_backoff_max_seconds))
             delay *= 2
     return None
+
 
 
 def _normalize_api_article(article: Dict[str, Any], country_code: str, country_name: str, source_label: str) -> Dict[str, Any]:
@@ -260,8 +364,18 @@ def _normalize_api_article(article: Dict[str, Any], country_code: str, country_n
 
 
 def _search_query(country_name: str) -> str:
-    # Expanded query supporting Military, Economic, Political, and Social sectors
-    return f"{country_name} conflict OR security OR border OR military OR diplomatic OR economy OR summit OR trade OR protest OR crisis OR social"
+    # Sub-regional sectors/geography terms
+    sectors = "LAC OR LOC OR Galwan OR Doklam OR Depsang OR Arunachal OR Kashmir OR Gwadar OR \"Chumbi Valley\" OR \"Siliguri Corridor\""
+    # Tactical event terms
+    events = "\"airspace violation\" OR \"infrastructure development\" OR \"troop buildup\" OR \"radar installation\" OR \"convoy movement\" OR \"uncrewed aerial vehicle\" OR UAV OR drone OR military OR border"
+    
+    # China, Pakistan, India
+    if country_name in ("China", "Pakistan", "India"):
+        return f'("{country_name}") AND ({sectors} OR {events})'
+    
+    # Fallback for other countries
+    return f'"{country_name}" AND (conflict OR security OR border OR military OR diplomatic OR infrastructure OR UAV OR drone OR protest)'
+
 
 
 async def fetch_newsapi_feed(client: httpx.AsyncClient, country_code: str, country_name: str, limit: int, breaker: CircuitState) -> List[Dict[str, Any]]:
@@ -496,56 +610,92 @@ async def fetch_bing_news_feed(client: httpx.AsyncClient, country_code: str, cou
 
 async def _fetch_all_news_sources(client: httpx.AsyncClient, country_code: str, country_name: str, limit: int) -> List[Dict[str, Any]]:
     source_limit = max(limit, 10)
-    sources = [
+    import difflib
+    
+    all_articles: List[Dict[str, Any]] = []
+    seen_urls: set[str] = set()
+
+    def add_unique_articles(articles_list):
+        for article in articles_list:
+            if not article.get("title") or not article.get("url"):
+                continue
+            url = article["url"]
+            title = article["title"]
+            if url in seen_urls:
+                continue
+                
+            # Fuzzy title match
+            is_dup = False
+            norm_title = "".join(c for c in title.lower() if c.isalnum())
+            for accepted in all_articles:
+                acc_title = accepted.get("title", "")
+                acc_norm = "".join(c for c in acc_title.lower() if c.isalnum())
+                if norm_title == acc_norm or difflib.SequenceMatcher(None, title.lower(), acc_title.lower()).ratio() > 0.80:
+                    is_dup = True
+                    break
+            if not is_dup:
+                seen_urls.add(url)
+                all_articles.append(article)
+
+    # 1. Fetch Primary Sources first (Newscatcher and NewsData) for speed
+    primary_sources = []
+    if settings.newscatcher_api_key:
+        primary_sources.append((fetch_newscatcher_feed, "Newscatcher"))
+    if settings.newsdata_api_key:
+        primary_sources.append((fetch_newsdata_feed, "NewsData"))
+        
+    if primary_sources:
+        primary_tasks = [
+            fetch_func(client, country_code, country_name, source_limit, SOURCE_BREAKERS.setdefault(name, CircuitState()))
+            for fetch_func, name in primary_sources
+        ]
+        results = await asyncio.gather(*primary_tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, list):
+                add_unique_articles(result)
+
+    # If we got enough articles from primary sources, return them immediately! (Very fast)
+    if len(all_articles) >= limit:
+        return all_articles[:limit]
+
+    # 2. Fetch Fallback Sources (including NewsAPI) only if primary sources did not yield enough articles
+    fallback_sources = [
         (fetch_newsapi_feed, "NewsAPI"),
         (fetch_gnews_feed, "GNews"),
-        (fetch_newsdata_feed, "NewsData"),
         (fetch_worldnews_feed, "WorldNewsAPI"),
         (fetch_finnhub_feed, "Finnhub"),
         (fetch_currents_feed, "Currents"),
         (fetch_thenews_feed, "TheNews"),
         (fetch_mediastack_feed, "Mediastack"),
-        (fetch_newscatcher_feed, "Newscatcher"),
         (fetch_bing_news_feed, "BingNews"),
     ]
-    tasks = [
+    
+    fallback_tasks = [
         fetch_func(client, country_code, country_name, source_limit, SOURCE_BREAKERS.setdefault(name, CircuitState()))
-        for fetch_func, name in sources
+        for fetch_func, name in fallback_sources
     ]
+    
+    if fallback_tasks:
+        results = await asyncio.gather(*fallback_tasks, return_exceptions=True)
+        for result in results:
+            if isinstance(result, list):
+                add_unique_articles(result)
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    all_articles: List[Dict[str, Any]] = []
-    seen_urls: set[str] = set()
-    seen_titles: set[str] = set()
-
-    for result in results:
-        if isinstance(result, list):
-            for article in result:
-                if not article["url"]:
-                    title_hash = hashlib.sha256(article["title"].encode("utf-8")).hexdigest()
-                    if title_hash in seen_titles:
-                        continue
-                    seen_titles.add(title_hash)
-                elif article["url"] in seen_urls:
-                    continue
-                else:
-                    seen_urls.add(article["url"])
-
-                all_articles.append(article)
-                if len(all_articles) >= limit:
-                    return all_articles
-
-    return all_articles
+    return all_articles[:limit]
 
 
 async def fetch_rss_feed(client: httpx.AsyncClient, country_code: str, country_name: str, budget: int, breaker: CircuitState) -> List[Dict[str, Any]]:
     priority = _country_priority(country_code)
+    sectors = "LAC OR LOC OR Galwan OR Doklam OR Depsang OR Arunachal OR Kashmir OR Gwadar OR \"Chumbi Valley\" OR \"Siliguri Corridor\""
+    events = "\"airspace violation\" OR \"infrastructure development\" OR \"troop buildup\" OR \"radar installation\" OR \"convoy movement\" OR \"uncrewed aerial vehicle\" OR UAV OR drone"
+    
     if priority in {"critical", "high"}:
-        query = f'"{country_name}" (border OR security OR conflict OR military OR defense OR geopolitical)'
+        query = f'"{country_name}" ({sectors} OR {events} OR border OR military OR defense OR conflict)'
     elif country_code in {"BT", "MV", "LK", "NP"}:
-        query = f'"{country_name}" (geopolitical OR relations OR security OR trade)'
+        query = f'"{country_name}" (geopolitical OR relations OR security OR trade OR port)'
     else:
         query = f'"{country_name}" (news OR politics OR economic)'
+
 
     url = f"https://news.google.com/rss/search?q={encode_query(query)}&hl=en-US&gl=US&ceid=US:en"
     response = await _get_with_retry(client, url, source_name="RSS", breaker=breaker)

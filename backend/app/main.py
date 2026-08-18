@@ -312,7 +312,65 @@ async def periodic_ingestion_loop():
 
         await asyncio.sleep(5 * 60)
 
+def format_entities_for_frontend(flat_entities) -> dict:
+    if not flat_entities:
+        return {
+            "countries": [],
+            "organizations": [],
+            "militaryUnits": [],
+            "weapons": [],
+            "people": []
+        }
+        
+    if isinstance(flat_entities, str):
+        try:
+            import json
+            flat_entities = json.loads(flat_entities)
+        except Exception:
+            flat_entities = []
+            
+    countries = []
+    organizations = []
+    military_units = []
+    weapons = []
+    people = []
+    
+    known_countries = {"China", "India", "Pakistan", "Afghanistan", "Bangladesh", "Myanmar", "Nepal", "Bhutan", "Sri Lanka", "Maldives", "US", "USA", "Russia"}
+    known_weapons = {"missile", "radar", "artillery", "carrier", "jet", "su-30mki", "uav", "drone", "frigate", "submarine", "tank", "destroyer"}
+    
+    for item in flat_entities:
+        if not item:
+            continue
+        item_str = str(item)
+        item_lower = item_str.lower()
+        if item_str in known_countries:
+            countries.append(item_str)
+        elif any(w in item_lower for w in known_weapons) or item_lower in {"j-20", "s-400", "rafale"}:
+            weapons.append(item_str)
+        elif any(k in item_lower for k in ["army", "navy", "force", "command", "theater", "division", "regiment", "pla", "iaf"]):
+            military_units.append(item_str)
+        elif any(org in item_lower for org in ["ministry", "agency", "government", "parliament", "un", "nato", "defense"]):
+            organizations.append(item_str)
+        else:
+            words = item_str.split()
+            if len(words) <= 3 and all(w[0].isupper() for w in words if w):
+                people.append(item_str)
+            else:
+                organizations.append(item_str)
+                
+    return {
+        "countries": countries,
+        "organizations": organizations,
+        "militaryUnits": military_units,
+        "weapons": weapons,
+        "people": people
+    }
+
+
 def data_to_signal(data: dict) -> dict:
+    if data.get("type") == "mesh_status":
+        return data
+
     country_code = data.get("country_code") or "GL"
     country_name = country_name_from_code(country_code)
     category = get_frontend_category(data.get("department"), data.get("title", ""), data.get("source", ""))
@@ -323,6 +381,13 @@ def data_to_signal(data: dict) -> dict:
     elif data.get("impact_level") == "Medium Impact":
         impact = "Medium"
         
+    try:
+        also_rep = data.get("also_reported_by") or []
+        if isinstance(also_rep, str):
+            also_rep = json.loads(also_rep)
+    except Exception:
+        also_rep = []
+
     return {
         "type": "signal",
         "country": country_name,
@@ -338,8 +403,13 @@ def data_to_signal(data: dict) -> dict:
             "url": data.get("url"),
             "verification_status": data.get("source_reputation") or "Verified Source",
             "confidence_score": data.get("confidence_score") or 0.98,
+            "entities": format_entities_for_frontend(data.get("entities")),
+            "location_name": data.get("sector") or f"{country_name} Frontier",
+            "intel_category": data.get("department") or "Military",
+            "also_reported_by": also_rep
         }
     }
+
 
 async def redis_listener_task():
     """
@@ -522,8 +592,17 @@ async def get_all_news(
             if category != "All":
                 filtered_articles = [article for article in filtered_articles if matches_category(article, category)]
  
-        signals = [
-            {
+        signals = []
+        for art in sorted(filtered_articles, key=lambda item: item.published_at, reverse=True):
+            if not (art.title and art.title.strip() and art.url and (art.url.startswith("http://") or art.url.startswith("https://")) and (art.summary or art.content or "").strip()):
+                continue
+                
+            try:
+                also_rep = json.loads(art.also_reported_by) if getattr(art, "also_reported_by", None) else []
+            except Exception:
+                also_rep = []
+                
+            signals.append({
                 "id": art.id,
                 "country": country,
                 "category": get_frontend_category(art.department, art.title, art.source),
@@ -535,10 +614,12 @@ async def get_all_news(
                 "url": art.url,
                 "verification_status": getattr(art, "source_reputation", None) or "Verified Source",
                 "confidence_score": getattr(art, "confidence_score", None) or 0.98,
-            }
-            for art in sorted(filtered_articles, key=lambda item: item.published_at, reverse=True)
-            if art.title and art.title.strip() and art.url and (art.url.startswith("http://") or art.url.startswith("https://")) and (art.summary or art.content or "").strip()
-        ]
+                "entities": format_entities_for_frontend(getattr(art, "entities", None)),
+                "location_name": getattr(art, "sector", None) or f"{country} Frontier",
+                "intel_category": art.department or "Military",
+                "also_reported_by": also_rep
+            })
+
  
         # Dynamic region & threat level resolution
         region = COUNTRY_REGIONS.get(country, "International Sector")
@@ -581,9 +662,9 @@ async def get_all_news(
             threat_level = base_threats.get(country, "Low")
  
         operational_summary = (
-            "STATUS: STABLE // NO NEW SIGNAL IN DETECTED WINDOW"
+            "The border is quiet. There are no new reports in this time period."
             if not signals else
-            f"Ingestion mesh verified. Detected {len(signals)} tactical and strategic signals in the selected window."
+            f"We found {len(signals)} new reports in this time period."
         )
  
         results[country] = {
@@ -670,8 +751,17 @@ async def get_specific_country_news(
             except Exception as e:
                 logger.error(f"Error fetching real-time news for {name} ({code}): {e}")
                 
-    db_signals = [
-        {
+    db_signals = []
+    for art in db_articles:
+        if not (art.title and art.title.strip() and art.url and (art.url.startswith("http://") or art.url.startswith("https://")) and (art.summary or art.content or "").strip()):
+            continue
+            
+        try:
+            also_rep = json.loads(art.also_reported_by) if getattr(art, "also_reported_by", None) else []
+        except Exception:
+            also_rep = []
+            
+        db_signals.append({
             "id": art.id,
             "country": name,
             "category": get_frontend_category(art.department, art.title, art.source),
@@ -683,10 +773,12 @@ async def get_specific_country_news(
             "url": art.url,
             "verification_status": getattr(art, "source_reputation", None) or "Verified Source",
             "confidence_score": getattr(art, "confidence_score", None) or 0.98,
-        }
-        for art in db_articles
-        if art.title and art.title.strip() and art.url and (art.url.startswith("http://") or art.url.startswith("https://")) and (art.summary or art.content or "").strip()
-    ]
+            "entities": format_entities_for_frontend(getattr(art, "entities", None)),
+            "location_name": getattr(art, "sector", None) or f"{name} Frontier",
+            "intel_category": art.department or "Military",
+            "also_reported_by": also_rep
+        })
+
     
     # 4. Merge database and fetched signals, keeping unique URLs
     all_signals = []
@@ -710,7 +802,7 @@ async def get_specific_country_news(
         "region": "Global Sector",
         "threat_level": threat_level,
         "last_synced": now.isoformat(),
-        "operational_summary": f"Ingestion mesh verified. Detected {len(all_signals)} tactical signals for {name}." if all_signals else "STATUS: STABLE // NO NEW SIGNAL IN DETECTED WINDOW",
+        "operational_summary": f"We found {len(all_signals)} new reports for {name}." if all_signals else "The border is quiet. There are no new reports in this time period.",
         "signals": all_signals,
         "source_status": "normal"
     }

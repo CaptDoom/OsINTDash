@@ -57,14 +57,14 @@ def _local_summary(articles: List[Article], timeframe: str) -> str:
             by_dept[article.department] = []
         by_dept[article.department].append(article)
 
-    markdown = f"# Executive OSINT Briefing ({timeframe})\n"
-    markdown += f"Generated at: {_utc_now().isoformat()} (Heuristic Fallback)\n\n"
+    markdown = f"# Executive News Briefing ({timeframe})\n"
+    markdown += f"Generated at: {_utc_now().isoformat()} (Fallback Report)\n\n"
     for dept, grouped in by_dept.items():
         markdown += f"## {dept}\n"
         if not grouped:
             markdown += "*No high impact events recorded in this sector.*\n\n"
             continue
-        markdown += f"*Total verified alerts: {len(grouped)}*\n\n"
+        markdown += f"*Total verified updates: {len(grouped)}*\n\n"
         for index, article in enumerate(grouped[:5], start=1):
             summary_text = article.summary or article.content[:160] + "..."
             markdown += f"**{index}. [{article.title}]({article.url})**  \n"
@@ -138,10 +138,12 @@ async def call_ollama(prompt: str, system_instruction: str = "You are a senior a
 async def _compose_single_pass_summary(articles: List[Article], timeframe: str) -> str:
     article_context = "\n---\n".join(_article_block(article) for article in articles)
     prompt = f"""
-You are a senior geopolitical intelligence analyst.
-Write a cohesive executive briefing for the timeframe {timeframe}.
+You are an expert communicator who translates complex news into simple, plain English.
+Write a cohesive news and stability briefing for the timeframe {timeframe}.
+Use simple, everyday words. Avoid any jargon, such as "OSINT," "telemetry," "bilaterals," "strategic meetings," "tactical," "reconnaissance," "frontier," etc.
 Use the articles below as the entire source set.
 Return markdown with sections for Military & Defense, Economic & Financial, Social Affairs & Welfare, and Political & Diplomatic.
+Add a final section called "WHAT THIS MEANS FOR ORDINARY PEOPLE" explaining the impact in plain English.
 Keep it coherent and avoid repetitive phrasing.
 
 Source articles:
@@ -149,13 +151,13 @@ Source articles:
 """
     if settings.llm_provider == "ollama" and settings.ollama_base_url:
         try:
-            return await call_ollama(prompt, "You are a senior strategic intelligence officer.")
+            return await call_ollama(prompt, "You are a clear and simple writer.")
         except Exception as exc:
             logger.warning("[Summarizer] Ollama call failed, falling back: %s", exc)
     if settings.openai_api_key:
-        return await call_openai(prompt, "You are a senior strategic intelligence officer.")
+        return await call_openai(prompt, "You are a clear and simple writer.")
     if settings.google_api_key:
-        return await call_gemini(prompt, "You are a senior strategic intelligence officer.")
+        return await call_gemini(prompt, "You are a clear and simple writer.")
     return _local_summary(articles, timeframe)
 
 
@@ -172,21 +174,22 @@ async def _compose_recursive_summary(articles: List[Article], timeframe: str) ->
         return _local_summary(articles, timeframe)
 
     reduce_prompt = f"""
-Combine these partial intelligence summaries into a single executive briefing for {timeframe}.
-Preserve the strongest findings and remove repetition.
+Combine these partial news summaries into a single clear news and stability briefing for {timeframe}.
+Use simple, everyday words. Avoid any jargon, such as "OSINT," "telemetry," "bilaterals," "strategic meetings," "tactical," "reconnaissance," "frontier," etc.
+Preserve the main findings and remove repetition.
 
 Partial summaries:
 {chr(10).join(f'- {summary}' for summary in summaries)}
 """
     if settings.llm_provider == "ollama" and settings.ollama_base_url:
         try:
-            return await call_ollama(reduce_prompt, "You are a senior strategic intelligence officer.")
+            return await call_ollama(reduce_prompt, "You are a clear and simple writer.")
         except Exception as exc:
             logger.warning("[Summarizer] Ollama call failed, falling back: %s", exc)
     if settings.openai_api_key:
-        return await call_openai(reduce_prompt, "You are a senior strategic intelligence officer.")
+        return await call_openai(reduce_prompt, "You are a clear and simple writer.")
     if settings.google_api_key:
-        return await call_gemini(reduce_prompt, "You are a senior strategic intelligence officer.")
+        return await call_gemini(reduce_prompt, "You are a clear and simple writer.")
     return _local_summary(articles, timeframe)
 
 
@@ -299,37 +302,37 @@ async def generate_archive_field_summary(timeframe: str, department: Optional[st
     
     field_name = department or "All Fields"
     prompt = f"""
-    CLASSIFICATION: UNCLASSIFIED // OSINT FOR INTERNAL STRATCOM USE ONLY
-    REAL-TIME FIELD INTELLIGENCE SUMMARY
+    REAL-TIME NEWS FIELD SUMMARY
     
-    You are a Senior Geopolitical Analyst at STRATCOM.
-    Generate a concise, highly accurate, and real-time executive summary of the operational wirefeed for the field '{field_name}' over the timeframe '{timeframe}'.
+    You are an expert communicator who translates complex news into simple, plain English.
+    Generate a concise and clear summary of the news updates for the field '{field_name}' over the timeframe '{timeframe}'.
     
+    Use simple, everyday words. Avoid any jargon, such as "OSINT," "telemetry," "bilaterals," "strategic meetings," "tactical," "reconnaissance," "frontier," etc.
     Provide the summary based strictly on the following verified articles:
     -----------------------------------------------------
     {article_context}
     -----------------------------------------------------
     
     INSTRUCTIONS:
-    1. Summarize the key geopolitical developments, actions, and risks.
-    2. Keep the summary concise, factual, and direct. Avoid any introductory or concluding pleasantries, greetings, or conversational filler.
+    1. Summarize the key updates and developments in simple English.
+    2. Keep the summary concise, factual, and direct. Avoid conversational filler.
     3. Organize into:
-       - **1. TARGET DEVELOPMENTS**: Bulleted list of key actions or developments.
-       - **2. CRITICAL RISK AREAS**: Analysis of stability impact.
-    4. Keep the total output under 250 words. Ensure high signal-to-noise ratio.
+       - **1. KEY DEVELOPMENTS**: Bulleted list of key developments.
+       - **2. PUBLIC SAFETY & STABILITY**: Analysis of the impact on everyday people.
+    4. Keep the total output under 250 words.
     """
     
     summary = ""
     if settings.llm_provider == "ollama" and settings.ollama_base_url:
         try:
-            summary = await call_ollama(prompt, "You are a senior strategic intelligence officer.")
+            summary = await call_ollama(prompt, "You are a clear and simple writer.")
         except Exception as exc:
             logger.warning("[Summarizer] Ollama call failed, falling back: %s", exc)
     if not summary:
         if settings.openai_api_key:
-            summary = await call_openai(prompt, "You are a senior strategic intelligence officer.")
+            summary = await call_openai(prompt, "You are a clear and simple writer.")
         elif settings.google_api_key:
-            summary = await call_gemini(prompt, "You are a senior strategic intelligence officer.")
+            summary = await call_gemini(prompt, "You are a clear and simple writer.")
         else:
             summary = _local_summary(articles, timeframe)
             

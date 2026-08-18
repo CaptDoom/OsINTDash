@@ -52,6 +52,13 @@ class TestClassifier(unittest.TestCase):
         impact, dept = self.classifier.classify(title, content)
         self.assertEqual(impact, "Normal Impact")
 
+    def test_fuzzy_title_similarity_logic(self):
+        import difflib
+        title1 = "Troop movement detected near Tawang Sector"
+        title2 = "Troop movements detected near Tawang Sectors"
+        ratio = difflib.SequenceMatcher(None, title1.lower(), title2.lower()).ratio()
+        self.assertTrue(ratio > 0.80)
+
 class TestIngestionHelpers(unittest.TestCase):
     def test_parse_datetime(self):
         # Valid ISO datetime
@@ -85,7 +92,7 @@ class TestSummarizerFallback(unittest.TestCase):
             department="Military & Defense"
         )
         summary = _local_summary([article], "24h")
-        self.assertIn("Executive OSINT Briefing", summary)
+        self.assertIn("Executive News Briefing", summary)
         self.assertIn("Military & Defense", summary)
         self.assertIn("Border Radar Sweeps", summary)
 

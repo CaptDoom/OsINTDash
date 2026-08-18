@@ -69,6 +69,7 @@ type Signal = {
   trust?: TrustIndicator;
   isNew?: boolean;
   is_breaking?: boolean;
+  also_reported_by?: string[];
 };
 
 type CountryIntel = {
@@ -161,7 +162,121 @@ type CredentialSeed = {
   password: string;
 };
 
-const countries: Country[] = [
+const simplifyText = (text: string): string => {
+  if (!text) return '';
+  let clean = text;
+  clean = clean.replace(/\((Telemetry|Intel|OSINT|Security)\s+Alert\s*#\s*\d+\)/gi, '');
+  clean = clean.replace(/(Telemetry|Intel|OSINT|Security)\s+Alert\s*#\s*\d+/gi, '');
+  
+  const replacements: [RegExp, string][] = [
+    [/\bOSINT\b/gi, 'news reports'],
+    [/\btelemetry\b/gi, 'signals'],
+    [/\bbilaterals\b/gi, 'discussions'],
+    [/\bbilateral talks\b/gi, 'border talks'],
+    [/\bbilateral agreements\b/gi, 'trade deals'],
+    [/\bbilateral\b/gi, 'joint'],
+    [/\bstrategic meetings\b/gi, 'meetings'],
+    [/\bstrategic\b/gi, 'important'],
+    [/\bfrontier\b/gi, 'border'],
+    [/\bdemarcation lines?\b/gi, 'boundary'],
+    [/\bdemarcation\b/gi, 'border-marking'],
+    [/\bsecuritized\b/gi, 'guarded'],
+    [/\breconnaissance\b/gi, 'patrols'],
+    [/\bsurveillance\b/gi, 'monitoring'],
+    [/\bhigh-readiness posture\b/gi, 'prepared state'],
+    [/\btactical\b/gi, 'local'],
+    [/\boperational\b/gi, 'active'],
+    [/\blogistics\b/gi, 'supplies'],
+    [/\binfrastructure\b/gi, 'buildings and roads'],
+    [/\bdemographics shifts\b/gi, 'population changes'],
+    [/\bsemiconductor\b/gi, 'computer chip'],
+    [/\bcontraband\b/gi, 'illegal goods'],
+    [/\briverine\b/gi, 'river'],
+    [/\belectro-optical\b/gi, 'camera'],
+    [/\bnon-state military coordination\b/gi, 'armed groups cooperation'],
+    [/\bsovereignty shifts\b/gi, 'control changes'],
+    [/\bresource extraction hubs\b/gi, 'mining areas'],
+    [/\bboundary policing\b/gi, 'border guarding'],
+    [/\bhydro projects\b/gi, 'water power plants'],
+    [/\bAUKUS framework\b/gi, 'defense alliance'],
+    [/\bsignal spoofing\b/gi, 'signal faking'],
+    [/\bcyber intrusions\b/gi, 'hacking'],
+    [/\bdossier\b/gi, 'report'],
+    [/\bdegraded_mesh\b/gi, 'slow network'],
+    [/\bingestion mesh\b/gi, 'system'],
+    [/\bPLA deployments\b/gi, 'troop movements'],
+    [/\bPLA\b/gi, 'military'],
+  ];
+
+  for (const [pattern, replacement] of replacements) {
+    clean = clean.replace(pattern, replacement);
+  }
+  
+  clean = clean.replace(/\s+/g, ' ').trim();
+  return clean;
+};
+
+const generateBrief = (category: string, _country: string, news: string): string => {
+  const lowerNews = news.toLowerCase();
+  
+  if (category === 'Military') {
+    if (lowerNews.includes('drill') || lowerNews.includes('practice') || lowerNews.includes('exercise')) {
+      return "This is a routine training exercise and does not signal an immediate threat of conflict.";
+    }
+    return "Increased guard activity helps prevent unexpected border incidents and keeps local areas peaceful.";
+  }
+  if (category === 'Economic') {
+    if (lowerNews.includes('price') || lowerNews.includes('cost') || lowerNews.includes('drop') || lowerNews.includes('lower') || lowerNews.includes('cheaper')) {
+      return "Families can save money on their daily shopping bills.";
+    }
+    if (lowerNews.includes('trade') || lowerNews.includes('port') || lowerNews.includes('highway') || lowerNews.includes('road')) {
+      return "Smoother trade routes will make everyday goods cheaper and more available.";
+    }
+    return "Economic stability ensures steady jobs and reliable supplies of goods for local markets.";
+  }
+  if (category === 'Political') {
+    if (lowerNews.includes('agree') || lowerNews.includes('talk') || lowerNews.includes('meet') || lowerNews.includes('sign')) {
+      return "Better cooperation between leaders means a lower chance of sudden border shutdowns.";
+    }
+    return "Political stability helps the government focus on improving services for the community.";
+  }
+  if (category === 'Social') {
+    if (lowerNews.includes('cleanup') || lowerNews.includes('community') || lowerNews.includes('volunteer')) {
+      return "Cleaner streets mean better health and a nicer place to live for everyone.";
+    }
+    if (lowerNews.includes('aid') || lowerNews.includes('resettlement') || lowerNews.includes('welfare') || lowerNews.includes('food')) {
+      return "Local families will receive better health support and community assistance.";
+    }
+    return "Stronger community ties help neighbors support each other in daily life.";
+  }
+  if (category === 'Tech') {
+    if (lowerNews.includes('safety') || lowerNews.includes('rule') || lowerNews.includes('ai')) {
+      return "This protects your personal data and ensures tech tools do not make dangerous errors.";
+    }
+    if (lowerNews.includes('cyber') || lowerNews.includes('hack') || lowerNews.includes('security') || lowerNews.includes('protect')) {
+      return "Your digital services, banking, and communications remain safe from hackers.";
+    }
+    return "New technology makes communication faster and daily online tasks easier.";
+  }
+  
+  return "This update shows steady development, helping keep the region stable and safe for everyone.";
+};
+
+const getFormattedNewsItem = (signal: Signal) => {
+  const cleanHeadline = simplifyText(signal.headline);
+  const cleanNews = simplifyText(signal.summary || signal.headline);
+  const timeLabel = formatRelativeTime(signal.timestamp);
+  const brief = generateBrief(signal.category, signal.country, cleanNews);
+  
+  return {
+    headline: cleanHeadline,
+    time: timeLabel,
+    news: cleanNews,
+    brief: brief
+  };
+};
+
+const rawCountries: Country[] = [
   {
     id: 'china',
     name: 'China',
@@ -564,7 +679,7 @@ const countries: Country[] = [
   {
     id: 'global',
     name: 'Global',
-    capital: 'OSINT Grid',
+    capital: 'News Grid',
     borderKm: 0,
     region: 'Strategic Space',
     coordinates: 'AI Ingest Mesh',
@@ -581,6 +696,24 @@ const countries: Country[] = [
     },
   },
 ];
+
+const countries: Country[] = rawCountries.map(c => {
+  const categories: any = {};
+  for (const cat in c.categories) {
+    const key = cat as Category;
+    categories[key] = {
+      title: simplifyText(c.categories[key].title),
+      summary: simplifyText(c.categories[key].summary),
+      impact: c.categories[key].impact,
+      signal: simplifyText(c.categories[key].signal)
+    };
+  }
+  return {
+    ...c,
+    summary: simplifyText(c.summary),
+    categories
+  };
+});
 
 const categories: Category[] = ['Political', 'Social', 'Tech', 'Economic', 'Military'];
 const trustLevels: TrustIndicator[] = ['Verified Source', 'Developing', 'Unverified', 'Rumor'];
@@ -1107,6 +1240,18 @@ function App() {
                 };
               });
             }
+          } else if (msg.type === 'mesh_status') {
+            console.log('[WS] Ingestion mesh status update received:', msg);
+            setNewsFeed((prev) => {
+              const updated = { ...prev };
+              for (const country in updated) {
+                updated[country] = {
+                  ...updated[country],
+                  source_status: msg.status // 'degraded_mesh' or 'normal'
+                };
+              }
+              return updated;
+            });
           }
         } catch (e) {
           console.warn('[WS] Telemetry parser error:', e);
@@ -1372,39 +1517,39 @@ function App() {
       
       const templates: Record<Category, string[]> = {
         Military: [
-          "Strategic deployment of border patrol sweeps near {country} frontier",
-          "Tactical readiness drills and defensive posture check completed near {country}",
-          "Border commanders verify communications protocol upgrades with {country}",
-          "Joint military command coordination verified near {country} demarcation lines",
-          "High-readiness patrol operations sweep security zones near {country} line"
+          "Border guards set up new watch points near {country} to keep people safe",
+          "Soldiers complete regular safety practice drills near the boundary with {country}",
+          "Local officers check and update communication systems with {country} counterparts",
+          "Command teams work together to share border patrol duties near the {country} border",
+          "Safety patrol teams monitor the crossing lanes near {country} to check security"
         ],
         Economic: [
-          "Commercial trade route construction expands regional transit with {country}",
-          "New bilateral logistical investment signed to fund hubs with {country}",
-          "Customs checkpoint clearance facilities upgrade capacity with {country}",
-          "Bilateral border trade agreements minimize tariff friction with {country}",
-          "Cross-border transit network infrastructure projects completed near {country}"
+          "Work starts on a new road to improve travel and commercial trade with {country}",
+          "A joint funding agreement is signed to build storage hubs with {country}",
+          "Customs checkpoint lanes are expanded to help goods move faster with {country}",
+          "New trade guidelines help local shops sell products across borders with {country}",
+          "Construction projects are finished on connecting roads near {country}"
         ],
         Social: [
-          "Humanitarian aid stations established to assist crossing points with {country}",
-          "Local resettlement and frontier community welfare programs expand near {country}",
-          "Emergency supply distribution sweeps verify secure conditions near {country}",
-          "Cultural exchange initiatives foster cooperative relations with {country}",
-          "Frontier health and safety centers expand near transition corridors with {country}"
+          "Medical checkup camps are set up to help travelers at crossing points with {country}",
+          "Community programs are expanded to build homes near the {country} border",
+          "Food and water supplies are delivered to remote communities near the {country} border",
+          "New cultural friendship programs bring communities closer with {country}",
+          "Health centers open new rooms to serve families near the {country} corridor"
         ],
         Political: [
-          "Bilateral talks resolve checkpoint security coordination with {country}",
-          "Diplomatic delegations sign memorandum for shared border rules with {country}",
-          "High-level security summit coordinates joint protocols with {country}",
-          "Demarcation agreement updates verified during meetings with {country}",
-          "Special envoys schedule peace coordination conferences with {country}"
+          "Local leaders agree on how to run checkpoints safely with {country}",
+          "Representatives sign a cooperative plan for shared border rules with {country}",
+          "A regional meeting of officers agrees on shared border security rules with {country}",
+          "Maps and border marking details are updated during friendly talks with {country}",
+          "Envoys set dates for peaceful border discussions with {country}"
         ],
         Tech: [
-          "Cyber security center shields infrastructure networks near {country}",
-          "Satellite signal telemetry upgrades improve monitoring near {country}",
-          "AI-driven tactical analysis systems deployed near {country} border",
-          "Telecom network signal coverage increases near strategic sectors with {country}",
-          "Electronic security jammer arrays verified along the {country} frontier"
+          "Computer protection systems block cyber attacks targeting local networks near {country}",
+          "Communication stations get new equipment to track signals near the {country} border",
+          "New software tools are used to monitor traffic trends near the {country} border",
+          "Mobile phone network coverage is improved along routes near {country}",
+          "Signal blockers are tested to stop unauthorized communications near the {country} border"
         ]
       };
       
@@ -1412,7 +1557,7 @@ function App() {
       
       for (let i = 0; i < needed; i++) {
         const template = categoryTemplates[i % categoryTemplates.length];
-        const headline = template.replace('{country}', selectedCountry.name) + ` (Telemetry Alert #${200 + i * 13})`;
+        const headline = template.replace('{country}', selectedCountry.name);
         const source = sources[i % sources.length];
         
         const urlMap: Record<string, string> = {
@@ -1437,7 +1582,7 @@ function App() {
           category: selectedCategory,
           impact: "High",
           headline: headline,
-          summary: `Factual OSINT telemetry signal indicating active ${selectedCategory.toLowerCase()} operations near the border. Surveillance networks report normal stability.`,
+          summary: `A new update reports standard activity for ${selectedCategory.toLowerCase()} sectors near the border. Local teams report that everything is peaceful and stable.`,
           source: source,
           timestamp: new Date(Date.now() - (i + 1) * 4 * 3600 * 1000).toISOString(),
           url: url,
@@ -1494,6 +1639,7 @@ function App() {
   };
 
   const latestNewsDetail = buildDetailedNewsText(effectiveLatestSignal);
+  void latestNewsDetail;
   const latestNewsAvailable = effectiveLatestSignal !== null;
   void latestNewsAvailable;
 
@@ -2443,7 +2589,7 @@ function App() {
                         : 'border-black/20 hover:bg-black/10'
                   }`}
                 >
-                  OSINT Archives
+                  News Archives
                 </button>
                 <button
                   onClick={() => {
@@ -2461,7 +2607,7 @@ function App() {
                         : 'border-black/20 hover:bg-black/10'
                   }`}
                 >
-                  OSINT AI Chatbot
+                  AI Stability Chatbot
                 </button>
                 <button
                   onClick={() => {
@@ -2979,56 +3125,50 @@ function App() {
                         ) : (
                           categoryNewsSignals.slice(0, 150).map((sig) => {
                             const isLive = (new Date().getTime() - new Date(sig.timestamp).getTime()) / 60000 < 60;
+                            const formatted = getFormattedNewsItem(sig);
                             return (
-                              <a
+                              <div
                                 key={sig.id}
-                                href={getSignalSourceUrl(sig)}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className={`border p-4 rounded flex flex-col gap-2 relative transition-colors block decoration-transparent hover:no-underline text-left ${
-                                  isDarkMode ? 'border-white/10 bg-white/5 hover:bg-white/10' : 'border-black/10 bg-black/5 hover:bg-black/10'
+                                className={`border p-4 rounded flex flex-col gap-2 relative transition-colors text-left ${
+                                  isDarkMode ? 'border-white/10 bg-white/5' : 'border-black/10 bg-black/5'
                                 }`}
                               >
                                 <div className="flex justify-between items-center text-[10px] font-mono">
                                   <span className="text-[#7bd0ff] font-bold uppercase flex items-center gap-0.5">
-                                    {sig.source} <span className="text-[8px]">↗</span>
+                                    {sig.source}
                                   </span>
                                   <span className="text-[#c6c6cd] opacity-75 flex items-center gap-1">
                                     {isLive && (
                                       <span className="inline-flex items-center gap-1 bg-[#22c55e]/20 text-[#22c55e] text-[8px] font-bold font-mono uppercase px-1 rounded animate-pulse">
-                                        <span className="w-1 h-1 rounded-full bg-[#22c55e]" />
+                                        <span className="w-1.5 h-1.5 rounded-full bg-[#22c55e]" />
                                         LIVE
                                       </span>
                                     )}
-                                    {formatRelativeTime(sig.timestamp)}
+                                    {formatted.time}
                                   </span>
                                 </div>
-                                
-                                <h4 className="text-sm font-bold text-[#d4e4fa] hover:text-[#7bd0ff] transition-colors leading-snug">
-                                  {sig.is_breaking && (
-                                    <span className="inline-block bg-[#ff3b30]/20 text-[#ff453a] text-[8px] font-bold font-mono uppercase px-1.5 py-0.5 border border-[#ff453a]/30 rounded animate-pulse mr-1.5">
-                                      [BREAKING]
-                                    </span>
-                                  )}
-                                  {sig.headline}
-                                </h4>
-                                
-                                <p className={`text-xs leading-relaxed ${isDarkMode ? 'text-white/70' : 'text-black/70'}`}>
-                                  {sig.summary || sig.headline}
-                                </p>
-                                
+                                <div className="space-y-1.5 text-xs text-[#d4e4fa]">
+                                  <div><strong className="text-[#7bd0ff] text-[9px] uppercase tracking-wider">Headline:</strong> {formatted.headline}</div>
+                                  <div><strong className="text-[#7bd0ff] text-[9px] uppercase tracking-wider">Time:</strong> {formatted.time}</div>
+                                  <div><strong className="text-[#7bd0ff] text-[9px] uppercase tracking-wider">The News:</strong> {formatted.news}</div>
+                                  <div><strong className="text-[#7bd0ff] text-[9px] uppercase tracking-wider">The Brief:</strong> {formatted.brief}</div>
+                                </div>
                                 <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[#45464d]/10 text-[10px] font-mono">
                                   <div className="flex items-center gap-2">
                                     <span className="text-[#4edea3]">{sig.verification_status || 'Verified Source'}</span>
-                                    <span className="text-[#c6c6cd]">Confidence {Math.round((sig.confidence_score ?? 0.98) * 100)}%</span>
                                   </div>
-                                  <span className={`font-bold px-1.5 py-0.5 rounded text-[9px] ${
-                                    sig.impact === 'High' ? 'bg-red-500/20 text-red-400' : 'bg-orange-500/20 text-orange-400'
-                                  }`}>
-                                    IMPACT: {sig.impact.toUpperCase()}
-                                  </span>
+                                  {sig.url && (
+                                    <a
+                                      href={getSignalSourceUrl(sig)}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="text-[#7bd0ff] underline"
+                                    >
+                                      Link ↗
+                                    </a>
+                                  )}
                                 </div>
-                              </a>
+                              </div>
                             );
                           })
                         )}
@@ -3045,7 +3185,7 @@ function App() {
                                 rel="noreferrer"
                                 className={`block rounded border px-3 py-2 text-sm ${isDarkMode ? 'border-[#ffcf6e]/50 bg-[#ffcf6e]/10 hover:bg-[#ffcf6e]/20' : 'border-[#8f5a00]/40 bg-[#fff1cc] hover:bg-[#ffe8b0]'}`}
                               >
-                                <div className="font-medium">{effectiveLatestSignal.headline}</div>
+                                <div className="font-medium">{simplifyText(effectiveLatestSignal.headline)}</div>
                                 <div className={`mt-1 text-xs ${isDarkMode ? 'text-[#ffcf6e]' : 'text-[#8f5a00]'}`}>
                                   Last recorded {selectedCategory.toLowerCase()} update. New signals will appear automatically when detected.
                                 </div>
@@ -3054,31 +3194,39 @@ function App() {
                           </div>
                         ) : (
                           pastNewsSignals.slice(0, 150).map((signal) => {
-                            const isLive = (new Date().getTime() - new Date(signal.timestamp).getTime()) / 60000 < 60;
+                            const formatted = getFormattedNewsItem(signal);
                             return (
-                              <a
+                              <div
                                 key={signal.id || signal.timestamp}
-                                href={getSignalSourceUrl(signal)}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className={`block rounded border px-3 py-2 text-sm ${isDarkMode ? 'border-white/20 bg-white/5 hover:bg-white/10' : 'border-black/20 bg-black/5 hover:bg-black/10'}`}
+                                className={`block rounded border p-3 text-xs text-[#d4e4fa] text-left ${isDarkMode ? 'border-white/20 bg-white/5' : 'border-black/20 bg-black/5'}`}
                               >
-                                <div className="font-medium text-left">{signal.headline}</div>
+                                <div className="space-y-1.5">
+                                  <div><strong className="text-[#7bd0ff] text-[9px] uppercase tracking-wider">Headline:</strong> {formatted.headline}</div>
+                                  <div><strong className="text-[#7bd0ff] text-[9px] uppercase tracking-wider">Time:</strong> {formatted.time}</div>
+                                  <div><strong className="text-[#7bd0ff] text-[9px] uppercase tracking-wider">The News:</strong> {formatted.news}</div>
+                                  <div><strong className="text-[#7bd0ff] text-[9px] uppercase tracking-wider">The Brief:</strong> {formatted.brief}</div>
+                                </div>
                                 <div className="flex justify-between items-center text-[10px] font-mono mt-1.5 uppercase">
                                   <span className={`flex items-center gap-0.5 ${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>
-                                    {signal.source} <span className="text-[8px]">↗</span>
+                                    {signal.source}
                                   </span>
-                                  <span className={`flex items-center gap-1 ${isDarkMode ? 'text-white/50' : 'text-black/50'}`}>
-                                    {isLive && (
-                                      <span className="inline-flex items-center gap-1 bg-[#22c55e]/20 text-[#22c55e] text-[8px] font-bold font-mono uppercase px-1 rounded animate-pulse">
-                                        <span className="w-1 h-1 rounded-full bg-[#22c55e]" />
-                                        LIVE
-                                      </span>
+                                  <div className="flex items-center gap-2">
+                                    {signal.url && (
+                                      <a
+                                        href={getSignalSourceUrl(signal)}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="text-[#7bd0ff] underline"
+                                      >
+                                        Link ↗
+                                      </a>
                                     )}
-                                    {formatRelativeTime(signal.timestamp)}
-                                  </span>
+                                    <span className={isDarkMode ? 'text-white/50' : 'text-black/50'}>
+                                      {formatted.time}
+                                    </span>
+                                  </div>
                                 </div>
-                              </a>
+                              </div>
                             );
                           })
                         )}
@@ -3477,7 +3625,7 @@ function App() {
               onClick={() => setIsScraperOpen(!isScraperOpen)}
               className="w-full text-left font-mono font-bold text-[10px] text-[#7bd0ff] flex justify-between items-center uppercase tracking-wider focus:outline-none"
             >
-              <span>🤖 AI OSINT Scraper</span>
+              <span>🤖 AI News Scraper</span>
               <span>{isScraperOpen ? '▲' : '▼'}</span>
             </button>
             
@@ -3750,8 +3898,22 @@ function App() {
                   </div>
 
                   {newsView === 'latest' ? (
-                    <div className="space-y-3">
-                      <p className="text-xs leading-relaxed text-[#c6c6cd]">{latestNewsDetail}</p>
+                    <div className="space-y-3 text-left">
+                      {effectiveLatestSignal ? (
+                        (() => {
+                          const formatted = getFormattedNewsItem(effectiveLatestSignal);
+                          return (
+                            <div className="space-y-2 border border-[#45464d]/40 rounded p-4 bg-[#0d1c2d]">
+                              <div><strong className="text-[#7bd0ff] uppercase tracking-wider text-[10px]">Headline:</strong> {formatted.headline}</div>
+                              <div><strong className="text-[#7bd0ff] uppercase tracking-wider text-[10px]">Time:</strong> {formatted.time}</div>
+                              <div><strong className="text-[#7bd0ff] uppercase tracking-wider text-[10px]">The News:</strong> {formatted.news}</div>
+                              <div><strong className="text-[#7bd0ff] uppercase tracking-wider text-[10px]">The Brief:</strong> {formatted.brief}</div>
+                            </div>
+                          );
+                        })()
+                      ) : (
+                        <p className="text-xs text-[#c6c6cd]">No fresh signal is available yet.</p>
+                      )}
                       {isUsingCategoryFallback && (
                         <p className="text-[10px] leading-relaxed text-[#fbbf24]">
                           This is the last recorded {selectedCategory.toLowerCase()} update for this country. It will be updated soon when a new event is detected.
@@ -3783,38 +3945,46 @@ function App() {
                               rel="noreferrer"
                               className="block rounded border border-[#fbbf24]/40 bg-[#fbbf24]/10 px-3 py-2 text-xs text-[#fbbf24] hover:border-[#fbbf24]/70"
                             >
-                              <div className="font-semibold text-[#d4e4fa]">{effectiveLatestSignal.headline}</div>
+                              <div className="font-semibold text-[#d4e4fa]">{simplifyText(effectiveLatestSignal.headline)}</div>
                               <div className="mt-1 text-[10px] uppercase tracking-wider">Last recorded {selectedCategory.toLowerCase()} update. New signals will appear automatically when detected.</div>
                             </a>
                           )}
                         </div>
                       ) : (
                         pastNewsSignals.slice(0, 150).map((signal) => {
-                          const isLive = (new Date().getTime() - new Date(signal.timestamp).getTime()) / 60000 < 60;
+                          const formatted = getFormattedNewsItem(signal);
                           return (
-                            <a
+                            <div
                               key={signal.id || signal.timestamp}
-                              href={getSignalSourceUrl(signal)}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="block rounded border border-[#45464d]/50 bg-[#0d1c2d] px-3 py-2 text-xs text-[#d4e4fa] hover:border-[#7bd0ff]/40 hover:bg-[#1c2b3c] text-left"
+                              className="block rounded border border-[#45464d]/50 bg-[#0d1c2d] p-3 text-xs text-[#d4e4fa] text-left font-sans"
                             >
-                              <div className="font-semibold">{signal.headline}</div>
-                              <div className="flex justify-between items-center text-[9px] font-mono mt-1.5 uppercase">
-                                <span className="text-[#7bd0ff] flex items-center gap-0.5">
-                                  {signal.source} <span className="text-[8px]">↗</span>
-                                </span>
-                                <span className="text-[#c6c6cd] flex items-center gap-1">
-                                  {isLive && (
-                                    <span className="inline-flex items-center gap-1 bg-[#22c55e]/20 text-[#22c55e] text-[8px] font-bold font-mono uppercase px-1 rounded animate-pulse">
-                                      <span className="w-1 h-1 rounded-full bg-[#22c55e]" />
-                                      LIVE
-                                    </span>
-                                  )}
-                                  {formatRelativeTime(signal.timestamp)}
-                                </span>
+                              <div className="space-y-1.5">
+                                <div><strong className="text-[#7bd0ff] text-[9px] uppercase tracking-wider">Headline:</strong> {formatted.headline}</div>
+                                <div><strong className="text-[#7bd0ff] text-[9px] uppercase tracking-wider">Time:</strong> {formatted.time}</div>
+                                <div><strong className="text-[#7bd0ff] text-[9px] uppercase tracking-wider">The News:</strong> {formatted.news}</div>
+                                <div><strong className="text-[#7bd0ff] text-[9px] uppercase tracking-wider">The Brief:</strong> {formatted.brief}</div>
                               </div>
-                            </a>
+                              <div className="flex justify-between items-center text-[9px] font-mono mt-1.5 uppercase border-t border-[#45464d]/20 pt-1.5">
+                                <span className="text-[#7bd0ff]">
+                                  {signal.source}
+                                </span>
+                                <div className="flex items-center gap-2">
+                                  {signal.url && (
+                                    <a
+                                      href={getSignalSourceUrl(signal)}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="text-[#7bd0ff] underline"
+                                    >
+                                      Link ↗
+                                    </a>
+                                  )}
+                                  <span className="text-[#c6c6cd]">
+                                    {formatted.time}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
                           );
                         })
                       )}
@@ -4159,6 +4329,22 @@ function App() {
                         </p>
                       </div>
                     )}
+                    {selectedDossierSignal.also_reported_by && selectedDossierSignal.also_reported_by.length > 0 && (
+                      <div className="bg-[#122131]/30 border border-[#45464d]/40 p-4 text-[11px] space-y-2">
+                        <p className="text-[9px] text-[#c6c6cd] uppercase">Consensus Sources</p>
+                        <div className="flex flex-col gap-1.5">
+                          {selectedDossierSignal.also_reported_by.map((url: string, index: number) => {
+                            let domain = url;
+                            try { domain = new URL(url).hostname.replace('www.', ''); } catch(e){}
+                            return (
+                              <a key={index} href={url} target="_blank" rel="noopener noreferrer" className="text-[#7bd0ff] hover:underline flex items-center gap-1 decoration-transparent text-left">
+                                <span className="material-symbols-outlined text-[10px] inline-block align-middle">link</span> <span className="inline-block align-middle">{domain} ↗</span>
+                              </a>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
                     <div className="flex flex-wrap gap-3 text-[11px] font-mono uppercase text-left">
                       <a href={getSignalSourceUrl(selectedDossierSignal)} target="_blank" rel="noopener noreferrer" className="text-[#7bd0ff] underline underline-offset-2 flex items-center gap-0.5">
                         Open source ↗
@@ -4370,35 +4556,35 @@ function ArchiveView() {
     
     const templates: Record<string, string[]> = {
       "Military & Defense": [
-        "Tactical patrol command verifies defensive preparedness along {country} border",
-        "Joint military maneuvers completed by frontier commands near {country}",
-        "Strategic defense divisions sweep boundary lines with {country}",
-        "Commanders check high-altitude monitoring installations near {country} front"
+        "Border guards verify safety preparedness along {country} border",
+        "Joint safety exercises completed by local commands near {country}",
+        "Defense divisions sweep boundary lines with {country}",
+        "Commanders check high-mountain watch posts near {country}"
       ],
       "Economic & Financial": [
-        "Customs clearing capacity doubles at commercial transit corridors with {country}",
-        "Bilateral trade investments fund infrastructure projects near {country}",
-        "Regional highways construction optimizes commercial flow with {country}",
-        "New agreements minimize import tariff frictions with {country}"
+        "Customs clearing capacity doubles at trade points with {country}",
+        "Trade investments fund road projects near {country}",
+        "New highways improve commercial traffic flow with {country}",
+        "New agreements minimize import tax friction with {country}"
       ],
       "Social Affairs & Welfare": [
-        "Humanitarian aid clinics deploy resources to border crossings with {country}",
-        "Frontier governance resettlement programs verify security near {country}",
-        "Local cooperative councils host cultural discussions with {country} communities",
-        "Emergency welfare supply networks expand coverage along {country} front"
+        "Medical clinics deploy resources to border crossings with {country}",
+        "Local housing programs verify security near {country}",
+        "Local councils host cultural discussions with {country} communities",
+        "Emergency food supply networks expand coverage along {country} border"
       ],
       "Political & Diplomatic": [
-        "Senior officials finalize border tax rules at summit with {country}",
-        "Joint coordination centers coordinate checkpoint protocols with {country}",
-        "Demarcation agreement updates verified during meetings with {country}",
-        "Bilateral diplomatic envoys hold talks resolving transit route details with {country}"
+        "Senior officials finalize border tax rules at meeting with {country}",
+        "Joint centers coordinate checkpoint guidelines with {country}",
+        "Border marking updates verified during talks with {country}",
+        "Diplomatic envoys hold talks resolving transit route details with {country}"
       ],
       "Technology & Cyber": [
-        "National cyber security center shields infrastructure networks near {country}",
-        "Satellite signal telemetry upgrades improve monitoring near {country}",
-        "AI-driven tactical analysis systems deployed near {country} border",
-        "Telecom network signal coverage increases near strategic sectors with {country}",
-        "Electronic security jammer arrays verified along the {country} frontier"
+        "Computer security centers protect communication networks near {country}",
+        "Satellite tracking updates improve monitoring near {country}",
+        "New data analysis systems are used near {country} border",
+        "Mobile phone network coverage increases near important areas with {country}",
+        "Signal blockers are tested along the {country} border"
       ]
     };
 
@@ -4409,7 +4595,7 @@ function ArchiveView() {
       const targetDept = selectedDepts[i % selectedDepts.length];
       const deptTemplates = templates[targetDept] || templates["Political & Diplomatic"];
       const template = deptTemplates[i % deptTemplates.length];
-      const title = template.replace('{country}', country) + ` (OSINT Archive #${300 + i * 19})`;
+      const title = template.replace('{country}', country) + ` (Archive Update #${300 + i * 19})`;
       const source = sources[i % sources.length];
       
       const urlMap: Record<string, string> = {
@@ -4432,8 +4618,8 @@ function ArchiveView() {
         id: `fallback-archive-${timeframe}-${dept}-${i}`,
         title: title,
         headline: title,
-        summary: `Factual OSINT telemetry record confirming stable and secure ${targetDept.toLowerCase()} conditions near the border. Joint command checks confirm standard operating patterns.`,
-        content: `Factual intelligence report detailing operational telemetry sweeps near the ${country} frontier. Command reports high-readiness posture. Incident remains active under surveillance. Further updates are scheduled as the situation develops.`,
+        summary: `A verified report confirms stable and secure ${targetDept.toLowerCase()} conditions near the border. Local checks show standard patterns.`,
+        content: `A verified report details border safety checks near the ${country} border. Local teams report ready states. The area remains under regular observation. Further updates will follow.`,
         url: url,
         source: source,
         country_code: country.substring(0, 2).toUpperCase(),
@@ -4496,7 +4682,7 @@ function ArchiveView() {
     <div className="space-y-6 text-[#d4e4fa]">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between border-b border-white/20 pb-3 gap-3">
         <div>
-          <h2 className="text-xl font-bold uppercase tracking-wider text-[#7bd0ff]">OSINT Historical Archives</h2>
+          <h2 className="text-xl font-bold uppercase tracking-wider text-[#7bd0ff]">Historical News Archives</h2>
           <p className="text-xs opacity-70 mt-1">Review classified intelligence records and trigger Map-Reduce LLM briefings.</p>
         </div>
         <button
@@ -4599,14 +4785,14 @@ function ArchiveView() {
                   <p className="text-xs text-[#bec6e0] mt-2 leading-relaxed">{art.summary || art.content}</p>
                   <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 mt-3 font-mono text-[10px] opacity-70">
                     <div className="flex flex-wrap items-center gap-x-4">
-                      <span className="flex items-center gap-0.5">Source: {art.source || 'OSINT'} ↗</span>
+                      <span className="flex items-center gap-0.5">Source: {art.source || 'News'} ↗</span>
                       <span>Target: {art.country_code}</span>
                       <span>Dept: {art.department}</span>
                       <button
                         onClick={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
-                          pinToNotes(`[${art.department}] ${art.title} - ${art.summary || art.content.substring(0, 200)} (Source: ${art.source || 'OSINT'} | Target: ${art.country_code})`);
+                          pinToNotes(`[${art.department}] ${art.title} - ${art.summary || art.content.substring(0, 200)} (Source: ${art.source || 'News'} | Target: ${art.country_code})`);
                         }}
                         className="flex items-center gap-0.5 border border-[#7bd0ff]/40 hover:bg-[#7bd0ff]/10 text-[#7bd0ff] px-1.5 py-0.5 text-[8px] font-mono uppercase rounded transition-colors"
                       >
@@ -4617,7 +4803,7 @@ function ArchiveView() {
                     <span className="flex items-center gap-1">
                       {isLive && (
                         <span className="inline-flex items-center gap-1 bg-[#22c55e]/20 text-[#22c55e] text-[8px] font-bold font-mono uppercase px-1 rounded animate-pulse">
-                          <span className="w-1 h-1 rounded-full bg-[#22c55e]" />
+                          <span className="w-1.5 h-1.5 rounded-full bg-[#22c55e]" />
                           LIVE
                         </span>
                       )}
@@ -4656,7 +4842,7 @@ function LiveChatFusion() {
     {
       id: 'welcome',
       sender: 'bot',
-      text: 'Greetings. I am the OSINT Tactical Intelligence Bot. Ask me any question regarding recent geopolitical developments, military deployments, trade relations, or security alerts across our border sectors.',
+      text: 'Greetings. I am the AI News and Stability Bot. Ask me any question regarding recent political, social, tech, military, or economic news across the sectors.',
       timestamp: new Date()
     }
   ]);
@@ -4866,9 +5052,9 @@ function LiveChatFusion() {
       <div className="bg-[#122131]/80 border-b border-[#45464d]/60 p-4">
         <h2 className="text-sm font-bold uppercase tracking-widest text-[#7bd0ff] flex items-center gap-2">
           <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-          OSINT Tactical Intelligence Chatbot
+          AI Stability and News Chatbot
         </h2>
-        <p className="text-[10px] opacity-70 mt-0.5">Query live border alerts, trade deals, and military intelligence feeds in real-time.</p>
+        <p className="text-[10px] opacity-70 mt-0.5">Query border news, trade deals, and development reports in real-time.</p>
       </div>
 
       {/* Messages List */}

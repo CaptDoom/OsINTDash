@@ -247,49 +247,49 @@ async def process_fusion_job(job_id: str, temp_file_path: str, filename: str, in
         await job_store.update(job_id, "fusion", status="synthesizing", progress=75, step="synthesizing")
         # 2. LLM synthesis
         prompt = f"""
-        CLASSIFICATION: UNCLASSIFIED // OSINT FOR INTERNAL STRATCOM USE ONLY
-        GEOPOLITICAL INTELLIGENCE FUSION REPORT
+        REAL-TIME NEWS AND STABILITY REPORT
         
-        You are a Senior Intelligence Analyst at the Strategic Command (STRATCOM).
-        Below is the text extracted from an uploaded internal tactical document:
+        You are an expert communicator who translates complex news into simple, plain English.
+        Below is the text extracted from an uploaded document:
         -----------------------------------------------------
         {extracted_text[:3000]}
         -----------------------------------------------------
 
-        Cross-reference this internal file against the following verified public OSINT news reports:
+        Cross-reference this file against the following verified public news reports:
         -----------------------------------------------------
         {article_context}
         -----------------------------------------------------
 
         OPERATOR INSTRUCTIONS / TASKS TO PERFORM:
         -----------------------------------------------------
-        {instructions if instructions else "Provide a general cross-reference intelligence briefing."}
+        {instructions if instructions else "Provide a general cross-reference news briefing."}
         -----------------------------------------------------
 
         INSTRUCTIONS:
-        1. Deliver a formal, objective, and analytical briefing suitable for military command/government briefing.
-        2. Format using clear tactical headings:
-           - **1. OPERATIONAL SITUATION OVERVIEW**: Summary of facts, locations, and actions.
-           - **2. CROSS-REFERENCE ANALYSIS**: Synthesizing the overlap and connections between the uploaded document and OSINT feeds, specifically addressing the operator's instructions.
-           - **3. THREAT EVALUATION & RECOMMENDATIONS**: Assess stability impact, warnings, and security indices.
-        3. You must use a passive, objective, and authoritative tone. Avoid conversational fillers, jokes, or first-person pronouns.
-        4. You MUST cite the news sources where applicable using markdown links (e.g. "[Title of news article](URL)").
-        5. If the document has no relation to the news reports, state "NO CORRELATION ESTABLISHED" and write a helpful brief.
-        6. Deliver a highly detailed, comprehensive response. Elaborate fully on all strategic implications, key details, actors, and timelines. Do not summarize briefly; aim for a deep intelligence briefing.
+        1. Deliver a clear, objective, and simple briefing.
+        2. Use simple, everyday words. Avoid any jargon, such as "OSINT," "telemetry," "bilaterals," "strategic meetings," "tactical," "reconnaissance," "frontier," etc.
+        3. Format using clear headings:
+           - **1. OVERVIEW**: Summary of facts, locations, and actions in plain English.
+           - **2. NEWS COMPARISON**: Explain the connections between the uploaded document and the public news reports.
+           - **3. WHAT THIS MEANS FOR ORDINARY PEOPLE**: Explain the impact on daily citizen safety, costs, travel, or general stability.
+        4. You must use a direct, objective, and clear tone. Avoid conversational fillers, jokes, or first-person pronouns.
+        5. You MUST cite the news sources where applicable using markdown links (e.g. "[Title of news article](URL)").
+        6. If the document has no relation to the news reports, state "NO CORRELATION ESTABLISHED" and write a helpful brief in simple English.
+        7. Deliver a detailed and clear response.
         """
 
         fused_summary = ""
         if settings.llm_provider == "ollama" and settings.ollama_base_url:
             try:
-                fused_summary = await call_ollama(prompt, "You are a Senior Intel Fusion Officer.")
+                fused_summary = await call_ollama(prompt, "You are a clear and simple writer.")
             except Exception as exc:
                 logger.warning("[Chat] Ollama call failed, falling back: %s", exc)
         
         if not fused_summary:
             if settings.openai_api_key:
-                fused_summary = await call_openai(prompt, "You are a Senior Intel Fusion Officer.")
+                fused_summary = await call_openai(prompt, "You are a clear and simple writer.")
             elif settings.google_api_key:
-                fused_summary = await call_gemini(prompt, "You are a Senior Intel Fusion Officer.")
+                fused_summary = await call_gemini(prompt, "You are a clear and simple writer.")
             else:
                 fused_summary = generate_local_fusion_fallback(extracted_text, matching_articles)
 
@@ -341,28 +341,27 @@ def extract_simple_docx_text(path: str) -> str:
         return "Word document text extraction fallback"
 
 def generate_local_fusion_fallback(doc_text: str, articles: List[Article]) -> str:
-    md = "CLASSIFICATION: UNCLASSIFIED // OSINT FOR INTERNAL STRATCOM USE ONLY\n"
-    md += "TACTICAL GEOPOLITICAL INTELLIGENCE REPORT (OFFLINE FALLBACK)\n\n"
+    md = "NEWS AND STABILITY REPORT (OFFLINE FALLBACK)\n\n"
     
-    md += "**1. OPERATIONAL SITUATION OVERVIEW**\n"
-    md += f"Source document contains basic intelligence query or text: \n> {doc_text[:350]}...\n\n"
+    md += "**1. OVERVIEW**\n"
+    md += f"The query or text contains: \n> {doc_text[:350]}...\n\n"
     
-    md += "**2. DETAILED ANALYSIS & CROSS-REFERENCE**\n"
+    md += "**2. DETAILED ANALYSIS & NEWS COMPARISON**\n"
     if not articles:
-        md += "*NO LIVE GEOPOLITICAL OSINT FEEDS IDENTIFIED IN SPECIFIED SECTOR.*\n\n"
+        md += "*NO LIVE NEWS FEEDS IN SPECIFIED SECTOR.*\n\n"
     else:
-        md += "Matched the following public threat assets in active surveillance cache:\n\n"
+        md += "Matched the following public news reports:\n\n"
         for art in articles:
             md += (
                 f"*   **[{art.title}]({art.url or '#'})**\n"
                 f"    *   *Source*: {art.source or 'Unknown'}\n"
-                f"    *   *Department*: {art.department or 'Unclassified'}\n"
-                f"    *   *Sector Target*: {art.country_code or 'Global'}\n"
-                f"    *   *Brief*: {art.summary or art.content[:160]}...\n\n"
+                f"    *   *Department*: {art.department or 'General'}\n"
+                f"    *   *Target*: {art.country_code or 'Global'}\n"
+                f"    *   *News*: {art.summary or art.content[:160]}...\n\n"
             )
             
-    md += "**3. THREAT EVALUATION & RECOMMENDATIONS**\n"
-    md += "Tactical cross-reference compiled successfully. Threat indexes are calibrated against term weights and matching threat parameters in the local memory database. Continuous monitoring is recommended.\n"
+    md += "**3. WHAT THIS MEANS FOR ORDINARY PEOPLE**\n"
+    md += "The search matched local reports in the system. Everything is running as usual, and we suggest checking active daily updates for any changes.\n"
     return md
 
 
@@ -422,47 +421,47 @@ async def chat_query(payload: ChatQuery):
 
     # 3. LLM synthesis
     prompt = f"""
-    CLASSIFICATION: UNCLASSIFIED // OSINT FOR INTERNAL STRATCOM USE ONLY
-    TACTICAL GEOPOLITICAL INTELLIGENCE SUMMARY
+    REAL-TIME NEWS AND STABILITY REPORT
     
-    You are a Senior Intelligence Analyst at the Strategic Command (STRATCOM).
+    You are an expert communicator who translates complex news into simple, plain English.
     
     {history_context}
     
-    The operator has submitted the following query:
+    The user has submitted the following query:
     -----------------------------------------------------
     QUERY: {query_text}
     -----------------------------------------------------
 
-    Analyze and answer this query based on the conversation history and the following verified public OSINT news reports:
+    Analyze and answer this query based on the conversation history and the following verified public news reports:
     -----------------------------------------------------
     {article_context}
     -----------------------------------------------------
 
     INSTRUCTIONS:
-    1. Deliver a formal, objective, and analytical briefing suitable for military command/government briefing.
-    2. Format using clear tactical headings:
-       - **1. OPERATIONAL SITUATION OVERVIEW**: Summary of facts, locations, and actions.
-       - **2. DETAILED ANALYSIS**: Cross-referencing entities, movements, and key dates.
-       - **3. THREAT EVALUATION**: Assess stability impact, warnings, and security indices.
-    3. You must use a passive, objective, and authoritative tone. Avoid conversational fillers, jokes, or first-person pronouns.
-    4. You MUST cite the news sources where applicable using markdown links (e.g. "[Title of news article](URL)").
-    5. If no relevant information is available in the provided reports, state "NO LIVE OSINT FEEDS IN SPECIFIED SECTOR" and provide a brief general security assessment.
-    6. Deliver a highly detailed, comprehensive response. Elaborate fully on all strategic implications, key details, actors, and timelines. Do not summarize briefly; aim for a deep intelligence briefing.
+    1. Deliver a clear, objective, and simple response.
+    2. Use simple, everyday words. Avoid any jargon, such as "OSINT," "telemetry," "bilaterals," "strategic meetings," "tactical," "reconnaissance," "frontier," etc.
+    3. Format using clear headings:
+       - **1. OVERVIEW**: Summary of facts, locations, and actions in plain English.
+       - **2. DETAILED ANALYSIS**: Clear details explaining who, what, when, and where.
+       - **3. WHAT THIS MEANS FOR ORDINARY PEOPLE**: Explain the impact on daily citizen safety, costs, travel, or general stability.
+    4. You must use a direct, objective, and clear tone. Avoid conversational fillers, jokes, or first-person pronouns.
+    5. You MUST cite the news sources where applicable using markdown links (e.g. "[Title of news article](URL)").
+    6. If no relevant information is available in the provided reports, state "NO LIVE NEWS FEEDS IN SPECIFIED SECTOR" and provide a brief general safety assessment in simple terms.
+    7. Deliver a detailed and clear response.
     """
 
     fused_summary = ""
     if settings.llm_provider == "ollama" and settings.ollama_base_url:
         try:
-            fused_summary = await call_ollama(prompt, "You are a Senior Intel Fusion Officer.")
+            fused_summary = await call_ollama(prompt, "You are a clear and simple writer.")
         except Exception as exc:
             logger.warning("[Chat] Ollama call failed, falling back: %s", exc)
             
     if not fused_summary:
         if settings.openai_api_key:
-            fused_summary = await call_openai(prompt, "You are a Senior Intel Fusion Officer.")
+            fused_summary = await call_openai(prompt, "You are a clear and simple writer.")
         elif settings.google_api_key:
-            fused_summary = await call_gemini(prompt, "You are a Senior Intel Fusion Officer.")
+            fused_summary = await call_gemini(prompt, "You are a clear and simple writer.")
         else:
             fused_summary = generate_local_fusion_fallback(query_text, matching_articles)
 

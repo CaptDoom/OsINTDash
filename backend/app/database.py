@@ -79,7 +79,12 @@ class Article(Base):
     embedding = Column(VectorType, nullable=True)
     source_reputation: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, default="Unrated")
     confidence_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=0.98)
+    sector: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    entities: Mapped[Optional[str]] = mapped_column(Text, nullable=True) # JSON list
+    action_type: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    also_reported_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True) # JSON list
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
 
 # Archive Summary Model
 class ArchiveSummary(Base):
@@ -191,39 +196,38 @@ async def seed_data_if_empty(session: AsyncSession):
     
     templates = {
         "Military & Defense": [
-            "Verified deployment of active border guards and troop divisions along the {country} frontier",
-            "Joint tactical drills and armor maneuvers completed by frontier commands near {country}",
-            "Special ops units conduct high-altitude patrol sweeps at the {country} demarcation lines",
-            "Bunker reinforcements and artillery defense setups increase along the strategic {country} corridors",
-            "Frontier troops establish new high-altitude monitoring outposts near the {country} line"
+            "Joint safety drills and troop movements completed near the border with {country}",
+            "Special guard units conduct mountain patrol sweeps near the {country} boundary line",
+            "Guard post upgrades and defense preparations increase along the {country} border routes",
+            "Border guards establish new watch posts near the {country} line"
         ],
         "Economic & Financial": [
-            "New border highway and trade route construction expands commercial transit with {country}",
-            "Deepwater port infrastructure upgrades secure strategic transport lanes near {country}",
-            "Bilateral investment framework signed to fund major logistical hubs with {country}",
-            "Customs clearing facilities upgrade processing capacity at {country} border posts",
-            "Trade volume increases as new bilateral agreements ease tariff restrictions with {country}"
+            "New border highway and trade route construction expands transit with {country}",
+            "Sea port upgrades secure trade shipping lanes near {country}",
+            "Cooperative funding deal signed to build trade hubs with {country}",
+            "Customs clearing posts upgrade capacity at the {country} border crossings",
+            "Trade flows grow as new shared agreements ease tax restrictions with {country}"
         ],
         "Social Affairs & Welfare": [
-            "Local resettlement and border governance programs expand near {country} frontier",
-            "Humanitarian medical aid stations established to assist crossing points with {country}",
-            "Friction between civilian border populations and local patrols rises near {country}",
+            "Local housing and community support programs expand near {country} border",
+            "Medical aid stations established to assist crossing points with {country}",
+            "Disagreements between local citizens and patrols are reported near {country}",
             "Emergency food supply distribution sweeps verify secure conditions along the {country} line",
-            "Cultural exchange programs aim to foster peaceful border relations with {country}"
+            "Cultural exchanges aim to foster peaceful border relations with {country}"
         ],
         "Political & Diplomatic": [
-            "High-level security-coordination summit sets border tax collection rules with {country}",
-            "Diplomatic delegations sign memorandum for shared checkpoint security with {country}",
-            "Commanders verify border demarcation protocol updates during meetings with {country}",
+            "High-level security meeting sets border tax collection rules with {country}",
+            "Diplomatic teams sign a cooperative plan for shared checkpoint rules with {country}",
+            "Commanders verify border marking updates during meetings with {country}",
             "Joint command coordination center launched to monitor border developments with {country}",
-            "Peace talks progress as senior officials schedule bilateral discussions with {country}"
+            "Peace talks progress as senior officials schedule discussions with {country}"
         ],
         "Technology & Cyber": [
-            "National cyber security center blocks major hacking attempts targeting key systems near {country}",
-            "Satellite tracking stations upgrade telemetry arrays to map satellite signals near {country}",
-            "AI-powered intelligence monitoring platforms deploy along strategic sectors near {country}",
-            "Tactical telecom network signals established to maintain active communications with {country}",
-            "Electronic warfare divisions deploy signal jammer systems along the {country} border"
+            "Computer security center blocks hacking attempts targeting systems near {country}",
+            "Satellite tracking stations upgrade equipment to map communication signals near {country}",
+            "New data analysis platforms deploy along key sectors near the {country} border",
+            "Mobile network signals established to maintain active communications with {country}",
+            "Signal blockers are tested along the {country} border"
         ]
     }
     
@@ -236,11 +240,11 @@ async def seed_data_if_empty(session: AsyncSession):
             # Create 1 unique article per department (5 total per country)
             title_templates = templates[dept]
             temp = random.choice(title_templates)
-            title = temp.format(country=country) + f" (Intel Alert #{100 + idx * 17 + random.randint(1, 9)})"
+            title = temp.format(country=country) + f" (News Alert #{100 + idx * 17 + random.randint(1, 9)})"
             content = (
-                f"Factual intelligence report detailing operational telemetry sweeps near the {country} frontier. "
-                f"Command reports high-readiness posture. Incident remains active under surveillance. "
-                f"Further updates are scheduled as the situation develops."
+                f"A verified update details recent developments near the {country} border. "
+                f"Local teams report standard activity, and the area remains under regular watch. "
+                f"More updates will follow as they are reported."
             )
             pub_time = datetime.now(timezone.utc) - timedelta(minutes=random.randint(1, 55))
             
@@ -267,7 +271,7 @@ async def seed_data_if_empty(session: AsyncSession):
             db_article = Article(
                 title=title,
                 headline=title,
-                summary=f"Intelligence briefing regarding localized {dept.lower()} activity near the {country} border.",
+                summary=f"A short update on local {dept.lower()} activity near the {country} border.",
                 content=content,
                 url=url,
                 source=source,
@@ -289,11 +293,33 @@ async def create_tables():
         # If postgres, enable pgvector extension
         if engine.url.drivername.startswith("postgresql"):
             try:
-                await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
             except Exception as e:
                 logger.warning(f"[Database] Failed to enable pgvector extension: {e}")
         await conn.run_sync(Base.metadata.create_all)
-        logger.info("[Database] Tables created successfully.")
+        
+        # Check and run columns migrations dynamically
+        from sqlalchemy import text
+        columns_to_add = [
+            ("sector", "VARCHAR(256)"),
+            ("entities", "TEXT"),
+            ("action_type", "VARCHAR(128)"),
+            ("also_reported_by", "TEXT")
+        ]
+        for col_name, col_type in columns_to_add:
+            try:
+                # Test column existence
+                await conn.execute(text(f"SELECT {col_name} FROM high_impact_articles LIMIT 1"))
+            except Exception:
+                # Column doesn't exist, execute alter table
+                logger.info(f"[Database] Column '{col_name}' not found. Altering table to add it.")
+                try:
+                    await conn.execute(text(f"ALTER TABLE high_impact_articles ADD COLUMN {col_name} {col_type}"))
+                except Exception as alter_err:
+                    logger.error(f"[Database] Failed to add column '{col_name}': {alter_err}")
+                    
+        logger.info("[Database] Tables created and migrations checked successfully.")
+
 
     # Always ensure user accounts are seeded
     async with SessionLocal() as session:
