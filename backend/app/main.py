@@ -16,15 +16,16 @@ from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.config import settings
 from backend.app.database import create_tables, get_db, Article, User
-from backend.app.api.routes import archive, chat, weather, auth, summarizer, notes
+from backend.app.api.routes import archive, chat, weather, auth, summarizer, notes, alerts
 from backend.app.services.ingestion import fetch_global_news
 from backend.app.services.classifier import ImpactClassifier, classify_and_store_batch, memory_stream, compute_source_reputation
 from backend.app.services.summarizer import call_openai, call_gemini
 from backend.app.observability import configure_logging, metrics, request_id_var
 from backend.app.services.job_store import job_store
+from backend.app.services.risk import calculate_country_risk
 
 logger = logging.getLogger("drishya.main")
-configure_logging()
+configure_logging(logging.DEBUG if settings.debug else logging.INFO)
 
 app = FastAPI(title=settings.app_name, version="2.1.0")
 
@@ -44,6 +45,7 @@ app.include_router(weather.router)
 app.include_router(auth.router)
 app.include_router(summarizer.router)
 app.include_router(notes.router)
+app.include_router(alerts.router)
 
 
 @app.middleware("http")
@@ -79,6 +81,26 @@ async def observability_middleware(request, call_next):
         request_id_var.reset(token)
 
 
+async def get_cached_response(key: str) -> Optional[dict]:
+    try:
+        import redis.asyncio as aioredis
+        conn = aioredis.from_url(settings.redis_url, socket_timeout=2.0)
+        val = await conn.get(key)
+        if val:
+            return json.loads(val)
+    except Exception:
+        pass
+    return None
+
+async def set_cached_response(key: str, data: Any, ttl: int = 300) -> None:
+    try:
+        import redis.asyncio as aioredis
+        conn = aioredis.from_url(settings.redis_url, socket_timeout=2.0)
+        await conn.set(key, json.dumps(data, default=str), ex=ttl)
+    except Exception:
+        pass
+
+
 @app.get("/health")
 async def health_check():
     return {
@@ -88,6 +110,41 @@ async def health_check():
         "database": "configured" if settings.database_url else "missing",
         "redis": settings.redis_url,
     }
+
+
+@app.get("/ready")
+async def readiness_check(db: AsyncSession = Depends(get_db)):
+    db_ok = False
+    redis_ok = False
+    
+    # 1. Check Database connection
+    try:
+        from sqlalchemy import text
+        await db.execute(text("SELECT 1"))
+        db_ok = True
+    except Exception as e:
+        logger.error(f"[Readiness] Database check failed: {e}")
+        
+    # 2. Check Redis connection
+    try:
+        import redis.asyncio as aioredis
+        redis_conn = aioredis.from_url(settings.redis_url, socket_timeout=2.0)
+        await redis_conn.ping()
+        redis_ok = True
+    except Exception as e:
+        logger.error(f"[Readiness] Redis check failed: {e}")
+        
+    status = "ok" if (db_ok and redis_ok) else "degraded"
+    status_code = 200 if status == "ok" else 503
+    
+    return JSONResponse(
+        content={
+            "status": status,
+            "database": "ready" if db_ok else "unreachable",
+            "redis": "ready" if redis_ok else "unreachable"
+        },
+        status_code=status_code
+    )
 
 
 @app.get("/metrics")
@@ -264,12 +321,38 @@ def article_to_world_alert(article: Article) -> Optional[dict]:
         "lon": coords["lon"],
         "severity": severity,
         "headline": article.title,
-        "source": article.source or "OSINT Mesh",
+        "source": article.source or "News Feed",
         "url": article.url,
         "timestamp": article.published_at.isoformat(),
-        "summary": article.summary or article.headline or "Details restricted to Stratcom command.",
+        "summary": article.summary or article.headline or "No summary available.",
         "countryCode": article.country_code,
+        "source_links": build_source_links(article),
     }
+
+
+def build_source_links(article: Article) -> List[dict]:
+    links: List[dict] = []
+    if getattr(article, "url", None):
+        links.append({
+            "name": article.source or "Original source",
+            "url": article.url,
+        })
+
+    try:
+        also_reported_by = json.loads(article.also_reported_by) if getattr(article, "also_reported_by", None) else []
+    except Exception:
+        also_reported_by = []
+
+    if isinstance(also_reported_by, list):
+        for idx, item in enumerate(also_reported_by[:4]):
+            if not item or item == article.url:
+                continue
+            links.append({
+                "name": f"Also reported {idx + 1}",
+                "url": item,
+            })
+
+    return links
 
 # Background Ingestion Task
 async def run_ingestion_cycle(test_mode: bool = False):
@@ -324,7 +407,6 @@ def format_entities_for_frontend(flat_entities) -> dict:
         
     if isinstance(flat_entities, str):
         try:
-            import json
             flat_entities = json.loads(flat_entities)
         except Exception:
             flat_entities = []
@@ -398,13 +480,13 @@ def data_to_signal(data: dict) -> dict:
             "impact": impact,
             "headline": data.get("title", ""),
             "summary": data.get("summary") or data.get("content", "")[:180],
-            "source": data.get("source") or "OSINT Feed",
+            "source": data.get("source") or "News Feed",
             "timestamp": data.get("published_at"),
             "url": data.get("url"),
             "verification_status": data.get("source_reputation") or "Verified Source",
             "confidence_score": data.get("confidence_score") or 0.98,
             "entities": format_entities_for_frontend(data.get("entities")),
-            "location_name": data.get("sector") or f"{country_name} Frontier",
+            "location_name": data.get("sector") or f"{country_name} Region",
             "intel_category": data.get("department") or "Military",
             "also_reported_by": also_rep
         }
@@ -418,7 +500,6 @@ async def redis_listener_task():
     Handles automatic reconnection and falls back to local memory_stream if Redis is offline.
     """
     import redis.asyncio as aioredis
-    import json
     
     redis_online = False
     
@@ -458,13 +539,39 @@ async def redis_listener_task():
 
 @app.on_event("startup")
 async def startup_event():
+    testing = os.environ.get("TESTING") == "1"
+
+    # Startup Environment Validation
+    if not testing:
+        required_settings = {
+            "NEWS_API_KEY": "newsapi_key",
+            "REDIS_URL": "redis_url",
+        }
+        missing = [
+            env_name
+            for env_name, setting_name in required_settings.items()
+            if not os.environ.get(env_name) and not getattr(settings, setting_name, None)
+        ]
+        if missing:
+            msg = f"[Startup Validation] Missing required environment variables: {', '.join(missing)}"
+            logger.error(msg)
+            raise RuntimeError(msg)
+
     # Run DB initializations
     await create_tables()
+
+    if testing:
+        logger.info("[Main] API startup complete in test mode; background workers disabled.")
+        return
+
     # Start Redis listener for pub/sub live stream broadcasting.
     asyncio.create_task(redis_listener_task())
-    # Start periodic ingestion to keep the local news mesh updated automatically.
-    asyncio.create_task(periodic_ingestion_loop())
-    logger.info("[Main] API startup complete; background ingestion and redis listener started.")
+    # Start periodic ingestion if enabled
+    if settings.enable_periodic_ingestion:
+        asyncio.create_task(periodic_ingestion_loop())
+        logger.info("[Main] API startup complete; background ingestion and redis listener started.")
+    else:
+        logger.info("[Main] API startup complete; redis listener started (periodic ingestion disabled).")
 
 @app.get("/api/system/status")
 async def get_system_status():
@@ -501,6 +608,30 @@ async def get_system_status():
         "weather_provider": weather_prov
     }
 
+
+@app.get("/api/risk/country")
+async def get_country_risk(
+    code: str = Query(..., min_length=2, max_length=3),
+    days: int = Query(30, ge=1, le=365),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return an explainable country risk score from recent stored evidence."""
+    country_code = code.strip().upper()
+    cutoff = datetime_now() - timedelta_now(days=days)
+    result = await db.execute(
+        select(Article)
+        .where(Article.country_code == country_code, Article.published_at >= cutoff)
+        .order_by(Article.published_at.desc())
+        .limit(500)
+    )
+    return {
+        "country_code": country_code,
+        "country": country_name_from_code(country_code),
+        "window_days": days,
+        **calculate_country_risk(result.scalars().all()),
+        "generated_at": datetime_now().isoformat(),
+    }
+
 @app.get("/api/news/all")
 async def get_all_news(
     category: str = Query("All"),
@@ -508,9 +639,12 @@ async def get_all_news(
     max_age_hours: Optional[int] = Query(None),
     db: AsyncSession = Depends(get_db)
 ):
-    """
-    Simulates /api/news/all returning country dossier arrays formatted for App.tsx
-    """
+    cache_key = f"drishya:cache:news:all:{category}:{timeframe}:{max_age_hours}"
+    cached = await get_cached_response(cache_key)
+    if cached:
+        logger.info("[Cache] Returning cached /api/news/all response")
+        return cached
+
     now = datetime_now()
     if max_age_hours is not None:
         cutoff = now - timedelta_now(hours=max_age_hours)
@@ -528,8 +662,9 @@ async def get_all_news(
         else:
             cutoff = now - timedelta_now(days=30)
     
-    # Query database articles (High Impact)
-    stmt = select(Article).where(Article.published_at >= cutoff)
+    from sqlalchemy.orm import defer
+    # Query database articles (High Impact) without loading large float embeddings
+    stmt = select(Article).where(Article.published_at >= cutoff).options(defer(Article.embedding))
     stmt = stmt.order_by(Article.published_at.desc())
     result = await db.execute(stmt)
     db_articles = result.scalars().all()
@@ -541,8 +676,9 @@ async def get_all_news(
         return article_category == selected_category
 
     # Build list of active countries dynamically from database articles and settings watchlists
-    active_codes = {art.country_code.upper() for art in db_articles if art.country_code}
     config_codes = set(settings.critical_countries + settings.high_countries + settings.medium_countries)
+    # Restrict to config_codes to avoid returning all 250 countries from seeded database
+    active_codes = {art.country_code.upper() for art in db_articles if art.country_code and art.country_code.upper() in config_codes}
     all_active_codes = active_codes | config_codes
     
     countries = []
@@ -558,6 +694,23 @@ async def get_all_news(
             
     countries = sorted(list(set(countries)))
 
+    # Fetch all historical articles sorted by date (deferring large embedding column)
+    historical_res = await db.execute(select(Article).options(defer(Article.embedding)).order_by(Article.published_at.desc()))
+    all_historical = list(historical_res.scalars().all())
+
+    fallback_by_country = {}
+    for country in countries:
+        c_code = get_country_code(country)
+        country_lower = country.lower()
+        
+        matched = []
+        for art in all_historical:
+            if (art.country_code and art.country_code.upper() == c_code) or country_lower in art.title.lower():
+                matched.append(art)
+                if len(matched) >= 150: # Limit historical fallback scan to latest 150 per country
+                    break
+        fallback_by_country[country] = matched
+
     results = {}
     for country in countries:
         # Filter matching signals
@@ -571,27 +724,23 @@ async def get_all_news(
 
         # Fallback to historical news to ensure abundant news display (Goal 3)
         if not filtered_articles:
-            c_code = get_country_code(country)
-            stmt_fallback = select(Article).where(
-                (Article.country_code == c_code) |
-                (Article.title.like(f"%{country}%"))
-            )
-            if category != "All":
-                dept_map = {
-                    "Military": "Military & Defense",
-                    "Economic": "Economic & Financial",
-                    "Social": "Social Affairs & Welfare",
-                    "Political": "Political & Diplomatic",
-                    "Tech": "Technology & Cyber"
-                }
-                if category in dept_map:
-                    stmt_fallback = stmt_fallback.where(Article.department == dept_map[category])
-            stmt_fallback = stmt_fallback.order_by(Article.published_at.desc()).limit(150)
-            res_fallback = await db.execute(stmt_fallback)
-            filtered_articles = list(res_fallback.scalars().all())
+            filtered_articles = fallback_by_country.get(country, [])
             if category != "All":
                 filtered_articles = [article for article in filtered_articles if matches_category(article, category)]
- 
+
+        if len(filtered_articles) < 5:
+            seen_ids = {article.id for article in filtered_articles}
+            for art in fallback_by_country.get(country, []):
+                if art.id in seen_ids:
+                    continue
+                if category == "All" or matches_category(art, category):
+                    filtered_articles.append(art)
+                elif len(filtered_articles) < 5:
+                    filtered_articles.append(art)
+                seen_ids.add(art.id)
+                if len(filtered_articles) >= 5:
+                    break
+
         signals = []
         for art in sorted(filtered_articles, key=lambda item: item.published_at, reverse=True):
             if not (art.title and art.title.strip() and art.url and (art.url.startswith("http://") or art.url.startswith("https://")) and (art.summary or art.content or "").strip()):
@@ -608,16 +757,17 @@ async def get_all_news(
                 "category": get_frontend_category(art.department, art.title, art.source),
                 "impact": "High" if art.impact_level == "High Impact" else ("Medium" if art.impact_level == "Medium Impact" else "Low"),
                 "headline": art.title.strip(),
-                "summary": (art.summary.strip() if art.summary and art.summary.strip() else (art.content.strip()[:150] + "..." if art.content and art.content.strip() else "Tactical intelligence briefing restricted.")),
-                "source": art.source or "OSINT Mesh",
+                "summary": (art.summary.strip() if art.summary and art.summary.strip() else (art.content.strip()[:150] + "..." if art.content and art.content.strip() else "No summary available.")),
+                "source": art.source or "News Feed",
                 "timestamp": art.published_at.isoformat(),
                 "url": art.url,
                 "verification_status": getattr(art, "source_reputation", None) or "Verified Source",
                 "confidence_score": getattr(art, "confidence_score", None) or 0.98,
                 "entities": format_entities_for_frontend(getattr(art, "entities", None)),
-                "location_name": getattr(art, "sector", None) or f"{country} Frontier",
+                "location_name": getattr(art, "sector", None) or f"{country} Region",
                 "intel_category": art.department or "Military",
                 "also_reported_by": also_rep
+                ,"source_links": build_source_links(art)
             })
 
  
@@ -666,27 +816,66 @@ async def get_all_news(
             if not signals else
             f"We found {len(signals)} new reports in this time period."
         )
- 
+        risk = calculate_country_risk(filtered_articles)
+
         results[country] = {
             "region": region,
             "threat_level": threat_level,
             "last_synced": now.isoformat(),
             "operational_summary": operational_summary,
             "signals": signals,
+            "risk": risk,
             "source_status": "normal"
         }
  
+    await set_cached_response(cache_key, results, ttl=300)
     return results
+
+
+from contextlib import asynccontextmanager
+from fastapi import BackgroundTasks
+
+@asynccontextmanager
+async def get_db_context():
+    from backend.app.database import SessionLocal, init_db_engine
+    if SessionLocal is None:
+        await init_db_engine()
+    async with SessionLocal() as session:
+        try:
+            yield session
+        finally:
+            await session.close()
+
+async def fetch_and_classify_background(code: str, name: str):
+    async with get_db_context() as db:
+        import httpx
+        from backend.app.services.ingestion import fetch_country_news
+        from backend.app.services.classifier import classify_and_store_batch
+        async with httpx.AsyncClient(follow_redirects=True) as client:
+            try:
+                raw_articles = await fetch_country_news(client, code, budget=50)
+                if raw_articles:
+                    await classify_and_store_batch(db, raw_articles)
+                    logger.info("[Background Fetch] Successfully fetched and stored real-time news for %s (%s)", name, code)
+            except Exception as e:
+                logger.error("[Background Fetch] Error in background news ingestion for %s: %s", name, e)
 
 
 @app.get("/api/news/country")
 async def get_specific_country_news(
+    background_tasks: BackgroundTasks,
     name: str = Query(...),
     code: str = Query(...),
     db: AsyncSession = Depends(get_db)
 ):
     name = name.strip()
     code = code.strip().upper()
+    
+    cache_key = f"drishya:cache:news:country:{code}"
+    cached = await get_cached_response(cache_key)
+    if cached:
+        logger.info("[Cache] Returning cached /api/news/country response")
+        return cached
     
     # Register/override the country name in ISO_COUNTRIES mapping
     from backend.app.services.ingestion import ISO_COUNTRIES, fetch_country_news
@@ -712,44 +901,8 @@ async def get_specific_country_news(
         if time_diff < 900 and len(db_articles) >= 15:
             is_stale = False
             
-    fetched_signals = []
     if is_stale:
-        async with httpx.AsyncClient(follow_redirects=True) as client:
-            try:
-                raw_articles = await fetch_country_news(client, code, budget=50)
-                if raw_articles:
-                    # Save to DB (this handles duplicates and only saves High/Medium Impact)
-                    await classify_and_store_batch(db, raw_articles)
-                    
-                    classifier = ImpactClassifier()
-                    for art in raw_articles:
-                        url = art.get("url")
-                        title = art.get("title")
-                        content = art.get("content") or ""
-                        summary = art.get("summary") or (content[:150] + "..." if content else "")
-                        if not title or not title.strip():
-                            continue
-                        if not url or not url.strip() or not (url.startswith("http://") or url.startswith("https://")):
-                            continue
-                        if not summary.strip():
-                            continue
-
-                        impact, dept = classifier.classify(title, content)
-                        fetched_signals.append({
-                            "id": f"dyn-{hashlib.md5(url.encode()).hexdigest()}",
-                            "country": name,
-                            "category": get_frontend_category(dept, title, art.get("source", "")),
-                            "impact": "High" if impact == "High Impact" else ("Medium" if impact == "Medium Impact" else "Low"),
-                            "headline": title.strip(),
-                            "summary": summary.strip(),
-                            "source": art.get("source") or "OSINT Feed",
-                            "timestamp": art.get("published_at").isoformat() if isinstance(art.get("published_at"), datetime) else str(art.get("published_at")),
-                            "url": url,
-                            "verification_status": compute_source_reputation(art.get("source")),
-                            "confidence_score": 0.98,
-                        })
-            except Exception as e:
-                logger.error(f"Error fetching real-time news for {name} ({code}): {e}")
+        background_tasks.add_task(fetch_and_classify_background, code, name)
                 
     db_signals = []
     for art in db_articles:
@@ -767,23 +920,59 @@ async def get_specific_country_news(
             "category": get_frontend_category(art.department, art.title, art.source),
             "impact": "High" if art.impact_level == "High Impact" else ("Medium" if art.impact_level == "Medium Impact" else "Low"),
             "headline": art.title.strip(),
-            "summary": (art.summary.strip() if art.summary and art.summary.strip() else (art.content.strip()[:150] + "..." if art.content and art.content.strip() else "Tactical intelligence briefing restricted.")),
-            "source": art.source or "OSINT Mesh",
+            "summary": (art.summary.strip() if art.summary and art.summary.strip() else (art.content.strip()[:150] + "..." if art.content and art.content.strip() else "No summary available.")),
+            "source": art.source or "News Feed",
             "timestamp": art.published_at.isoformat(),
             "url": art.url,
             "verification_status": getattr(art, "source_reputation", None) or "Verified Source",
             "confidence_score": getattr(art, "confidence_score", None) or 0.98,
             "entities": format_entities_for_frontend(getattr(art, "entities", None)),
-            "location_name": getattr(art, "sector", None) or f"{name} Frontier",
+            "location_name": getattr(art, "sector", None) or f"{name} Region",
             "intel_category": art.department or "Military",
             "also_reported_by": also_rep
+            ,"source_links": build_source_links(art)
         })
 
+    if len(db_signals) < 5:
+        stmt_topup = select(Article).where(Article.country_code == code).order_by(Article.published_at.desc()).limit(300)
+        res_topup = await db.execute(stmt_topup)
+        seen_ids = {sig["id"] for sig in db_signals}
+        for art in res_topup.scalars().all():
+            if art.id in seen_ids:
+                continue
+            if not (art.title and art.title.strip() and art.url and (art.url.startswith("http://") or art.url.startswith("https://")) and (art.summary or art.content or "").strip()):
+                continue
+            try:
+                also_rep = json.loads(art.also_reported_by) if getattr(art, "also_reported_by", None) else []
+            except Exception:
+                also_rep = []
+            db_signals.append({
+                "id": art.id,
+                "country": name,
+                "category": get_frontend_category(art.department, art.title, art.source),
+                "impact": "High" if art.impact_level == "High Impact" else ("Medium" if art.impact_level == "Medium Impact" else "Low"),
+                "headline": art.title.strip(),
+                "summary": (art.summary.strip() if art.summary and art.summary.strip() else (art.content.strip()[:150] + "..." if art.content and art.content.strip() else "Tactical intelligence briefing restricted.")),
+                "source": art.source or "OSINT Mesh",
+                "timestamp": art.published_at.isoformat(),
+                "url": art.url,
+                "verification_status": getattr(art, "source_reputation", None) or "Verified Source",
+                "confidence_score": getattr(art, "confidence_score", None) or 0.98,
+                "entities": format_entities_for_frontend(getattr(art, "entities", None)),
+                "location_name": getattr(art, "sector", None) or f"{name} Frontier",
+                "intel_category": art.department or "Military",
+                "also_reported_by": also_rep,
+                "source_links": build_source_links(art),
+            })
+            seen_ids.add(art.id)
+            if len(db_signals) >= 5:
+                break
+
     
-    # 4. Merge database and fetched signals, keeping unique URLs
+    # 4. Merge database signals, keeping unique URLs
     all_signals = []
     seen_urls = set()
-    for sig in db_signals + fetched_signals:
+    for sig in db_signals:
         if sig["url"] not in seen_urls:
             seen_urls.add(sig["url"])
             all_signals.append(sig)
@@ -798,14 +987,17 @@ async def get_specific_country_news(
             threat_level = "High"
             
     now = datetime_now()
-    return {
+    response_data = {
         "region": "Global Sector",
         "threat_level": threat_level,
         "last_synced": now.isoformat(),
         "operational_summary": f"We found {len(all_signals)} new reports for {name}." if all_signals else "The border is quiet. There are no new reports in this time period.",
         "signals": all_signals,
+        "risk": calculate_country_risk(db_articles),
         "source_status": "normal"
     }
+    await set_cached_response(cache_key, response_data, ttl=300)
+    return response_data
 
 
 @app.get("/api/world/alerts")
@@ -813,7 +1005,13 @@ async def world_alerts_endpoint(
     force: bool = Query(False),
     db: AsyncSession = Depends(get_db),
 ):
-    del force
+    cache_key = "drishya:cache:world:alerts"
+    if not force:
+        cached = await get_cached_response(cache_key)
+        if cached:
+            logger.info("[Cache] Returning cached /api/world/alerts response")
+            return cached
+
     now = datetime_now()
     cutoff = now - timedelta_now(days=7)
 
@@ -835,11 +1033,13 @@ async def world_alerts_endpoint(
         if len(alerts) >= 1500:
             break
 
-    return {
+    response_data = {
         "updatedAt": now.isoformat(),
         "count": len(alerts),
         "alerts": alerts,
     }
+    await set_cached_response(cache_key, response_data, ttl=300)
+    return response_data
 
 
 @app.post("/api/news/refresh")
@@ -1027,6 +1227,8 @@ def get_country_code(country: str) -> str:
     }
     return mapping.get(country, "GL")
 
+TECH_KEYWORDS = re.compile(r"\b(cyber|drone|uav|satellite|radar|surveillance|sensor|telecom|internet|ai|artificial intelligence|machine learning|ml|technology|tech|space|communications|signal|gps)\b", re.I)
+
 def get_frontend_category(dept: str, title: str = "", source: str = "") -> str:
     mapping = {
         "Military & Defense": "Military",
@@ -1037,9 +1239,8 @@ def get_frontend_category(dept: str, title: str = "", source: str = "") -> str:
         "Cyber & Technology": "Tech"
     }
     base_category = mapping.get(dept, "Political")
-    tech_keywords = re.compile(r"\b(cyber|drone|uav|satellite|radar|surveillance|sensor|telecom|internet|ai|artificial intelligence|machine learning|ml|technology|tech|space|communications|signal|gps)\b", re.I)
     combined_text = f"{title or ''} {source or ''}"
-    if base_category in {"Military", "Economic"} and tech_keywords.search(combined_text):
+    if base_category in {"Military", "Economic"} and TECH_KEYWORDS.search(combined_text):
         return "Tech"
     return base_category
 
@@ -1085,15 +1286,15 @@ async def query_news_research(payload: QueryRequest, db: AsyncSession = Depends(
     top_matches = [x[0] for x in matched[:5]]
     
     # Compile sources
-    sources = [{"name": art.source or "OSINT Feed", "url": art.url} for art in top_matches]
+    sources = [{"name": art.source or "News Feed", "url": art.url} for art in top_matches]
     
     # 2. Formulate answer using OpenAI/Gemini if available, or template
     summary = ""
     if top_matches:
         article_context = "\n".join([f"Source: {art.source}\nTitle: {art.title}\nContent: {art.content[:250]}\n" for art in top_matches])
         prompt = (
-            f"You are a strategic intelligence assistant. Answer the user query: '{query}' "
-            f"directly and concisely based on these news articles. Cite the sources where appropriate:\n\n{article_context}"
+            f"Answer this question using ONLY these news articles. Be concise and clear. No jargon.\n\n"
+            f"Question: {query}\n\nArticles:\n{article_context}"
         )
         try:
             if settings.openai_api_key:
@@ -1106,8 +1307,8 @@ async def query_news_research(payload: QueryRequest, db: AsyncSession = Depends(
         if not summary:
             # Fallback text summary
             summary = (
-                f"Extracted Briefing regarding '{query}' based on {len(top_matches)} matching reports:\n\n" + 
-                "\n\n".join([f"• **{art.title}** ({art.source}): {art.summary or art.content[:150]}..." for art in top_matches])
+            f"Based on {len(top_matches)} articles about '{query}':\n\n" + 
+            "\n\n".join([f"• **{art.title}** ({art.source}): {art.summary or art.content[:150]}..." for art in top_matches])
             )
     else:
         summary = f"No matching alerts found in the {country or 'Global'} database archives."
@@ -1119,6 +1320,81 @@ async def query_news_research(payload: QueryRequest, db: AsyncSession = Depends(
         "generatedAt": datetime_now().isoformat(),
         "detectedCountry": country or "Global"
     }
+
+@app.get("/api/news/realtime")
+async def realtime_news_fetch(
+    q: str = Query(..., min_length=1, description="Search query for real-time news"),
+    country_code: Optional[str] = Query(None, min_length=2, max_length=3),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """
+    Fetch real-time news directly from configured API providers without database storage.
+    Returns fresh results from NewsAPI, NewsData, Newscatcher, Google News RSS, and other
+    configured sources. Designed for on-demand live intelligence lookups.
+    """
+    from backend.app.services.ingestion import (
+        _fetch_all_news_sources, fetch_rss_feed, CircuitState,
+        _search_query_broad, ISO_COUNTRIES,
+    )
+    import httpx
+
+    country_name = ISO_COUNTRIES.get(country_code, q) if country_code else q
+    per_source = max(limit, 10)
+
+    try:
+        async with httpx.AsyncClient(
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+            follow_redirects=True,
+        ) as client:
+            # 1. Fetch from all configured API providers
+            raw_articles = await _fetch_all_news_sources(
+                client, country_code or "GL", country_name, per_source
+            )
+
+            # 2. If we need more, pull from Google News RSS
+            if len(raw_articles) < limit and q.strip():
+                rss_breaker = CircuitState("RSS-Realtime")
+                rss_articles = await fetch_rss_feed(
+                    client, country_code or "GL", country_name,
+                    limit - len(raw_articles), rss_breaker,
+                )
+                seen_urls = {a["url"] for a in raw_articles if a.get("url")}
+                for art in rss_articles:
+                    if art.get("url") and art["url"] not in seen_urls:
+                        raw_articles.append(art)
+                        seen_urls.add(art["url"])
+
+            # 3. Build response with source reputation
+            from backend.app.services.classifier import compute_source_reputation
+
+            results = []
+            for art in raw_articles[:limit]:
+                results.append({
+                    "title": art.get("title", ""),
+                    "summary": art.get("summary") or art.get("content", "")[:300],
+                    "url": art.get("url", ""),
+                    "source": art.get("source", "OSINT Feed"),
+                    "country_code": art.get("country_code", "GL"),
+                    "published_at": (
+                        art["published_at"].isoformat()
+                        if hasattr(art.get("published_at", ""), "isoformat")
+                        else str(art.get("published_at", ""))
+                    ),
+                    "reputation": compute_source_reputation(art.get("source")),
+                })
+
+            return {
+                "query": q,
+                "country_code": country_code or "Global",
+                "count": len(results),
+                "fetched_at": datetime_now().isoformat(),
+                "results": results,
+            }
+
+    except Exception as exc:
+        logger.error("[Main] Real-time news fetch failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"Real-time fetch failed: {exc}")
+
 
 # Serve the built frontend assets if available.
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "dist"

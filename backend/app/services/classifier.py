@@ -230,7 +230,7 @@ IMPACT_CENTROIDS = {
 
 def extract_first_real_sentence(text: str) -> str:
     if not text:
-        return "Tactical intelligence briefing restricted."
+        return "No summary available."
     sentences = re.split(r'(?<=[.!?])\s+', text.strip())
     banned_phrases = [
         "Factual OSINT telemetry signal",
@@ -245,7 +245,7 @@ def extract_first_real_sentence(text: str) -> str:
             if len(words) > 35:
                 return " ".join(words[:35]) + "..."
             return s
-    return "Tactical intelligence briefing restricted."
+    return "No summary available."
 
 
 def clean_news_output(raw_title: str, raw_snippet: str) -> dict:
@@ -345,34 +345,38 @@ class ImpactClassifier:
         return impact, dept
 
     def classify_centroid(self, text: str) -> Tuple[str, str]:
-        import numpy as np
-        centroids = self.get_centroids()
-        transformer = get_transformer()
-        text_vec = transformer.encode(text, convert_to_numpy=True)
-        text_norm = np.linalg.norm(text_vec)
-        if text_norm > 0:
-            text_vec = text_vec / text_norm
-        else:
+        try:
+            import numpy as np
+            centroids = self.get_centroids()
+            transformer = get_transformer()
+            text_vec = transformer.encode(text, convert_to_numpy=True)
+            text_norm = np.linalg.norm(text_vec)
+            if text_norm > 0:
+                text_vec = text_vec / text_norm
+            else:
+                return "Normal Impact", "Political & Diplomatic"
+
+            best_dept = "Political & Diplomatic"
+            best_dept_score = -1.0
+            for dept, centroid in centroids.items():
+                score = float(np.dot(text_vec, centroid))
+                if score > best_dept_score:
+                    best_dept_score = score
+                    best_dept = dept
+
+            impact_centroids = self.get_impact_centroids()
+            best_impact = "Normal Impact"
+            best_impact_score = -1.0
+            for imp, centroid in impact_centroids.items():
+                score = float(np.dot(text_vec, centroid))
+                if score > best_impact_score:
+                    best_impact_score = score
+                    best_impact = imp
+
+            return best_impact, best_dept
+        except Exception as e:
+            logger.warning(f"Centroid classification failed, falling back: {e}")
             return "Normal Impact", "Political & Diplomatic"
-
-        best_dept = "Political & Diplomatic"
-        best_dept_score = -1.0
-        for dept, centroid in centroids.items():
-            score = float(np.dot(text_vec, centroid))
-            if score > best_dept_score:
-                best_dept_score = score
-                best_dept = dept
-
-        impact_centroids = self.get_impact_centroids()
-        best_impact = "Normal Impact"
-        best_impact_score = -1.0
-        for imp, centroid in impact_centroids.items():
-            score = float(np.dot(text_vec, centroid))
-            if score > best_impact_score:
-                best_impact_score = score
-                best_impact = imp
-
-        return best_impact, best_dept
 
     async def classify_llm_fallback(self, title: str, content: str) -> Tuple[str, str]:
         metrics.state.classification_llm_fallback_total += 1
@@ -411,7 +415,6 @@ class ImpactClassifier:
                 
         if summary:
             try:
-                import json
                 match = re.search(r"\{.*?\}", summary, re.DOTALL)
                 if match:
                     parsed = json.loads(match.group(0))
@@ -779,14 +782,6 @@ class ImpactClassifier:
         articles: List[Dict[str, Any]],
         embeddings: Optional[List[Optional[List[float]]]] = None,
     ) -> int:
-        if not embeddings:
-            try:
-                texts = [f"{art['title']} {art.get('summary', '') or art['content'][:300]}" for art in articles]
-                embeddings = await get_embeddings_cached(texts)
-            except Exception as e:
-                logger.error(f"[Classifier] Failed to compute batch embeddings: {e}")
-                embeddings = [None] * len(articles)
-                
         inserted = 0
         rows: List[Article] = []
         for idx, article_data in enumerate(articles):
@@ -795,7 +790,20 @@ class ImpactClassifier:
             source = article_data.get("source")
             reputation = compute_source_reputation(source)
             confidence = article_data.get("confidence_score") or 0.98
-            cand_embedding = embeddings[idx] if embeddings and idx < len(embeddings) else None
+            
+            # Lazy Embedding generation only for High and Medium impact articles
+            is_high_or_medium = impact in ("High Impact", "Medium Impact")
+            cand_embedding = None
+            if is_high_or_medium:
+                if embeddings and idx < len(embeddings) and embeddings[idx] is not None:
+                    cand_embedding = embeddings[idx]
+                else:
+                    try:
+                        text_to_encode = f"{article_data['title']} {article_data.get('summary', '') or article_data['content'][:300]}"
+                        computed_embs = await get_embeddings_cached([text_to_encode])
+                        cand_embedding = computed_embs[0] if computed_embs else None
+                    except Exception as e:
+                        logger.error(f"[Classifier] Failed to compute single embedding: {e}")
 
             # Check near-duplicates inside same country bucket
             near_dup_found = False
@@ -820,7 +828,6 @@ class ImpactClassifier:
                                 
                             if isinstance(ex_vec_val, str):
                                 try:
-                                    import json
                                     ex_vec_list = json.loads(ex_vec_val)
                                 except Exception:
                                     continue
@@ -989,7 +996,32 @@ class ImpactClassifier:
 
             if rows:
                 try:
-                    db.add_all(rows)
+                    from sqlalchemy import insert
+                    mappings = [
+                        {
+                            "id": row.id,
+                            "title": row.title,
+                            "headline": row.headline,
+                            "summary": row.summary,
+                            "content": row.content,
+                            "url": row.url,
+                            "source": row.source,
+                            "country_code": row.country_code,
+                            "published_at": row.published_at,
+                            "impact_level": row.impact_level,
+                            "department": row.department,
+                            "embedding": row.embedding,
+                            "source_reputation": row.source_reputation,
+                            "confidence_score": row.confidence_score,
+                            "sector": row.sector,
+                            "entities": row.entities,
+                            "action_type": row.action_type,
+                            "also_reported_by": row.also_reported_by,
+                            "created_at": row.created_at,
+                        }
+                        for row in rows
+                    ]
+                    await db.execute(insert(Article), mappings)
                     await db.commit()
                     inserted = len(rows)
                     metrics.state.classification_batches_total += 1

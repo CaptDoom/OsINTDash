@@ -43,9 +43,26 @@ services:
       DATABASE_URL: postgresql+asyncpg://drishya_user:drishya_password@postgres:5432/drishya_db
       REDIS_URL: redis://redis:6379/0
       APP_ENV: production
+      ENABLE_DEMO_SEED_DATA: ${ENABLE_DEMO_SEED_DATA:-false}
+      ENABLE_PERIODIC_INGESTION: ${ENABLE_PERIODIC_INGESTION:-true}
+      NEWS_API_KEY: ${NEWS_API_KEY:-}
+      NEWSDATA_API_KEY: ${NEWSDATA_API_KEY:-}
+      NEWSCATCHER_API_KEY: ${NEWSCATCHER_API_KEY:-}
+      GNEWS_API_KEY: ${GNEWS_API_KEY:-}
+      WORLD_NEWS_API_KEY: ${WORLD_NEWS_API_KEY:-}
+      CURRENTS_API_KEY: ${CURRENTS_API_KEY:-}
+      THENEWS_API_KEY: ${THENEWS_API_KEY:-}
+      MEDIASTACK_API_KEY: ${MEDIASTACK_API_KEY:-}
+      BING_NEWS_API_KEY: ${BING_NEWS_API_KEY:-}
+      FREENEWSAPI_KEY: ${FREENEWSAPI_KEY:-}
     ports:
       - "3001:3001"
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3001/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
 
   frontend:
     build:
@@ -53,7 +70,8 @@ services:
       dockerfile: Dockerfile.frontend
     container_name: drishya-frontend
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     ports:
       - "3000:80"
     restart: unless-stopped

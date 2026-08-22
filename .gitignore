@@ -24,3 +24,7 @@ scratch/
 # Virtual Environment & TS Build Info
 venv/
 *.tsbuildinfo
+
+# Local runtime logs and launch metadata
+.runtime-logs/
+.dev-ports.json

@@ -62,22 +62,98 @@ for char1 in range(65, 91):
         ISO_COUNTRIES.setdefault(code, f"Country_{code}")
 
 
-@dataclass
 class CircuitState:
-    failures: int = 0
-    open_until: float = 0.0
+    def __init__(self, source_name: str, redis_url: Optional[str] = None):
+        self.source_name = source_name
+        self.redis_url = redis_url
+        self._failures = 0
+        self._open_until = 0.0
+        self._rate_limit_failures = 0
 
-    def allow(self) -> bool:
-        return asyncio.get_event_loop().time() >= self.open_until
+    async def get_failures(self) -> int:
+        if self.redis_url and settings.enable_redis_breaker_persistence:
+            try:
+                import redis.asyncio as aioredis
+                conn = aioredis.from_url(self.redis_url, decode_responses=True)
+                val = await conn.get(f"drishya:breaker:{self.source_name}:failures")
+                return int(val) if val else 0
+            except Exception:
+                pass
+        return self._failures
 
-    def record_failure(self, cooldown_seconds: float) -> None:
-        self.failures += 1
-        if self.failures >= 3:
-            self.open_until = asyncio.get_event_loop().time() + cooldown_seconds
+    async def get_open_until(self) -> float:
+        if self.redis_url and settings.enable_redis_breaker_persistence:
+            try:
+                import redis.asyncio as aioredis
+                conn = aioredis.from_url(self.redis_url, decode_responses=True)
+                val = await conn.get(f"drishya:breaker:{self.source_name}:open_until")
+                return float(val) if val else 0.0
+            except Exception:
+                pass
+        return self._open_until
 
-    def reset(self) -> None:
-        self.failures = 0
-        self.open_until = 0.0
+    async def allow(self) -> bool:
+        open_until = await self.get_open_until()
+        return asyncio.get_event_loop().time() >= open_until
+
+    async def record_failure(self, cooldown_seconds: float) -> None:
+        failures = await self.get_failures() + 1
+        open_until = 0.0
+        if failures >= settings.circuit_breaker_failure_threshold:
+            open_until = asyncio.get_event_loop().time() + cooldown_seconds
+
+        if self.redis_url and settings.enable_redis_breaker_persistence:
+            try:
+                import redis.asyncio as aioredis
+                conn = aioredis.from_url(self.redis_url, decode_responses=True)
+                ttl = int(cooldown_seconds) if open_until > 0 else 86400
+                await conn.set(f"drishya:breaker:{self.source_name}:failures", str(failures), ex=ttl)
+                if open_until > 0:
+                    await conn.set(f"drishya:breaker:{self.source_name}:open_until", str(open_until), ex=ttl)
+                return
+            except Exception:
+                pass
+        self._failures = failures
+        if open_until > 0:
+            self._open_until = open_until
+
+    async def set_tripped(self, cooldown_seconds: float) -> None:
+        open_until = asyncio.get_event_loop().time() + cooldown_seconds
+        failures = settings.circuit_breaker_failure_threshold
+        if self.redis_url and settings.enable_redis_breaker_persistence:
+            try:
+                import redis.asyncio as aioredis
+                conn = aioredis.from_url(self.redis_url, decode_responses=True)
+                ttl = int(cooldown_seconds)
+                await conn.set(f"drishya:breaker:{self.source_name}:failures", str(failures), ex=ttl)
+                await conn.set(f"drishya:breaker:{self.source_name}:open_until", str(open_until), ex=ttl)
+                return
+            except Exception:
+                pass
+        self._failures = failures
+        self._open_until = open_until
+
+    async def record_rate_limit(self) -> bool:
+        """Track throttling separately from hard provider failures."""
+        self._rate_limit_failures += 1
+        if self._rate_limit_failures >= settings.circuit_breaker_rate_limit_threshold:
+            await self.set_tripped(settings.circuit_breaker_rate_limit_cooldown_seconds)
+            return True
+        return False
+
+    async def reset(self) -> None:
+        if self.redis_url and settings.enable_redis_breaker_persistence:
+            try:
+                import redis.asyncio as aioredis
+                conn = aioredis.from_url(self.redis_url, decode_responses=True)
+                await conn.delete(f"drishya:breaker:{self.source_name}:failures")
+                await conn.delete(f"drishya:breaker:{self.source_name}:open_until")
+                return
+            except Exception:
+                pass
+        self._failures = 0
+        self._open_until = 0.0
+        self._rate_limit_failures = 0
 
 
 SOURCE_BREAKERS: Dict[str, CircuitState] = {}
@@ -162,11 +238,9 @@ def _parse_datetime(value: str | None) -> datetime:
 
 
 def _priority_codes() -> List[str]:
-    # Prioritize settings watchlists, then append all other world country codes
+    # Only scan watchlisted countries to prevent rate limits and network bloat
     config_codes = list(dict.fromkeys(settings.critical_countries + settings.high_countries + settings.medium_countries + settings.low_countries))
-    all_codes = list(ISO_COUNTRIES.keys())
-    merged = config_codes + [code for code in all_codes if code not in config_codes]
-    return merged
+    return config_codes
 
 
 def _country_priority(code: str) -> str:
@@ -286,46 +360,74 @@ async def notify_circuit_breaker(source_name: str, action: str, reason: str):
 
 
 async def _get_with_retry(client: httpx.AsyncClient, url: str, *, source_name: str, breaker: CircuitState, params: Optional[dict] = None, headers: Optional[dict] = None) -> Optional[httpx.Response]:
-    if not breaker.allow():
+    if not await breaker.allow():
         return None
 
+    import random
     delay = settings.request_backoff_base_seconds
-    for attempt in range(1, settings.request_retry_count + 1):
+    max_attempts = max(
+        settings.request_retry_count,
+        settings.rate_limit_retry_count,
+        settings.server_error_retry_count,
+    )
+    for attempt in range(1, max_attempts + 1):
         try:
             response = await client.get(url, params=params, headers=headers, timeout=settings.request_timeout_seconds)
+            logger.info("[Ingestion] provider=%s status=%s attempt=%s", source_name, response.status_code, attempt)
             if response.status_code in (401, 403):
-                logger.warning("[Ingestion] %s key unauthorized/forbidden (HTTP %d). Tripping circuit breaker for 30m.", source_name, response.status_code)
-                breaker.failures = 3
-                breaker.open_until = asyncio.get_event_loop().time() + 1800  # 30 minutes cooldown
+                logger.warning("[Ingestion] provider=%s authentication/permission failure HTTP %d; disabling for %ss", source_name, response.status_code, settings.circuit_breaker_auth_cooldown_seconds)
+                await breaker.set_tripped(settings.circuit_breaker_auth_cooldown_seconds)
                 await notify_circuit_breaker(source_name, "tripped", f"HTTP {response.status_code} Unauthorized")
                 return response
-            if response.status_code == 429 or 500 <= response.status_code < 600:
-                raise httpx.HTTPStatusError("retryable status", request=response.request, response=response)
+            
+            if response.status_code == 429:
+                logger.warning("[Ingestion] %s rate limited (HTTP 429). Applying backoff with jitter.", source_name)
+                jitter = random.uniform(0.5, 1.5)
+                sleep_time = min(delay * jitter, settings.request_backoff_max_seconds)
+                if attempt >= settings.rate_limit_retry_count:
+                    tripped = await breaker.record_rate_limit()
+                    logger.warning("[Ingestion] provider=%s rate limited after %s attempts; breaker_tripped=%s", source_name, attempt, tripped)
+                    if tripped:
+                        await notify_circuit_breaker(source_name, "tripped", "Rate Limit Exceeded (HTTP 429)")
+                    return None
+                await asyncio.sleep(sleep_time)
+                delay *= 2
+                continue
+                
+            if 500 <= response.status_code < 600:
+                if attempt >= settings.server_error_retry_count:
+                    await breaker.record_failure(settings.circuit_breaker_server_error_cooldown_seconds)
+                    logger.warning("[Ingestion] provider=%s server error persisted after %s attempts; skipping", source_name, attempt)
+                    return None
+                request = getattr(response, "request", None) or httpx.Request("GET", url)
+                raise httpx.HTTPStatusError("server error", request=request, response=response)
             
             # Reset and notify recovery if previously tripped
-            was_tripped = breaker.failures >= 3
-            breaker.reset()
+            was_tripped = await breaker.get_failures() >= settings.circuit_breaker_failure_threshold
+            await breaker.reset()
             if was_tripped:
                 await notify_circuit_breaker(source_name, "recovered", "Requests succeeded")
                 
             return response
         except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
-            logger.info("[Ingestion] %s connection/DNS failure: %s. Tripping circuit breaker for 5m.", source_name, exc)
-            breaker.failures = 3
-            breaker.open_until = asyncio.get_event_loop().time() + 300  # 5 minutes cooldown
-            await notify_circuit_breaker(source_name, "tripped", "Connection/DNS Failure")
-            return None
+            logger.info("[Ingestion] %s connection/DNS failure (attempt %s/%s): %s", source_name, attempt, settings.request_retry_count, exc)
+            if attempt == settings.request_retry_count:
+                logger.warning("[Ingestion] %s connection/DNS failure after max retries. Tripping circuit breaker for 5m.", source_name)
+                await breaker.set_tripped(300)
+                await notify_circuit_breaker(source_name, "tripped", "Connection/DNS Failure")
+                return None
+            await asyncio.sleep(min(delay * random.uniform(0.5, 1.5), settings.request_backoff_max_seconds))
+            delay *= 2
         except Exception as exc:
             logger.info("[Ingestion] %s request failed (attempt %s/%s): %s", source_name, attempt, settings.request_retry_count, exc)
-            
-            was_tripped_before = breaker.failures >= 3
-            breaker.record_failure(settings.request_backoff_max_seconds)
-            if breaker.failures >= 3 and not was_tripped_before:
+            was_tripped_before = await breaker.get_failures() >= 3
+            await breaker.record_failure(settings.request_backoff_max_seconds)
+            if (await breaker.get_failures()) >= settings.circuit_breaker_failure_threshold and not was_tripped_before:
                 await notify_circuit_breaker(source_name, "tripped", "Max Retries Exceeded")
                 
             if attempt == settings.request_retry_count:
                 return None
-            await asyncio.sleep(min(delay, settings.request_backoff_max_seconds))
+            await asyncio.sleep(min(delay * random.uniform(0.5, 1.5), settings.request_backoff_max_seconds))
             delay *= 2
     return None
 
@@ -377,48 +479,65 @@ def _search_query(country_name: str) -> str:
     return f'"{country_name}" AND (conflict OR security OR border OR military OR diplomatic OR infrastructure OR UAV OR drone OR protest)'
 
 
+def _search_query_broad(country_name: str, level: int = 0) -> str:
+    if level == 0:
+        return _search_query(country_name)
+    elif level == 1:
+        return f'"{country_name}" border OR "{country_name}" military OR "{country_name}" conflict'
+    else:
+        return f'"{country_name}"'
+
+
 
 async def fetch_newsapi_feed(client: httpx.AsyncClient, country_code: str, country_name: str, limit: int, breaker: CircuitState) -> List[Dict[str, Any]]:
     if not settings.newsapi_key:
         return []
 
-    params = {
-        "q": _search_query(country_name),
-        "language": "en",
-        "pageSize": limit,
-        "sortBy": "publishedAt",
-        "apiKey": settings.newsapi_key,
-    }
-    response = await _get_with_retry(client, "https://newsapi.org/v2/everything", source_name="NewsAPI", breaker=breaker, params=params)
-    if not response or response.status_code != 200:
-        return []
+    for level in range(3):
+        params = {
+            "q": _search_query_broad(country_name, level),
+            "language": "en",
+            "pageSize": limit,
+            "sortBy": "publishedAt",
+            "apiKey": settings.newsapi_key,
+        }
+        response = await _get_with_retry(client, "https://newsapi.org/v2/everything", source_name="NewsAPI", breaker=breaker, params=params)
+        if not response or response.status_code != 200:
+            continue
 
-    data = response.json()
-    return [
-        _normalize_api_article(article, country_code, country_name, article.get("source", {}).get("name", "NewsAPI"))
-        for article in data.get("articles", [])[:limit]
-    ]
+        data = response.json()
+        articles = data.get("articles") or []
+        if articles:
+            return [
+                _normalize_api_article(article, country_code, country_name, article.get("source", {}).get("name", "NewsAPI"))
+                for article in articles[:limit]
+            ]
+    return []
 
 
 async def fetch_gnews_feed(client: httpx.AsyncClient, country_code: str, country_name: str, limit: int, breaker: CircuitState) -> List[Dict[str, Any]]:
     if not settings.gnews_api_key:
         return []
 
-    params = {
-        "q": _search_query(country_name),
-        "lang": "en",
-        "max": limit,
-        "token": settings.gnews_api_key,
-    }
-    response = await _get_with_retry(client, "https://gnews.io/api/v4/search", source_name="GNews", breaker=breaker, params=params)
-    if not response or response.status_code != 200:
-        return []
+    for level in range(3):
+        params = {
+            "q": _search_query_broad(country_name, level),
+            "lang": "en",
+            "max": limit,
+            "token": settings.gnews_api_key,
+        }
+        response = await _get_with_retry(client, "https://gnews.io/api/v4/search", source_name="GNews", breaker=breaker, params=params)
+        if not response or response.status_code != 200:
+            continue
 
-    data = response.json()
-    return [
-        _normalize_api_article(article, country_code, country_name, article.get("source", "GNews"))
-        for article in data.get("articles", [])[:limit]
-    ]
+        data = response.json()
+        articles = data.get("articles") or []
+        if articles:
+            return [
+                _normalize_api_article(article, country_code, country_name, article.get("source", "GNews"))
+                for article in articles[:limit]
+            ]
+    return []
 
 
 async def fetch_newsdata_feed(client: httpx.AsyncClient, country_code: str, country_name: str, limit: int, breaker: CircuitState) -> List[Dict[str, Any]]:
@@ -447,36 +566,42 @@ async def fetch_worldnews_feed(client: httpx.AsyncClient, country_code: str, cou
     if not settings.world_news_api_key:
         return []
 
-    params = {
-        "key": settings.world_news_api_key,
-        "language": "en",
-        "q": _search_query(country_name),
-        "sort": "publish-time",
-        "sort-direction": "DESC",
-        "page": 1,
-        "pageSize": limit,
-    }
     urls = [
-        "https://www.worldnewsapi.com/search-news",
         "https://api.worldnewsapi.com/search-news",
+        "https://www.worldnewsapi.com/search-news",
     ]
 
-    for url in urls:
-        response = await _get_with_retry(client, url, source_name="WorldNewsAPI", breaker=breaker, params=params)
-        if not response or response.status_code != 200:
-            continue
+    for level in range(3):
+        params = {
+            "key": settings.world_news_api_key,
+            "language": "en",
+            "q": _search_query_broad(country_name, level),
+            "sort": "publish-time",
+            "sort-direction": "DESC",
+            "page": 1,
+            "pageSize": limit,
+        }
+        for url in urls:
+            response = await _get_with_retry(client, url, source_name="WorldNewsAPI", breaker=breaker, params=params)
+            if not response or response.status_code != 200:
+                continue
 
-        data = response.json()
-        articles = data.get("articles") or data.get("data") or data.get("results") or []
-        if not isinstance(articles, list):
-            continue
+            try:
+                data = response.json()
+            except Exception as e:
+                logger.error("[Ingestion] WorldNewsAPI returned non-JSON response: status %d. Error: %s. Response body: %s", response.status_code, e, response.text[:200])
+                continue
 
-        normalized = [
-            _normalize_api_article(article, country_code, country_name, article.get("source", "WorldNewsAPI"))
-            for article in articles[:limit]
-        ]
-        if normalized:
-            return normalized
+            articles = data.get("articles") or data.get("data") or data.get("results") or []
+            if not isinstance(articles, list) or not articles:
+                continue
+
+            normalized = [
+                _normalize_api_article(article, country_code, country_name, article.get("source", "WorldNewsAPI"))
+                for article in articles[:limit]
+            ]
+            if normalized:
+                return normalized
 
     return []
 
@@ -504,85 +629,115 @@ async def fetch_currents_feed(client: httpx.AsyncClient, country_code: str, coun
     if not settings.currents_api_key:
         return []
 
-    params = {
-        "apiKey": settings.currents_api_key,
-        "keywords": _search_query(country_name),
-        "language": "en",
-        "limit": limit,
-    }
-    response = await _get_with_retry(client, "https://api.currentsapi.services/v1/search", source_name="Currents", breaker=breaker, params=params)
-    if not response or response.status_code != 200:
-        return []
+    for level in range(3):
+        params = {
+            "apiKey": settings.currents_api_key,
+            "keywords": _search_query_broad(country_name, level),
+            "language": "en",
+            "limit": limit,
+        }
+        response = await _get_with_retry(client, "https://api.currentsapi.services/v1/search", source_name="Currents", breaker=breaker, params=params)
+        if not response or response.status_code != 200:
+            continue
 
-    data = response.json()
-    return [
-        _normalize_api_article(article, country_code, country_name, article.get("source", "Currents"))
-        for article in data.get("news", [])[:limit]
-    ]
+        data = response.json()
+        news = data.get("news") or []
+        if news:
+            return [
+                _normalize_api_article(article, country_code, country_name, article.get("source", "Currents"))
+                for article in news[:limit]
+            ]
+    return []
 
 
 async def fetch_thenews_feed(client: httpx.AsyncClient, country_code: str, country_name: str, limit: int, breaker: CircuitState) -> List[Dict[str, Any]]:
     if not settings.thenews_api_key:
         return []
 
-    params = {
-        "api_token": settings.thenews_api_key,
-        "language": "en",
-        "search": _search_query(country_name),
-        "limit": limit,
-    }
-    response = await _get_with_retry(client, "https://api.thenewsapi.com/v1/news/all", source_name="TheNews", breaker=breaker, params=params)
-    if not response or response.status_code != 200:
-        return []
+    for level in range(3):
+        params = {
+            "api_token": settings.thenews_api_key,
+            "language": "en",
+            "search": _search_query_broad(country_name, level),
+            "limit": limit,
+        }
+        response = await _get_with_retry(client, "https://api.thenewsapi.com/v1/news/all", source_name="TheNews", breaker=breaker, params=params)
+        if not response or response.status_code != 200:
+            continue
 
-    data = response.json()
-    return [
-        _normalize_api_article(article, country_code, country_name, article.get("source", "TheNews"))
-        for article in data.get("data", [])[:limit]
-    ]
+        data = response.json()
+        data_list = data.get("data") or []
+        if data_list:
+            return [
+                _normalize_api_article(article, country_code, country_name, article.get("source", "TheNews"))
+                for article in data_list[:limit]
+            ]
+    return []
 
 
 async def fetch_mediastack_feed(client: httpx.AsyncClient, country_code: str, country_name: str, limit: int, breaker: CircuitState) -> List[Dict[str, Any]]:
     if not settings.mediastack_api_key:
         return []
 
-    params = {
-        "access_key": settings.mediastack_api_key,
-        "keywords": _search_query(country_name),
-        "languages": "en",
-        "limit": limit,
-    }
-    response = await _get_with_retry(client, "http://api.mediastack.com/v1/news", source_name="Mediastack", breaker=breaker, params=params)
-    if not response or response.status_code != 200:
-        return []
+    for level in range(3):
+        params = {
+            "access_key": settings.mediastack_api_key,
+            "keywords": _search_query_broad(country_name, level),
+            "languages": "en",
+            "limit": limit,
+        }
+        response = await _get_with_retry(client, "http://api.mediastack.com/v1/news", source_name="Mediastack", breaker=breaker, params=params)
+        if not response or response.status_code != 200:
+            continue
 
-    data = response.json()
-    return [
-        _normalize_api_article(article, country_code, country_name, article.get("source", "Mediastack"))
-        for article in data.get("data", [])[:limit]
-    ]
+        data = response.json()
+        data_list = data.get("data") or []
+        if data_list:
+            return [
+                _normalize_api_article(article, country_code, country_name, article.get("source", "Mediastack"))
+                for article in data_list[:limit]
+            ]
+    return []
 
 
 async def fetch_newscatcher_feed(client: httpx.AsyncClient, country_code: str, country_name: str, limit: int, breaker: CircuitState) -> List[Dict[str, Any]]:
     if not settings.newscatcher_api_key:
         return []
 
-    headers = {"x-api-key": settings.newscatcher_api_key}
-    params = {
-        "q": _search_query(country_name),
-        "lang": "en",
-        "page_size": limit,
-        "sort_by": "relevancy",
-    }
-    response = await _get_with_retry(client, "https://api.newscatcherapi.com/v2/search", source_name="Newscatcher", breaker=breaker, params=params, headers=headers)
-    if not response or response.status_code != 200:
-        return []
-
-    data = response.json()
-    return [
-        _normalize_api_article(article, country_code, country_name, article.get("source", "Newscatcher"))
-        for article in data.get("articles", [])[:limit]
+    headers = {"x-api-token": settings.newscatcher_api_key}
+    urls = [
+        "https://v3-api.newscatcherapi.com/api/search",
+        "https://api.newscatcherapi.com/v2/search"
     ]
+
+    for level in range(3):
+        params = {
+            "q": _search_query_broad(country_name, level),
+            "lang": "en",
+            "page_size": limit,
+        }
+        for url in urls:
+            response = await _get_with_retry(client, url, source_name="Newscatcher", breaker=breaker, params=params, headers=headers)
+            if not response or response.status_code != 200:
+                continue
+
+            try:
+                data = response.json()
+            except Exception:
+                continue
+
+            articles_list = data.get("articles") or []
+            if not isinstance(articles_list, list) or not articles_list:
+                continue
+
+            articles = []
+            for article in articles_list[:limit]:
+                article["published_at"] = article.get("published_date") or article.get("published_at")
+                article["source"] = article.get("name_source") or article.get("source")
+                articles.append(_normalize_api_article(article, country_code, country_name, "Newscatcher"))
+            return articles
+
+    return []
 
 
 async def fetch_bing_news_feed(client: httpx.AsyncClient, country_code: str, country_name: str, limit: int, breaker: CircuitState) -> List[Dict[str, Any]]:
@@ -590,22 +745,76 @@ async def fetch_bing_news_feed(client: httpx.AsyncClient, country_code: str, cou
         return []
 
     headers = {"Ocp-Apim-Subscription-Key": settings.bing_news_api_key}
+    
+    for level in range(3):
+        params = {
+            "q": _search_query_broad(country_name, level),
+            "count": limit,
+            "freshness": "Day",
+            "textFormat": "Raw",
+            "mkt": "en-US",
+        }
+        response = await _get_with_retry(client, "https://api.bing.microsoft.com/v7.0/news/search", source_name="BingNews", breaker=breaker, params=params, headers=headers)
+        if not response or response.status_code != 200:
+            continue
+
+        data = response.json()
+        value = data.get("value") or []
+        if value:
+            return [
+                _normalize_api_article(article, country_code, country_name, article.get("provider", [{}])[0].get("name", "BingNews"))
+                for article in value[:limit]
+            ]
+    return []
+
+
+async def fetch_freenewsapi_feed(client: httpx.AsyncClient, country_code: str, country_name: str, limit: int, breaker: CircuitState) -> List[Dict[str, Any]]:
+    if not settings.freenewsapi_key:
+        return []
+
+    headers = {"x-api-key": settings.freenewsapi_key}
     params = {
-        "q": _search_query(country_name),
-        "count": limit,
-        "freshness": "Day",
-        "textFormat": "Raw",
-        "mkt": "en-US",
+        "in_title": country_name,
+        "language": "en",
     }
-    response = await _get_with_retry(client, "https://api.bing.microsoft.com/v7.0/news/search", source_name="BingNews", breaker=breaker, params=params, headers=headers)
+
+    response = await _get_with_retry(client, "https://api.freenewsapi.io/v1/news", source_name="FreeNewsApi", breaker=breaker, params=params, headers=headers)
     if not response or response.status_code != 200:
         return []
 
     data = response.json()
-    return [
-        _normalize_api_article(article, country_code, country_name, article.get("provider", [{}])[0].get("name", "BingNews"))
-        for article in data.get("value", [])[:limit]
-    ]
+    articles_list = data.get("data", [])[:limit]
+    
+    detailed_articles = []
+    
+    async def fetch_detail(article_summary: Dict[str, Any]):
+        uuid = article_summary.get("uuid")
+        if not uuid:
+            return
+        
+        detail_params = {"uuid": uuid}
+        detail_resp = await _get_with_retry(client, "https://api.freenewsapi.io/v1/details", source_name="FreeNewsApiDetails", breaker=breaker, params=detail_params, headers=headers)
+        if detail_resp and detail_resp.status_code == 200:
+            detail_data = detail_resp.json().get("data", {})
+            if detail_data:
+                detailed_articles.append(
+                    _normalize_api_article(
+                        {
+                            "title": detail_data.get("title"),
+                            "url": detail_data.get("original_url"),
+                            "publishedAt": detail_data.get("published_at"),
+                            "description": detail_data.get("incipit") or detail_data.get("title"),
+                            "content": detail_data.get("body") or detail_data.get("incipit") or detail_data.get("title"),
+                            "source": detail_data.get("publisher") or "FreeNewsApi"
+                        },
+                        country_code,
+                        country_name,
+                        detail_data.get("publisher") or "FreeNewsApi"
+                    )
+                )
+
+    await asyncio.gather(*(fetch_detail(art) for art in articles_list), return_exceptions=True)
+    return detailed_articles
 
 
 async def _fetch_all_news_sources(client: httpx.AsyncClient, country_code: str, country_name: str, limit: int) -> List[Dict[str, Any]]:
@@ -637,16 +846,28 @@ async def _fetch_all_news_sources(client: httpx.AsyncClient, country_code: str, 
                 seen_urls.add(url)
                 all_articles.append(article)
 
-    # 1. Fetch Primary Sources first (Newscatcher and NewsData) for speed
+    # 1. Fetch the known-good providers first, in priority order.
     primary_sources = []
-    if settings.newscatcher_api_key:
-        primary_sources.append((fetch_newscatcher_feed, "Newscatcher"))
+    if settings.newsapi_key:
+        primary_sources.append((fetch_newsapi_feed, "NewsAPI"))
     if settings.newsdata_api_key:
         primary_sources.append((fetch_newsdata_feed, "NewsData"))
+    if settings.newscatcher_api_key:
+        primary_sources.append((fetch_newscatcher_feed, "Newscatcher"))
+
+    provider_semaphore = asyncio.Semaphore(max(1, min(settings.provider_concurrency, 5)))
+
+    async def run_provider(fetch_func, source_name: str):
+        async with provider_semaphore:
+            breaker = SOURCE_BREAKERS.get(source_name)
+            if breaker is None:
+                breaker = CircuitState(source_name)
+                SOURCE_BREAKERS[source_name] = breaker
+            return await fetch_func(client, country_code, country_name, source_limit, breaker)
         
     if primary_sources:
         primary_tasks = [
-            fetch_func(client, country_code, country_name, source_limit, SOURCE_BREAKERS.setdefault(name, CircuitState()))
+            run_provider(fetch_func, name)
             for fetch_func, name in primary_sources
         ]
         results = await asyncio.gather(*primary_tasks, return_exceptions=True)
@@ -656,10 +877,11 @@ async def _fetch_all_news_sources(client: httpx.AsyncClient, country_code: str, 
 
     # If we got enough articles from primary sources, return them immediately! (Very fast)
     if len(all_articles) >= limit:
-        return all_articles[:limit]
+         return all_articles[:limit]
 
     # 2. Fetch Fallback Sources (including NewsAPI) only if primary sources did not yield enough articles
     fallback_sources = [
+        (fetch_freenewsapi_feed, "FreeNewsApi"),
         (fetch_newsapi_feed, "NewsAPI"),
         (fetch_gnews_feed, "GNews"),
         (fetch_worldnews_feed, "WorldNewsAPI"),
@@ -671,7 +893,7 @@ async def _fetch_all_news_sources(client: httpx.AsyncClient, country_code: str, 
     ]
     
     fallback_tasks = [
-        fetch_func(client, country_code, country_name, source_limit, SOURCE_BREAKERS.setdefault(name, CircuitState()))
+        run_provider(fetch_func, name)
         for fetch_func, name in fallback_sources
     ]
     
@@ -701,7 +923,25 @@ async def fetch_rss_feed(client: httpx.AsyncClient, country_code: str, country_n
     response = await _get_with_retry(client, url, source_name="RSS", breaker=breaker)
     if not response or response.status_code != 200:
         return []
-    return _parse_rss_items(response.text, country_code, country_name, budget)
+    
+    items = _parse_rss_items(response.text, country_code, country_name, budget)
+    
+    async def resolve_item_url(item: Dict[str, Any]):
+        orig_link = item.get("url")
+        if orig_link and "news.google.com" in orig_link:
+            try:
+                from googlenewsdecoder import gnewsdecoder
+                res = await asyncio.wait_for(asyncio.to_thread(gnewsdecoder, orig_link), timeout=2.0)
+                if res.get("status") and res.get("decoded_url"):
+                    item["url"] = res["decoded_url"]
+                    item["source"] = get_clear_source(res["decoded_url"], item["source"])
+            except Exception:
+                pass
+
+    if items:
+        await asyncio.gather(*(resolve_item_url(item) for item in items), return_exceptions=True)
+        
+    return items
 
 
 async def fetch_country_news(client: httpx.AsyncClient, country_code: str, budget: Optional[int] = None) -> List[Dict[str, Any]]:
@@ -717,7 +957,7 @@ async def fetch_country_news(client: httpx.AsyncClient, country_code: str, budge
     seen_urls: set[str] = {article["url"] for article in collected if article.get("url")}
 
     if len(collected) < per_country_budget:
-        rss_breaker = CircuitState()
+        rss_breaker = CircuitState("RSS")
         rss_articles = await fetch_rss_feed(client, country_code, country_name, per_country_budget - len(collected), rss_breaker)
         for article in rss_articles:
             if article["url"] and article["url"] not in seen_urls:

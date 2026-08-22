@@ -113,6 +113,30 @@ class SharedNote(Base):
     author: Mapped[str] = mapped_column(String(128), default="Strategic Command")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
+# Note Version Model
+class NoteVersion(Base):
+    __tablename__ = "note_versions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    note_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    author: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+# Alert Rule Model
+class AlertRule(Base):
+    __tablename__ = "alert_rules"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+    keywords: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    country_code: Mapped[Optional[str]] = mapped_column(String(3), nullable=True)
+    minimum_risk: Mapped[str] = mapped_column(String(64), default="Low")
+    channels: Mapped[str] = mapped_column(Text, nullable=False, default='["in_app"]')
+    frequency: Mapped[str] = mapped_column(String(64), default="immediate")
+    enabled: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
 # Engine initialization with automatic fallback
 engine = None
 SessionLocal = None
@@ -233,56 +257,113 @@ async def seed_data_if_empty(session: AsyncSession):
     
     from datetime import timedelta
     
-    seeded_count = 0
-
+    articles_to_create = []
+    texts_to_embed = []
+    
     for country, cc in countries_map.items():
         for idx, dept in enumerate(departments):
-            # Create 1 unique article per department (5 total per country)
-            title_templates = templates[dept]
-            temp = random.choice(title_templates)
-            title = temp.format(country=country) + f" (News Alert #{100 + idx * 17 + random.randint(1, 9)})"
-            content = (
-                f"A verified update details recent developments near the {country} border. "
-                f"Local teams report standard activity, and the area remains under regular watch. "
-                f"More updates will follow as they are reported."
-            )
-            pub_time = datetime.now(timezone.utc) - timedelta(minutes=random.randint(1, 55))
-            
-            sources_map = {
-                "Military & Defense": ["reuters.com", "apnews.com", "aljazeera.com"],
-                "Economic & Financial": ["bloomberg.com", "reuters.com", "dw.com"],
-                "Social Affairs & Welfare": ["bbc.com", "france24.com", "dw.com"],
-                "Political & Diplomatic": ["theguardian.com", "nytimes.com", "aljazeera.com"],
-                "Technology & Cyber": ["techcrunch.com", "wired.com", "theverge.com"]
-            }
-            src_list = sources_map.get(dept, ["bbc.com"])
-            source = random.choice(src_list)
-
-            url = f"https://demo.drishya.local/article/{cc.lower()}/{dept.lower().split()[0]}-{idx}-{random.randint(10000, 99999)}"
-
-            # 1 High, 2 Medium, 2 Normal
-            if idx == 0:
-                impact = "High Impact"
-            elif idx in (1, 3):
-                impact = "Medium Impact"
-            else:
-                impact = "Normal Impact"
-
-            db_article = Article(
-                title=title,
-                headline=title,
-                summary=f"A short update on local {dept.lower()} activity near the {country} border.",
-                content=content,
-                url=url,
-                source=source,
-                country_code=cc,
-                published_at=pub_time,
-                impact_level=impact,
-                department=dept
-            )
-            session.add(db_article)
-            seeded_count += 1
+            for art_num in range(2):
+                title_templates = templates[dept]
+                temp = random.choice(title_templates)
+                title = temp.format(country=country) + f" (News Alert #{100 + idx * 17 + art_num * 13 + random.randint(1, 9)})"
+                summary = f"A short update on local {dept.lower()} activity near the {country} border."
+                content = (
+                    f"A verified update details recent developments near the {country} border. "
+                    f"Local teams report standard activity, and the area remains under regular watch. "
+                    f"More updates will follow as they are reported."
+                )
+                pub_time = datetime.now(timezone.utc) - timedelta(minutes=random.randint(1, 55) + art_num * 45)
                 
+                sources_map = {
+                    "Military & Defense": ["reuters.com", "apnews.com", "aljazeera.com"],
+                    "Economic & Financial": ["bloomberg.com", "reuters.com", "dw.com"],
+                    "Social Affairs & Welfare": ["bbc.com", "france24.com", "dw.com"],
+                    "Political & Diplomatic": ["theguardian.com", "nytimes.com", "aljazeera.com"],
+                    "Technology & Cyber": ["techcrunch.com", "wired.com", "theverge.com"]
+                }
+                src_list = sources_map.get(dept, ["bbc.com"])
+                source = random.choice(src_list)
+
+                search_query = f"{country}+{dept.split()[0]}"
+                if source == "reuters.com":
+                    url = f"https://www.reuters.com/site-search/?query={search_query}#art-{idx}-{art_num}"
+                elif source == "apnews.com":
+                    url = f"https://apnews.com/search?q={search_query}#art-{idx}-{art_num}"
+                elif source == "aljazeera.com":
+                    url = f"https://www.aljazeera.com/search/{search_query}#art-{idx}-{art_num}"
+                elif source == "bloomberg.com":
+                    url = f"https://www.bloomberg.com/search?query={search_query}#art-{idx}-{art_num}"
+                elif source == "dw.com":
+                    url = f"https://www.dw.com/en/search?q={search_query}#art-{idx}-{art_num}"
+                elif source == "bbc.com":
+                    url = f"https://www.bbc.com/search?q={search_query}#art-{idx}-{art_num}"
+                elif source == "france24.com":
+                    url = f"https://www.france24.com/en/search?q={search_query}#art-{idx}-{art_num}"
+                elif source == "theguardian.com":
+                    url = f"https://www.theguardian.com/search?q={search_query}#art-{idx}-{art_num}"
+                elif source == "nytimes.com":
+                    url = f"https://www.nytimes.com/search?query={search_query}#art-{idx}-{art_num}"
+                elif source == "techcrunch.com":
+                    url = f"https://techcrunch.com/?s={search_query}#art-{idx}-{art_num}"
+                elif source == "wired.com":
+                    url = f"https://www.wired.com/search?q={search_query}#art-{idx}-{art_num}"
+                elif source == "theverge.com":
+                    url = f"https://www.theverge.com/search?q={search_query}#art-{idx}-{art_num}"
+                else:
+                    url = f"https://www.google.com/search?q={source}+{search_query}#art-{idx}-{art_num}"
+
+                if idx == 0:
+                    impact = "High Impact"
+                elif idx in (1, 3):
+                    impact = "Medium Impact"
+                else:
+                    impact = "Normal Impact"
+
+                articles_to_create.append({
+                    "title": title,
+                    "headline": title,
+                    "summary": summary,
+                    "content": content,
+                    "url": url,
+                    "source": source,
+                    "country_code": cc,
+                    "published_at": pub_time,
+                    "impact_level": impact,
+                    "department": dept
+                })
+                texts_to_embed.append(f"{title} {summary}")
+
+    # Generate embeddings in batch
+    try:
+        from backend.app.services.classifier import get_embeddings_cached
+        embeddings = await get_embeddings_cached(texts_to_embed)
+    except Exception as e:
+        logger.error(f"[Database] Failed to compute embeddings during seeding: {e}")
+        embeddings = [None] * len(articles_to_create)
+
+    is_postgres = session.bind.dialect.name == "postgresql"
+    seeded_count = 0
+    for art_dict, emb in zip(articles_to_create, embeddings):
+        db_article = Article(
+            title=art_dict["title"],
+            headline=art_dict["headline"],
+            summary=art_dict["summary"],
+            content=art_dict["content"],
+            url=art_dict["url"],
+            source=art_dict["source"],
+            country_code=art_dict["country_code"],
+            published_at=art_dict["published_at"],
+            impact_level=art_dict["impact_level"],
+            department=art_dict["department"]
+        )
+        if emb:
+            if is_postgres:
+                db_article.embedding = emb
+            else:
+                db_article.embedding = json.dumps(emb)
+        session.add(db_article)
+        seeded_count += 1
+
     await session.commit()
     logger.info(f"[Database] Seeding finished. Added {seeded_count} articles across {len(countries_map)} countries.")
 

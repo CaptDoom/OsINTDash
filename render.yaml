@@ -4,14 +4,19 @@ services:
     env: docker
     branch: main
     dockerfilePath: Dockerfile.backend
-    startCommand: sh -c "uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT:-3001}"
+    plan: free
     envVars:
       - key: APP_ENV
         value: production
       - key: DATABASE_URL
-        value: ""
+        fromDatabase:
+          name: drishya-db
+          property: connectionString
       - key: REDIS_URL
-        value: ""
+        fromService:
+          name: drishya-redis
+          type: redis
+          property: connectionString
       - key: OPENAI_API_KEY
         value: ""
       - key: GOOGLE_API_KEY
@@ -44,3 +49,14 @@ services:
         value: ""
       - key: S3_BUCKET_NAME
         value: drishya-uploads
+
+  - type: redis
+    name: drishya-redis
+    plan: free
+    ipAllowList: []
+
+databases:
+  - name: drishya-db
+    databaseName: drishya
+    user: drishya_user
+    plan: free

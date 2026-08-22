@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     mediastack_api_key: Optional[str] = Field(default=None, validation_alias="MEDIASTACK_API_KEY")
     newscatcher_api_key: Optional[str] = Field(default=None, validation_alias="NEWSCATCHER_API_KEY")
     bing_news_api_key: Optional[str] = Field(default=None, validation_alias="BING_NEWS_API_KEY")
+    freenewsapi_key: Optional[str] = Field(default=None, validation_alias="FREENEWSAPI_KEY")
     websub_hub_url: Optional[str] = Field(default=None, validation_alias="WEBSUB_HUB_URL")
     callback_host: Optional[str] = Field(default=None, validation_alias="CALLBACK_HOST")
     llm_provider: Optional[str] = Field(default=None, validation_alias="LLM_PROVIDER")
@@ -54,14 +55,24 @@ class Settings(BaseSettings):
     enable_inline_job_processing: bool = True
     enable_redis_dedup: bool = True
     enable_demo_seed_data: Optional[bool] = None
+    enable_periodic_ingestion: bool = True
+    enable_redis_breaker_persistence: bool = True
 
     ingestion_batch_size: int = 50
     scrape_limit_per_country: int = 50
     request_retry_count: int = 4
+    rate_limit_retry_count: int = 3
+    server_error_retry_count: int = 2
     request_timeout_seconds: float = 12.0
     request_backoff_base_seconds: float = 0.8
     request_backoff_max_seconds: float = 12.0
     request_concurrency: int = 6
+    provider_concurrency: int = 5
+    circuit_breaker_failure_threshold: int = 3
+    circuit_breaker_rate_limit_threshold: int = 5
+    circuit_breaker_auth_cooldown_seconds: int = 30 * 60
+    circuit_breaker_rate_limit_cooldown_seconds: int = 15 * 60
+    circuit_breaker_server_error_cooldown_seconds: int = 5 * 60
     no_new_article_window_minutes: int = 60
     medium_priority_refresh_divisor: int = 2
     low_priority_refresh_days: int = 7

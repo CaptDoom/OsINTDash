@@ -2006,9 +2006,9 @@ app.get('/api/news', async (req, res) => {
 
       let operationalSummary = '';
       if (signals.length === 0) {
-        operationalSummary = 'STATUS: STABLE // NO NEW SIGNAL IN DETECTED WINDOW';
+        operationalSummary = 'No new updates in this time period.';
       } else {
-        operationalSummary = `Ingestion mesh verified. Detected ${signals.length} tactical and strategic border signals in the selected ${timeframe} monitoring window.`;
+        operationalSummary = `${signals.length} updates tracked in the ${timeframe} window.`;
       }
 
       return {
@@ -2075,9 +2075,9 @@ app.get('/api/news/all', async (req, res) => {
 
         let operationalSummary = '';
         if (signals.length === 0) {
-          operationalSummary = 'STATUS: STABLE // NO NEW SIGNAL IN DETECTED WINDOW';
+          operationalSummary = 'No new updates in this time period.';
         } else {
-          operationalSummary = `Ingestion mesh verified. Detected ${signals.length} tactical and strategic border signals in the selected ${timeframe} monitoring window.`;
+          operationalSummary = `${signals.length} updates tracked in the ${timeframe} window.`;
         }
 
         results[country] = {

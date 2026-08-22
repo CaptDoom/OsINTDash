@@ -216,57 +216,325 @@ const simplifyText = (text: string): string => {
   return clean;
 };
 
-const generateBrief = (category: string, _country: string, news: string): string => {
-  const lowerNews = news.toLowerCase();
+interface MockSignalTemplate {
+  headline: string;
+  summary: string;
+  impact: 'High' | 'Medium' | 'Low';
+}
+
+const mockSignalTemplates: Record<Category, MockSignalTemplate[]> = {
+  Military: [
+    {
+      headline: "Border guards set up 3 new watch outposts near {country} range",
+      summary: "In response to remote patrol gaps, defense engineers established three tactical observation points equipped with night-vision scopes and solar-battery backups near the {country} sector. Security forces confirm 24-hour staffing.",
+      impact: "Medium"
+    },
+    {
+      headline: "Soldiers complete regular safety practice drills with 450 personnel near {country} border",
+      summary: "A regional command unit concluded a 5-day training maneuver involving 450 infantry troops practicing logistics coordination and defense maneuvers. No live ammunition or heavy machinery was deployed during the routine event.",
+      impact: "Low"
+    },
+    {
+      headline: "Local officers check and update digital encrypted communication networks with {country}",
+      summary: "Border liaison teams completed a technical audit of direct telephone and cryptographic radio links connecting regional headquarters. Tests confirmed 100% signal clarity across both communication channels.",
+      impact: "Low"
+    },
+    {
+      headline: "Joint command teams coordinate regional boundary patrol routes along the {country} corridor",
+      summary: "Liaison teams signed a weekly schedule coordination agreement to synchronize patrols and prevent accidental crossing incidents. The plan maps out 12 distinct boundary segments for active coordination.",
+      impact: "Medium"
+    },
+    {
+      headline: "Safety patrol teams monitor crossing lanes near {country} checkpoint to prevent smuggling",
+      summary: "Liaison teams increased presence around key commercial lanes, deploying mobile inspection vehicles and checking 85 cargo shipments. The operation resulted in zero contraband detections.",
+      impact: "Low"
+    },
+    {
+      headline: "Defense ministry deploys upgraded radar defense array near the {country} border sector",
+      summary: "An advanced tactical detection radar was activated, covering a 150-kilometer monitoring sweep. Technical teams reported that the array integrates with the existing air defense system network.",
+      impact: "High"
+    },
+    {
+      headline: "Commanders raise border alert level to High near {country} following troop movement detections",
+      summary: "Intelligence sensors detected a temporary repositioning of foreign motorized divisions within 10 kilometers of the border, prompting local commanders to elevate security readiness for a 48-hour period.",
+      impact: "High"
+    },
+    {
+      headline: "Local command completes evacuation drill for 1,200 residents near {country} boundary",
+      summary: "Civil defense operators organized a safety training exercise simulating emergency transport for 1,200 border villagers. Local volunteer groups and medical units participated to test response times.",
+      impact: "Medium"
+    },
+    {
+      headline: "Humanitarian corridor established near {country} to process 300 daily asylum seekers",
+      summary: "Following regional instability, immigration agencies constructed a processing facility with 300 beds to manage refugee flows. Medical teams are on-site to provide initial health screenings.",
+      impact: "High"
+    },
+    {
+      headline: "Routine border fence repair works finished on 15 kilometers of the {country} boundary",
+      summary: "Engineering divisions replaced damaged barbed wire and reinforced support posts along a 15-kilometer stretch of the border. Work was completed ahead of schedule with zero security incidents.",
+      impact: "Low"
+    }
+  ],
+  Economic: [
+    {
+      headline: "Construction starts on a new 40-kilometer cargo highway connecting to {country}",
+      summary: "Infrastructure agencies began grading works on a 40-kilometer double-lane highway designed to carry up to 500 transport trucks daily. The project is financed by a $120M infrastructure grant.",
+      impact: "High"
+    },
+    {
+      headline: "A joint funding agreement of $45M signed to build commercial storage hubs with {country}",
+      summary: "Both governments agreed to co-finance three temperature-controlled logistics hubs near the main border checkpoint. Each facility will support up to 10,000 tons of agricultural cargo.",
+      impact: "Medium"
+    },
+    {
+      headline: "Customs checkpoint expands processing lanes from 2 to 6 near the {country} corridor",
+      summary: "To minimize cargo truck delays, the transport agency constructed four additional clearance lanes. Processing times are expected to drop from an average of 4 hours to just 45 minutes.",
+      impact: "Medium"
+    },
+    {
+      headline: "New trade guidelines launched to help 250 local craft businesses export to {country}",
+      summary: "A simplified export registry was created to assist 250 regional artisans in exporting products without paying standard commercial tariffs. Trade counselors will host training seminars.",
+      impact: "Low"
+    },
+    {
+      headline: "Major bridge reconstruction completed on the trade river route with {country}",
+      summary: "Engineers completed structural reinforcements on the main river transit bridge, raising its weight capacity to 60 tons. This permits heavy freight trucks to resume direct crossings.",
+      impact: "Medium"
+    },
+    {
+      headline: "Regional wheat prices drop by 15% following import tariff reductions from {country}",
+      summary: "Local markets reported a 15% decline in wholesale grain costs after the government enacted a temporary tariff holiday on agricultural imports. Supply volumes increased by 2,000 tons.",
+      impact: "Low"
+    },
+    {
+      headline: "Bilateral investment deal of $250M signed for cross-border power transmission line with {country}",
+      summary: "Power corporations finalized a $250M contract to construct a high-voltage connection line across the border. The project aims to transmit 500 megawatts of clean energy by 2027.",
+      impact: "High"
+    },
+    {
+      headline: "Currency exchange rates stabilize near the {country} border market zone",
+      summary: "Financial regulators reported that the local exchange rate fluctuated by less than 0.5% over the last week. The stability is attributed to increased cash reserves at regional bank branches.",
+      impact: "Low"
+    },
+    {
+      headline: "Bilateral trade volume reaches record $1.2B with {country} during first half of 2026",
+      summary: "Customs registries recorded a total bilateral trade value of $1.2B from January to June, representing a 22% increase year-on-year. Electronics and textile shipments drove the growth.",
+      impact: "High"
+    },
+    {
+      headline: "Border market expansion project opens 50 new retail stalls near {country} gate",
+      summary: "Local development boards completed construction on a new market wing, allocating 50 retail spaces to small businesses from both sides. The market operates under a relaxed permit scheme.",
+      impact: "Low"
+    }
+  ],
+  Political: [
+    {
+      headline: "Liaison teams open constructive security talk sessions near the {country} gate",
+      summary: "Diplomatic representatives met in a neutral border room to discuss local checkpoint rules and coordinate transit policies. Both sides agreed to set up weekly liaison calls.",
+      impact: "Medium"
+    },
+    {
+      headline: "Delegations sign a formal boundary security accord to prevent disputes with {country}",
+      summary: "Foreign ministers signed a security treaty defining joint procedures for handling border crossing violations. The pact establishes an escalation management protocol.",
+      impact: "High"
+    },
+    {
+      headline: "High-level ministerial summit scheduled next month to discuss border rules with {country}",
+      summary: "The foreign ministry confirmed that a bilateral conference will take place in the capital next month. Envoys will discuss trade tariff reductions and joint transport projects.",
+      impact: "Medium"
+    },
+    {
+      headline: "Border marking maps updated during friendly technical talks with {country}",
+      summary: "Geographical surveyors completed a joint survey of a 30-kilometer boundary segment, resolving minor cartographical differences and placing 8 new concrete markers.",
+      impact: "Low"
+    },
+    {
+      headline: "Bilateral envoys schedule peaceful border dispute talks with {country} next week",
+      summary: "Special representatives announced a meeting in a third-party country to negotiate guidelines for resolving recent fishing zone overlapping claims in the boundary river.",
+      impact: "Medium"
+    },
+    {
+      headline: "Joint commission resolves minor territorial dispute over a 2-hectare plot with {country}",
+      summary: "Technical teams signed a land swap agreement, transferring a 2-hectare agricultural plot to settle a localized mapping inconsistency. Both sides expressed satisfaction with the outcome.",
+      impact: "High"
+    },
+    {
+      headline: "Diplomatic protest issued to {country} over unauthorized drone flights near boundary",
+      summary: "The foreign ministry delivered a formal diplomatic note expressing concern over three observed surveillance drone incursions. The note requests a joint investigation into the incidents.",
+      impact: "High"
+    },
+    {
+      headline: "Border security treaty ratified by parliament, formalizing rules with {country}",
+      summary: "Lawmakers voted 185 to 22 to ratify the bilateral boundary management pact signed earlier this year. The law establishes standard operating procedures for regional commanders.",
+      impact: "Medium"
+    },
+    {
+      headline: "New border governor appointed to manage bilateral relations with {country}",
+      summary: "The administration appointed a senior diplomat as the new regional commissioner. The governor is tasked with coordinating trade facilitation and security cooperation.",
+      impact: "Low"
+    },
+    {
+      headline: "Parliamentary committee reviews foreign policy guidelines concerning {country}",
+      summary: "Members of the security committee held a closed-door briefing to review bilateral ties. The panel recommended maintaining current diplomatic initiatives and trade incentives.",
+      impact: "Low"
+    }
+  ],
+  Social: [
+    {
+      headline: "Mobile health clinics treat 1,500 families at crossing points with {country}",
+      summary: "Health agencies deployed three mobile medical vans to provide free pediatric and general checkups to 1,500 local residents and travelers along the border corridor.",
+      impact: "Low"
+    },
+    {
+      headline: "Local council expands border housing program for 120 families near {country}",
+      summary: "A regional housing board allocated $8.5M to construct low-cost housing units for 120 families displaced by historical boundary adjustments. Construction will conclude in 8 months.",
+      impact: "Medium"
+    },
+    {
+      headline: "Emergency water and food aid delivered to 450 border households near {country}",
+      summary: "Following a severe regional drought, civil defense teams distributed 15,000 liters of clean drinking water and 5 tons of food rations to 450 remote farming households.",
+      impact: "Medium"
+    },
+    {
+      headline: "Cultural friendship festival brings 800 citizens together near the {country} gate",
+      summary: "Community groups organized a joint music and food festival, attracting 800 participants from both sides of the border. The event was held in a designated visa-free zone.",
+      impact: "Low"
+    },
+    {
+      headline: "New primary health center opens to serve 3,000 residents near {country} corridor",
+      summary: "Local governments funded a new clinic equipped with 10 patient beds and a basic pharmacy. The center will provide 24-hour emergency care for 3,000 nearby villagers.",
+      impact: "Low"
+    },
+    {
+      headline: "Joint environmental river cleanup clears 12 tons of plastic waste near {country}",
+      summary: "Volunteers from local schools and environmental groups cleaned a 5-kilometer stretch of the border river, recovering and recycling 12 tons of municipal plastic waste.",
+      impact: "Low"
+    },
+    {
+      headline: "Humanitarian aid agency distributes winter clothing kits to 2,000 children near {country}",
+      summary: "An international relief group distributed insulated jackets, boots, and blankets to 2,000 children in mountain schools. The initiative was funded by a public charity campaign.",
+      impact: "Low"
+    },
+    {
+      headline: "School construction project completed, providing classrooms for 400 pupils near {country}",
+      summary: "Education officials opened a modern secondary school with 12 classrooms and a computer lab. The facility will serve 400 children from three adjacent rural districts.",
+      impact: "Medium"
+    },
+    {
+      headline: "Regional disaster relief drills train 200 local volunteers near {country} border",
+      summary: "Emergency services conducted search-and-rescue simulations for 200 community volunteers. The training covered landslide response and flash flood evacuation techniques.",
+      impact: "Low"
+    },
+    {
+      headline: "Rural electrification project connects 850 border homes near {country} corridor",
+      summary: "Utility companies completed the installation of local power grids, connecting 850 remote households to electricity for the first time. The project was subsidized by regional grants.",
+      impact: "High"
+    }
+  ],
+  Tech: [
+    {
+      headline: "Defense teams implement new cybersecurity firewalls protecting networks near {country}",
+      summary: "Information security officers deployed advanced intrusion prevention software across local servers. The upgrade blocked over 1,200 automated network port scans during its first day.",
+      impact: "Medium"
+    },
+    {
+      headline: "Liaison teams install new satellite telecom links at outposts near {country}",
+      summary: "Technical units mounted three high-speed satellite dishes at remote watchpoints to replace unstable copper wires. The connection provides a reliable 50 Mbps telemetry uplink.",
+      impact: "Low"
+    },
+    {
+      headline: "Digital monitoring tool tracks daily trade vehicle patterns near {country} border",
+      summary: "A software development team deployed an automated license plate recognition database at the main gate. The system tracks and logs an average of 400 commercial vehicles daily.",
+      impact: "Low"
+    },
+    {
+      headline: "Cellular network expansion installs 4 new mobile towers near the {country} sector",
+      summary: "Telecom corporations activated four new cellular base stations, extending 4G/LTE mobile coverage to a previously isolated 25-kilometer stretch of the main transit road.",
+      impact: "Medium"
+    },
+    {
+      headline: "Signal jammer countermeasures undergo field tests along the {country} border",
+      summary: "Electronic warfare units conducted testing of frequency-hopping radios to secure tactical networks against simulated signal interference. The test reported 98% transmission reliability.",
+      impact: "High"
+    },
+    {
+      headline: "Border agencies deploy 45 remote seismic sensors near the {country} crossing",
+      summary: "Geologists and security teams installed 45 subterranean seismic nodes to detect heavy vehicle movement and coordinate alerts. Sensors stream data to a central database.",
+      impact: "Medium"
+    },
+    {
+      headline: "New weather telemetry station activated at Siachen Glacier near {country} line",
+      summary: "Meteorological units deployed an automated station monitoring temperature, barometric pressure, and wind speeds up to 120 km/h. The station uploads data every 10 minutes.",
+      impact: "Low"
+    },
+    {
+      headline: "Liaison team tests drone detection radar covering 10-kilometer range near {country}",
+      summary: "A specialized warning system was activated, capable of detecting small commercial drones within a 10-kilometer radius. The radar successfully identified 12 test targets.",
+      impact: "High"
+    },
+    {
+      headline: "Customs gate installs automated thermal scanning gates near {country} entrance",
+      summary: "Health and safety boards completed the installation of automated temperature scanning corridors. The gates can scan up to 60 passengers per minute for thermal anomalies.",
+      impact: "Low"
+    },
+    {
+      headline: "Satellite tracking system reports high-resolution imagery updates near {country} border",
+      summary: "The space research office activated a daily imaging pass, delivering 0.5-meter resolution imagery. The service will monitor construction projects and environmental changes.",
+      impact: "Medium"
+    }
+  ]
+};
+
+const getHashCode = (str: string): number => {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    hash = str.charCodeAt(i) + ((hash << 5) - hash);
+  }
+  return Math.abs(hash);
+};
+
+const generateBrief = (_category: string, country: string, headline: string, summary: string): string => {
+  const name = country || 'the border';
+  const cleanHeadline = headline.trim().replace(/\.$/, '');
+  const cleanSummary = summary.trim();
   
-  if (category === 'Military') {
-    if (lowerNews.includes('drill') || lowerNews.includes('practice') || lowerNews.includes('exercise')) {
-      return "This is a routine training exercise and does not signal an immediate threat of conflict.";
-    }
-    return "Increased guard activity helps prevent unexpected border incidents and keeps local areas peaceful.";
-  }
-  if (category === 'Economic') {
-    if (lowerNews.includes('price') || lowerNews.includes('cost') || lowerNews.includes('drop') || lowerNews.includes('lower') || lowerNews.includes('cheaper')) {
-      return "Families can save money on their daily shopping bills.";
-    }
-    if (lowerNews.includes('trade') || lowerNews.includes('port') || lowerNews.includes('highway') || lowerNews.includes('road')) {
-      return "Smoother trade routes will make everyday goods cheaper and more available.";
-    }
-    return "Economic stability ensures steady jobs and reliable supplies of goods for local markets.";
-  }
-  if (category === 'Political') {
-    if (lowerNews.includes('agree') || lowerNews.includes('talk') || lowerNews.includes('meet') || lowerNews.includes('sign')) {
-      return "Better cooperation between leaders means a lower chance of sudden border shutdowns.";
-    }
-    return "Political stability helps the government focus on improving services for the community.";
-  }
-  if (category === 'Social') {
-    if (lowerNews.includes('cleanup') || lowerNews.includes('community') || lowerNews.includes('volunteer')) {
-      return "Cleaner streets mean better health and a nicer place to live for everyone.";
-    }
-    if (lowerNews.includes('aid') || lowerNews.includes('resettlement') || lowerNews.includes('welfare') || lowerNews.includes('food')) {
-      return "Local families will receive better health support and community assistance.";
-    }
-    return "Stronger community ties help neighbors support each other in daily life.";
-  }
-  if (category === 'Tech') {
-    if (lowerNews.includes('safety') || lowerNews.includes('rule') || lowerNews.includes('ai')) {
-      return "This protects your personal data and ensures tech tools do not make dangerous errors.";
-    }
-    if (lowerNews.includes('cyber') || lowerNews.includes('hack') || lowerNews.includes('security') || lowerNews.includes('protect')) {
-      return "Your digital services, banking, and communications remain safe from hackers.";
-    }
-    return "New technology makes communication faster and daily online tasks easier.";
-  }
+  // Extract numbers
+  const numbers = Array.from(new Set(
+    `${cleanHeadline} ${cleanSummary}`.match(/\b\d+(?:\.\d+)?%?|\$\d+(?:\.\d+)?(?:M|B)?\b/g) || []
+  ));
+  const metricsInfo = numbers.length > 0 ? ` involving ${numbers.join(' and ')}` : '';
   
-  return "This update shows steady development, helping keep the region stable and safe for everyone.";
+  // Extract first 3-5 words of the headline as the core event
+  const headlineWords = cleanHeadline.split(/\s+/);
+  const coreEvent = headlineWords.slice(0, Math.min(headlineWords.length, 5)).join(' ');
+  
+  // Hash code based on headline to select a structure
+  const hash = getHashCode(cleanHeadline);
+  
+  // Define 12 diverse sentence structures
+  const structures = [
+    `The development concerning "${coreEvent}"${metricsInfo} directly influences security postures and bilateral cooperation parameters with ${name}.`,
+    `Strategic assessments of the situation regarding "${coreEvent}"${metricsInfo} suggest long-term implications for the regional stability of ${name}.`,
+    `Following "${coreEvent}"${metricsInfo}, monitoring teams along the ${name} sector have increased operational surveillance.`,
+    `The specific incident of "${coreEvent}"${metricsInfo} highlights evolving tactical dynamics near the ${name} frontier.`,
+    `Local operations related to "${coreEvent}"${metricsInfo} reflect a shift in how ${name} border security is handled.`,
+    `The announcement of "${coreEvent}"${metricsInfo} introduces new coordination requirements for administrators along the ${name} corridor.`,
+    `With "${coreEvent}"${metricsInfo}, political and defense agencies must recalibrate their long-term security expectations for the ${name} boundary.`,
+    `Technical and logistics analysis of "${coreEvent}"${metricsInfo} points to significant infrastructure integration near ${name}.`,
+    `The event described as "${coreEvent}"${metricsInfo} underscores the critical importance of regular communication channels with ${name}.`,
+    `A review of "${coreEvent}"${metricsInfo} indicates changing civilian and economic factors along the ${name} sector.`,
+    `Recent updates on "${coreEvent}"${metricsInfo} show how tactical adjustments near ${name} can alter border conditions.`,
+    `Strategic analysis regarding "${coreEvent}"${metricsInfo} indicates that security coordination with ${name} remains highly dynamic.`
+  ];
+  
+  return structures[hash % structures.length];
 };
 
 const getFormattedNewsItem = (signal: Signal) => {
   const cleanHeadline = simplifyText(signal.headline);
   const cleanNews = simplifyText(signal.summary || signal.headline);
   const timeLabel = formatRelativeTime(signal.timestamp);
-  const brief = generateBrief(signal.category, signal.country, cleanNews);
+  const brief = generateBrief(signal.category, signal.country, cleanHeadline, cleanNews);
   
   return {
     headline: cleanHeadline,
@@ -1515,49 +1783,12 @@ function App() {
       const mockSignals: Signal[] = [];
       const sources = ['bbc.com', 'reuters.com', 'apnews.com', 'aljazeera.com', 'bloomberg.com', 'dw.com', 'france24.com'];
       
-      const templates: Record<Category, string[]> = {
-        Military: [
-          "Border guards set up new watch points near {country} to keep people safe",
-          "Soldiers complete regular safety practice drills near the boundary with {country}",
-          "Local officers check and update communication systems with {country} counterparts",
-          "Command teams work together to share border patrol duties near the {country} border",
-          "Safety patrol teams monitor the crossing lanes near {country} to check security"
-        ],
-        Economic: [
-          "Work starts on a new road to improve travel and commercial trade with {country}",
-          "A joint funding agreement is signed to build storage hubs with {country}",
-          "Customs checkpoint lanes are expanded to help goods move faster with {country}",
-          "New trade guidelines help local shops sell products across borders with {country}",
-          "Construction projects are finished on connecting roads near {country}"
-        ],
-        Social: [
-          "Medical checkup camps are set up to help travelers at crossing points with {country}",
-          "Community programs are expanded to build homes near the {country} border",
-          "Food and water supplies are delivered to remote communities near the {country} border",
-          "New cultural friendship programs bring communities closer with {country}",
-          "Health centers open new rooms to serve families near the {country} corridor"
-        ],
-        Political: [
-          "Local leaders agree on how to run checkpoints safely with {country}",
-          "Representatives sign a cooperative plan for shared border rules with {country}",
-          "A regional meeting of officers agrees on shared border security rules with {country}",
-          "Maps and border marking details are updated during friendly talks with {country}",
-          "Envoys set dates for peaceful border discussions with {country}"
-        ],
-        Tech: [
-          "Computer protection systems block cyber attacks targeting local networks near {country}",
-          "Communication stations get new equipment to track signals near the {country} border",
-          "New software tools are used to monitor traffic trends near the {country} border",
-          "Mobile phone network coverage is improved along routes near {country}",
-          "Signal blockers are tested to stop unauthorized communications near the {country} border"
-        ]
-      };
-      
-      const categoryTemplates = templates[selectedCategory] || templates['Political'];
+      const templates = mockSignalTemplates[selectedCategory] || mockSignalTemplates['Political'];
       
       for (let i = 0; i < needed; i++) {
-        const template = categoryTemplates[i % categoryTemplates.length];
-        const headline = template.replace('{country}', selectedCountry.name);
+        const template = templates[i % templates.length];
+        const headline = template.headline.replace('{country}', selectedCountry.name);
+        const summary = template.summary.replace('{country}', selectedCountry.name);
         const source = sources[i % sources.length];
         
         const urlMap: Record<string, string> = {
@@ -1580,9 +1811,9 @@ function App() {
           id: `dynamic-mock-${selectedCountry.name}-${selectedCategory}-${i}`,
           country: selectedCountry.name,
           category: selectedCategory,
-          impact: "High",
+          impact: template.impact,
           headline: headline,
-          summary: `A new update reports standard activity for ${selectedCategory.toLowerCase()} sectors near the border. Local teams report that everything is peaceful and stable.`,
+          summary: summary,
           source: source,
           timestamp: new Date(Date.now() - (i + 1) * 4 * 3600 * 1000).toISOString(),
           url: url,
@@ -2085,15 +2316,62 @@ function App() {
       }
 
       const data = await response.json();
+      let finalUserData = null;
+
+      if (data.mfa_required) {
+        let signature = '';
+        if (globalThis.crypto?.subtle) {
+          const enc = new TextEncoder();
+          const keyBytes = enc.encode(loginForm.password);
+          const msgBytes = enc.encode(data.challenge);
+          const cryptoKey = await globalThis.crypto.subtle.importKey(
+            "raw",
+            keyBytes,
+            { name: "HMAC", hash: { name: "SHA-256" } },
+            false,
+            ["sign"]
+          );
+          const signatureBuffer = await globalThis.crypto.subtle.sign(
+            "HMAC",
+            cryptoKey,
+            msgBytes
+          );
+          const hashArray = Array.from(new Uint8Array(signatureBuffer));
+          signature = hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+        } else {
+          throw new Error('Web Crypto API not available for MFA simulation');
+        }
+
+        const mfaResponse = await fetch('/api/auth/verify_mfa', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            temp_token: data.temp_token,
+            signature: signature
+          })
+        });
+
+        if (!mfaResponse.ok) {
+          const errData = await mfaResponse.json();
+          setLoginError(errData.detail || 'MFA validation failed.');
+          setIsWebAuthnSimulating(false);
+          return;
+        }
+
+        const mfaData = await mfaResponse.json();
+        finalUserData = mfaData.user;
+      } else {
+        finalUserData = data.user;
+      }
 
       setTimeout(() => {
         setWebauthnSuccess(true);
         setTimeout(() => {
           setAuthUser({
-            id: data.user.id,
-            name: data.user.username,
-            role: data.user.role.toUpperCase(),
-            clearance: clearanceForRole(data.user.role),
+            id: finalUserData.id,
+            name: finalUserData.username,
+            role: finalUserData.role.toUpperCase(),
+            clearance: clearanceForRole(finalUserData.role),
           });
           setIsWebAuthnSimulating(false);
           setWebauthnSuccess(false);

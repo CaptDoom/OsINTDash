@@ -1,9 +1,12 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response
+import csv
+import io
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from backend.app.database import get_db, Article
 from backend.app.services.summarizer import generate_archive_summary, generate_archive_field_summary
 
@@ -23,8 +26,7 @@ class ArticleResponse(BaseModel):
     department: str
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 class SummaryResponse(BaseModel):
     timeframe: str
@@ -35,6 +37,10 @@ class SummaryResponse(BaseModel):
 async def get_archived_articles(
     timeframe: str,
     department: Optional[str] = Query(None, description="Filter by department (e.g. 'Military & Defense')"),
+    country_code: Optional[str] = Query(None, min_length=2, max_length=3),
+    source: Optional[str] = Query(None),
+    impact_level: Optional[str] = Query(None),
+    q: Optional[str] = Query(None, description="Search title, summary, content, or source"),
     limit: int = Query(500, ge=1, le=1000),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db)
@@ -56,6 +62,20 @@ async def get_archived_articles(
     stmt = select(Article)
     if department:
         stmt = stmt.where(Article.department == department)
+    if country_code:
+        stmt = stmt.where(Article.country_code == country_code.upper())
+    if source:
+        stmt = stmt.where(Article.source.ilike(f"%{source.strip()}%"))
+    if impact_level:
+        stmt = stmt.where(Article.impact_level == impact_level)
+    if q and q.strip():
+        term = f"%{q.strip()}%"
+        stmt = stmt.where(
+            Article.title.ilike(term)
+            | Article.summary.ilike(term)
+            | Article.content.ilike(term)
+            | Article.source.ilike(term)
+        )
 
     stmt_time = stmt.where(Article.published_at >= start_date)
     stmt_time = stmt_time.order_by(Article.published_at.desc()).limit(limit).offset(offset)
@@ -70,6 +90,51 @@ async def get_archived_articles(
         articles = result.scalars().all()
         
     return articles
+
+
+@router.get("/export/{timeframe}")
+async def export_archived_articles(
+    timeframe: str,
+    format: str = Query("json", pattern="^(json|csv)$"),
+    department: Optional[str] = Query(None),
+    country_code: Optional[str] = Query(None, min_length=2, max_length=3),
+    db: AsyncSession = Depends(get_db),
+):
+    """Export archive evidence in machine-readable JSON or CSV form."""
+    if timeframe not in ["1M", "6M", "1Y"]:
+        raise HTTPException(status_code=400, detail="Invalid timeframe. Must be '1M', '6M', or '1Y'")
+    now = datetime.now(timezone.utc)
+    days = {"1M": 30, "6M": 180, "1Y": 365}[timeframe]
+    stmt = select(Article).where(Article.published_at >= now - timedelta(days=days))
+    if department:
+        stmt = stmt.where(Article.department == department)
+    if country_code:
+        stmt = stmt.where(Article.country_code == country_code.upper())
+    result = await db.execute(stmt.order_by(Article.published_at.desc()).limit(5000))
+    articles = result.scalars().all()
+    rows = [
+        {
+            "id": article.id,
+            "title": article.title,
+            "summary": article.summary or article.content[:300],
+            "url": article.url,
+            "source": article.source,
+            "country_code": article.country_code,
+            "published_at": article.published_at.isoformat(),
+            "impact_level": article.impact_level,
+            "department": article.department,
+            "confidence_score": article.confidence_score,
+        }
+        for article in articles
+    ]
+    if format == "json":
+        import json
+        return Response(json.dumps(rows, default=str), media_type="application/json")
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=list(rows[0].keys()) if rows else ["id", "title", "summary", "url", "source", "country_code", "published_at", "impact_level", "department", "confidence_score"])
+    writer.writeheader()
+    writer.writerows(rows)
+    return Response(buffer.getvalue(), media_type="text/csv", headers={"Content-Disposition": f"attachment; filename=drishya-{timeframe}.csv"})
 
 @router.post("/summary/{timeframe}")
 async def trigger_archive_summary(

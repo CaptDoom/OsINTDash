@@ -70,15 +70,18 @@ async def scrape_url(url: str) -> str:
         return f"URL Source ({url}) failed: {str(e)}"
 
 def generate_fallback_summary(country_name: str, timeframe_label: str, articles: list, external_context: str) -> str:
-    md = f"NEWS AND STABILITY BRIEFING: {country_name.upper()} ({timeframe_label.upper()})\n\n"
+    md = f"# News Briefing: {country_name} ({timeframe_label})\n\n"
     
-    md += "### **1. SUMMARY**\n"
+    md += "## Summary\n"
     if articles:
-        md += f"We have found {len(articles)} new updates for {country_name} over the last {timeframe_label}. General activity is running normally.\n\n"
+        sources = set(art.source for art in articles if art.source)
+        sources_str = ", ".join(list(sources)[:3])
+        headlines_summary = "; ".join(f"'{art.title}'" for art in articles[:2])
+        md += f"{len(articles)} updates found for {country_name} over the last {timeframe_label} from **{sources_str or 'news sources'}**. Key reports: {headlines_summary}. Activity is within normal levels.\n\n"
     else:
-        md += f"The situation in {country_name} over the last {timeframe_label} is quiet and stable. No major alerts or changes have been reported.\n\n"
+        md += f"No significant updates for {country_name} over the last {timeframe_label}. Things are quiet and stable.\n\n"
     
-    md += "### **2. SECTOR DETAILS**\n"
+    md += "## Details by Area\n"
     
     # Group by dept
     by_dept = {}
@@ -89,7 +92,7 @@ def generate_fallback_summary(country_name: str, timeframe_label: str, articles:
         by_dept[dept].append(art)
         
     for dept in ["Military & Defense", "Economic & Financial", "Political & Diplomatic", "Social Affairs & Welfare / Technology"]:
-        md += f"#### **{dept}**\n"
+        md += f"### {dept}\n"
         # Match departments
         if dept == "Social Affairs & Welfare / Technology":
             dept_arts = by_dept.get("Social Affairs & Welfare", []) + by_dept.get("Technology & Cyber", [])
@@ -97,20 +100,24 @@ def generate_fallback_summary(country_name: str, timeframe_label: str, articles:
             dept_arts = by_dept.get(dept, [])
             
         if not dept_arts:
-            md += f"- **General Status**: The situation in this sector is quiet and normal. Precautionary measures and normal routines are in place.\n"
-            md += f"- **Data Update**: No new reports have been received in this time period. We are continuing to watch for updates.\n\n"
+            md += f"- No reports in this area. Things are normal.\n\n"
         else:
+            src_list = list(set(art.source for art in dept_arts if art.source))[:3]
+            srcs_str = " and ".join(src_list) if len(src_list) > 1 else (src_list[0] if src_list else "news sources")
+            md += f"- Recent updates from **{srcs_str}**:\n"
             for art in dept_arts[:4]:
-                md += f"- **[{art.title}]({art.url})** ({art.source}): {art.summary or art.content[:180]}...\n"
+                md += f"  - **[{art.title}]({art.url})** ({art.source}): {art.summary or art.content[:180]}\n"
             md += "\n"
             
     if external_context.strip() and "No external documents" not in external_context:
-        md += "#### **Extra Shared Details**\n"
-        md += f"Additional documents show the following details:\n"
-        md += f"> {external_context[:1000]}...\n\n"
+        md += "### Additional Details\n"
+        md += f"> {external_context[:800]}\n\n"
         
-    md += "### **3. WHAT THIS MEANS FOR ORDINARY PEOPLE**\n"
-    md += "Everything is running as usual. There is no immediate threat to public safety, and trade and travel are normal. We recommend keeping an eye on normal daily updates.\n"
+    md += "## What This Means for People\n"
+    if articles:
+        md += f"Daily life, travel, and safety are not affected. Everything continues as normal.\n"
+    else:
+        md += "Nothing unusual. Life goes on as normal. Check back for updates.\n"
     return md
 
 @router.post("/generate")

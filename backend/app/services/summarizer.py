@@ -57,18 +57,18 @@ def _local_summary(articles: List[Article], timeframe: str) -> str:
             by_dept[article.department] = []
         by_dept[article.department].append(article)
 
-    markdown = f"# Executive News Briefing ({timeframe})\n"
-    markdown += f"Generated at: {_utc_now().isoformat()} (Fallback Report)\n\n"
+    markdown = f"# News Briefing ({timeframe})\n"
+    markdown += f"Generated: {_utc_now().isoformat()}\n\n"
     for dept, grouped in by_dept.items():
         markdown += f"## {dept}\n"
         if not grouped:
-            markdown += "*No high impact events recorded in this sector.*\n\n"
+            markdown += "No reports in this area.\n\n"
             continue
-        markdown += f"*Total verified updates: {len(grouped)}*\n\n"
+        markdown += f"*{len(grouped)} updates*\n\n"
         for index, article in enumerate(grouped[:5], start=1):
             summary_text = article.summary or article.content[:160] + "..."
             markdown += f"**{index}. [{article.title}]({article.url})**  \n"
-            markdown += f"Source: {article.source} | Target: {article.country_code}  \n"
+            markdown += f"Source: {article.source} | {article.country_code}  \n"
             markdown += f"{summary_text}  \n\n"
     return markdown
 
@@ -243,7 +243,7 @@ async def generate_archive_summary(timeframe: str, db: AsyncSession) -> str:
     stmt = select(Article).where(Article.impact_level == "High Impact", Article.published_at >= start_date).order_by(Article.published_at.desc())
     articles = (await db.execute(stmt)).scalars().all()
     if not articles:
-        summary = f"# Executive OSINT Briefing ({timeframe})\n\nNo high impact events detected within this archive window."
+        summary = f"# News Briefing ({timeframe})\n\nNo major events found in this time period. Things are quiet and stable."
         await _write_cache(timeframe, version, summary)
         return summary
 
@@ -293,7 +293,7 @@ async def generate_archive_field_summary(timeframe: str, department: Optional[st
         articles = (await db.execute(stmt)).scalars().all()
 
     if not articles:
-        return f"# Executive Briefing: {department or 'All Fields'} ({timeframe})\n\nNo active reports found for this field in this archive window."
+        return f"# News Update: {department or 'All Fields'} ({timeframe})\n\nNo reports found for this area in this time period."
 
     # Take up to 35 most relevant/recent articles to summarize to avoid token limits
     articles = list(articles)[:35]
@@ -302,24 +302,21 @@ async def generate_archive_field_summary(timeframe: str, department: Optional[st
     
     field_name = department or "All Fields"
     prompt = f"""
-    REAL-TIME NEWS FIELD SUMMARY
+    Summarize the news below about {field_name} over {timeframe}.
+    Write in plain, everyday English. No military or intelligence jargon.
+    Be direct and concise. Every sentence must add new information.
     
-    You are an expert communicator who translates complex news into simple, plain English.
-    Generate a concise and clear summary of the news updates for the field '{field_name}' over the timeframe '{timeframe}'.
-    
-    Use simple, everyday words. Avoid any jargon, such as "OSINT," "telemetry," "bilaterals," "strategic meetings," "tactical," "reconnaissance," "frontier," etc.
-    Provide the summary based strictly on the following verified articles:
-    -----------------------------------------------------
+    NEWS ARTICLES:
     {article_context}
-    -----------------------------------------------------
     
-    INSTRUCTIONS:
-    1. Summarize the key updates and developments in simple English.
-    2. Keep the summary concise, factual, and direct. Avoid conversational filler.
-    3. Organize into:
-       - **1. KEY DEVELOPMENTS**: Bulleted list of key developments.
-       - **2. PUBLIC SAFETY & STABILITY**: Analysis of the impact on everyday people.
-    4. Keep the total output under 250 words.
+    FORMAT:
+    **Key Developments** - Bulleted list of what happened (2-5 bullets).
+    **Impact** - What this means for everyday people (2-3 sentences).
+    
+    RULES:
+    - No jargon (no OSINT, telemetry, bilaterals, tactical, reconnaissance, frontier, strategic, etc.).
+    - No filler words, no first-person, no opinions.
+    - Keep the total response under 200 words.
     """
     
     summary = ""

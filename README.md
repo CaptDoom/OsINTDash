@@ -82,6 +82,10 @@ Please refer to the [USER_GUIDE.md](file:///c:/Users/Asus/Desktop/DashNews/USER_
    OLLAMA_BASE_URL=http://127.0.0.1:11434
    ```
 
+Copy `.env.example` to `.env` to see the complete configuration. The frontend uses
+`VITE_API_BASE_URL` when set; otherwise it uses the current origin, which allows the
+Docker Nginx proxy to connect to the backend without additional browser configuration.
+
 ### Local LLM Setup (Ollama)
 1. Install Ollama locally from https://ollama.com.
 2. Pull the default open-weight model:
@@ -101,6 +105,12 @@ npm run dev
 To execute the automated Python backend unit and integration test suite:
 ```bash
 python -m unittest backend/tests/test_all.py
+```
+
+The faster equivalent is:
+
+```bash
+python -m pytest -q backend/tests/test_all.py
 ```
 
 ### Production Build

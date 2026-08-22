@@ -6,7 +6,7 @@ import asyncio
 from collections import Counter
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
@@ -93,7 +93,7 @@ async def search_relevant_articles(db: AsyncSession, doc_text: str, limit: int =
         except Exception as pg_err:
             logger.warning(f"[Chat] pgvector query failed, falling back to local numpy similarity: {pg_err}")
     
-    stmt = select(Article)
+    stmt = select(Article).order_by(Article.published_at.desc()).limit(200)
     result = await db.execute(stmt)
     articles = result.scalars().all()
     if not articles:
@@ -245,37 +245,30 @@ async def process_fusion_job(job_id: str, temp_file_path: str, filename: str, in
             )
 
         await job_store.update(job_id, "fusion", status="synthesizing", progress=75, step="synthesizing")
-        # 2. LLM synthesis
+        # 2. LLM synthesis - crisp, concise, jargon-free
         prompt = f"""
-        REAL-TIME NEWS AND STABILITY REPORT
+        Cross-reference the uploaded document with the news reports below.
+        Write in plain, everyday English. No military or intelligence jargon.
+        Be direct and concise. Every sentence must add new information.
         
-        You are an expert communicator who translates complex news into simple, plain English.
-        Below is the text extracted from an uploaded document:
-        -----------------------------------------------------
+        UPLOADED DOCUMENT:
         {extracted_text[:3000]}
-        -----------------------------------------------------
-
-        Cross-reference this file against the following verified public news reports:
-        -----------------------------------------------------
+        
+        NEWS REPORTS:
         {article_context}
-        -----------------------------------------------------
-
-        OPERATOR INSTRUCTIONS / TASKS TO PERFORM:
-        -----------------------------------------------------
-        {instructions if instructions else "Provide a general cross-reference news briefing."}
-        -----------------------------------------------------
-
-        INSTRUCTIONS:
-        1. Deliver a clear, objective, and simple briefing.
-        2. Use simple, everyday words. Avoid any jargon, such as "OSINT," "telemetry," "bilaterals," "strategic meetings," "tactical," "reconnaissance," "frontier," etc.
-        3. Format using clear headings:
-           - **1. OVERVIEW**: Summary of facts, locations, and actions in plain English.
-           - **2. NEWS COMPARISON**: Explain the connections between the uploaded document and the public news reports.
-           - **3. WHAT THIS MEANS FOR ORDINARY PEOPLE**: Explain the impact on daily citizen safety, costs, travel, or general stability.
-        4. You must use a direct, objective, and clear tone. Avoid conversational fillers, jokes, or first-person pronouns.
-        5. You MUST cite the news sources where applicable using markdown links (e.g. "[Title of news article](URL)").
-        6. If the document has no relation to the news reports, state "NO CORRELATION ESTABLISHED" and write a helpful brief in simple English.
-        7. Deliver a detailed and clear response.
+        
+        USER REQUEST: {instructions if instructions else "Provide a general comparison."}
+        
+        FORMAT:
+        **Document Summary** - 2-3 sentences on what the document is about.
+        **News Comparison** - How the document connects to recent news. Cite sources as [Title](URL).
+        **Impact** - What this means for everyday people in 1-2 sentences.
+        
+        RULES:
+        - No jargon (no OSINT, telemetry, bilaterals, tactical, reconnaissance, frontier, strategic, etc.).
+        - No filler words, no first-person, no opinions.
+        - If no connection exists, say: "No link found between the document and current news."
+        - Keep the total response under 300 words.
         """
 
         fused_summary = ""
@@ -341,27 +334,23 @@ def extract_simple_docx_text(path: str) -> str:
         return "Word document text extraction fallback"
 
 def generate_local_fusion_fallback(doc_text: str, articles: List[Article]) -> str:
-    md = "NEWS AND STABILITY REPORT (OFFLINE FALLBACK)\n\n"
+    md = "**News Briefing**\n\n"
     
-    md += "**1. OVERVIEW**\n"
-    md += f"The query or text contains: \n> {doc_text[:350]}...\n\n"
+    md += "**What was searched:**\n"
+    md += f"> {doc_text[:300]}...\n\n"
     
-    md += "**2. DETAILED ANALYSIS & NEWS COMPARISON**\n"
     if not articles:
-        md += "*NO LIVE NEWS FEEDS IN SPECIFIED SECTOR.*\n\n"
+        md += "No matching news articles found in the database.\n"
     else:
-        md += "Matched the following public news reports:\n\n"
-        for art in articles:
+        md += f"**Found {len(articles)} related articles:**\n\n"
+        for art in articles[:5]:
             md += (
-                f"*   **[{art.title}]({art.url or '#'})**\n"
-                f"    *   *Source*: {art.source or 'Unknown'}\n"
-                f"    *   *Department*: {art.department or 'General'}\n"
-                f"    *   *Target*: {art.country_code or 'Global'}\n"
-                f"    *   *News*: {art.summary or art.content[:160]}...\n\n"
+                f"- **[{art.title}]({art.url or '#'})**\n"
+                f"  Source: {art.source or 'Unknown'} | {art.country_code or 'Global'}\n"
+                f"  {art.summary or art.content[:160]}\n\n"
             )
-            
-    md += "**3. WHAT THIS MEANS FOR ORDINARY PEOPLE**\n"
-    md += "The search matched local reports in the system. Everything is running as usual, and we suggest checking active daily updates for any changes.\n"
+    
+    md += "**What this means:** Nothing unusual. Daily life and travel continue normally. Check back for updates.\n"
     return md
 
 
@@ -419,35 +408,29 @@ async def chat_query(payload: ChatQuery):
             history_context += f"{role}: {msg.text}\n"
         history_context += "\n"
 
-    # 3. LLM synthesis
+    # 3. LLM synthesis - crisp, concise, jargon-free
     prompt = f"""
-    REAL-TIME NEWS AND STABILITY REPORT
-    
-    You are an expert communicator who translates complex news into simple, plain English.
+    Answer the user's question using ONLY the news reports below.
+    Write in plain, everyday English. No military or intelligence jargon.
+    Be direct and concise. Every sentence must add new information.
     
     {history_context}
     
-    The user has submitted the following query:
-    -----------------------------------------------------
-    QUERY: {query_text}
-    -----------------------------------------------------
-
-    Analyze and answer this query based on the conversation history and the following verified public news reports:
-    -----------------------------------------------------
+    USER QUESTION: {query_text}
+    
+    NEWS REPORTS:
     {article_context}
-    -----------------------------------------------------
-
-    INSTRUCTIONS:
-    1. Deliver a clear, objective, and simple response.
-    2. Use simple, everyday words. Avoid any jargon, such as "OSINT," "telemetry," "bilaterals," "strategic meetings," "tactical," "reconnaissance," "frontier," etc.
-    3. Format using clear headings:
-       - **1. OVERVIEW**: Summary of facts, locations, and actions in plain English.
-       - **2. DETAILED ANALYSIS**: Clear details explaining who, what, when, and where.
-       - **3. WHAT THIS MEANS FOR ORDINARY PEOPLE**: Explain the impact on daily citizen safety, costs, travel, or general stability.
-    4. You must use a direct, objective, and clear tone. Avoid conversational fillers, jokes, or first-person pronouns.
-    5. You MUST cite the news sources where applicable using markdown links (e.g. "[Title of news article](URL)").
-    6. If no relevant information is available in the provided reports, state "NO LIVE NEWS FEEDS IN SPECIFIED SECTOR" and provide a brief general safety assessment in simple terms.
-    7. Deliver a detailed and clear response.
+    
+    FORMAT:
+    **What Happened** - 2-3 sentences on the key facts.
+    **Key Details** - Who, what, where, when. Cite sources as [Title](URL).
+    **Impact** - What this means for everyday people in 1-2 sentences.
+    
+    RULES:
+    - No jargon (no OSINT, telemetry, bilaterals, tactical, reconnaissance, frontier, strategic, etc.).
+    - No filler words, no first-person, no opinions.
+    - If no relevant reports exist, say: "No matching news found." and give a one-sentence safety note.
+    - Keep the total response under 200 words.
     """
 
     fused_summary = ""
@@ -466,3 +449,101 @@ async def chat_query(payload: ChatQuery):
             fused_summary = generate_local_fusion_fallback(query_text, matching_articles)
 
     return {"summary": fused_summary, "relevant_articles": relevant_list}
+
+
+class CompleteRequest(BaseModel):
+    system: str
+    user: str
+
+
+@router.post("/complete")
+async def chat_complete(payload: CompleteRequest):
+    prompt = f"System: {payload.system}\nUser: {payload.user}\nOutput JSON format only."
+    reply = ""
+    if settings.llm_provider == "ollama" and settings.ollama_base_url:
+        try:
+            reply = await call_ollama(prompt, payload.system)
+        except Exception:
+            pass
+    if not reply:
+        if settings.openai_api_key:
+            try:
+                reply = await call_openai(prompt, payload.system)
+            except Exception:
+                pass
+        elif settings.google_api_key:
+            try:
+                reply = await call_gemini(prompt, payload.system)
+            except Exception:
+                pass
+    
+    import json
+    try:
+        match = re.search(r"\{.*\}", reply, re.DOTALL)
+        if match:
+            obj = json.loads(match.group(0))
+            if "summary" in obj and "impact" in obj:
+                return obj
+    except Exception:
+        pass
+        
+    # Heuristic fallback - plain language only
+    title = ""
+    content = ""
+    for line in payload.user.split("\n"):
+        if line.startswith("Title:"):
+            title = line[6:].strip()
+        elif line.startswith("Content:"):
+            content = line[8:].strip()
+            
+    summary = content[:120] + "..." if len(content) > 120 else content
+    if not summary:
+        summary = title
+    impact = f"Update on: {title[:60]}."
+    
+    return {
+        "summary": summary,
+        "impact": impact,
+        "confidence": "Medium"
+    }
+
+
+from collections import defaultdict
+import time
+
+_rss_cache = {}  # key -> (expiry_time, content_bytes)
+_rss_rate_limits = defaultdict(list)  # ip -> list of timestamps
+
+
+@router.get("/rss")
+async def proxy_rss(request: Request, q: str):
+    from fastapi import Response
+    import httpx
+    
+    # 1. Rate Limiting (10 requests per minute per IP)
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    # clean old timestamps
+    _rss_rate_limits[client_ip] = [t for t in _rss_rate_limits[client_ip] if now - t < 60.0]
+    if len(_rss_rate_limits[client_ip]) >= 10:
+        raise HTTPException(status_code=429, detail="Too many requests. Please wait before querying RSS again.")
+    _rss_rate_limits[client_ip].append(now)
+    
+    # 2. Cache check (Cache TTL = 2 minutes)
+    cache_key = q.strip().lower()
+    if cache_key in _rss_cache:
+        expiry, cached_content = _rss_cache[cache_key]
+        if now < expiry:
+            return Response(content=cached_content, media_type="application/xml")
+            
+    # 3. Fetch from Google News
+    url = f"https://news.google.com/rss/search?q={q}&hl=en-US&gl=US&ceid=US:en"
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(url, timeout=10.0)
+            if resp.status_code == 200:
+                _rss_cache[cache_key] = (now + 120.0, resp.content)
+                return Response(content=resp.content, media_type="application/xml")
+            raise HTTPException(status_code=resp.status_code, detail="Google News RSS unavailable")
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))

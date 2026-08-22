@@ -36,6 +36,8 @@ def configure_logging(level: int = logging.INFO) -> None:
     handler.setFormatter(JsonFormatter())
     root.addHandler(handler)
     root.setLevel(level)
+    # httpx URLs may contain provider credentials in query parameters.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 @dataclass
