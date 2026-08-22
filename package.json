@@ -9,8 +9,8 @@
     "dev:web": "vite --host 0.0.0.0 --port 3000",
     "dev:server": "python backend/run.py",
     "dev:worker": "python backend/run_worker.py",
-    "build": "tsc -b && vite build",
-    "start": "venv/bin/python -m uvicorn backend.app.main:app --host 0.0.0.0 --port ${PORT:-3001}",
+    "build": "tsc -b && vite build && (pip install -r backend/requirements.txt || pip3 install -r backend/requirements.txt || python -m pip install -r backend/requirements.txt || python3 -m pip install -r backend/requirements.txt || true)",
+    "start": "node -e \"const fs = require('fs'); const cp = require('child_process'); const port = process.env.PORT || '3001'; let cmd = 'python3'; if (fs.existsSync('venv/bin/python')) { cmd = 'venv/bin/python'; } else if (fs.existsSync('venv/Scripts/python.exe')) { cmd = 'venv/Scripts/python.exe'; } else { try { cp.execSync('python3 --version', {stdio: 'ignore'}); cmd = 'python3'; } catch(e) { try { cp.execSync('python --version', {stdio: 'ignore'}); cmd = 'python'; } catch(err) { cmd = 'uvicorn'; } } } try { if (cmd === 'uvicorn') { cp.execSync('uvicorn backend.app.main:app --host 0.0.0.0 --port ' + port, {stdio: 'inherit'}); } else { cp.execSync(cmd + ' -m uvicorn backend.app.main:app --host 0.0.0.0 --port ' + port, {stdio: 'inherit'}); } } catch(e) { console.error('Failed to start server:', e); process.exit(1); }\"",
     "preview": "vite preview"
   },
   "dependencies": {
