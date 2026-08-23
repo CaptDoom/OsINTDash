@@ -59,16 +59,49 @@ def score_article_similarity(doc_text: str, article: Article) -> float:
         return 0.0
 
     common_terms = set(doc_vector) & set(art_vector)
-    if not common_terms:
-        return 0.0
-
     dot_product = sum(doc_vector[token] * art_vector[token] for token in common_terms)
     norm_a = math.sqrt(sum(value**2 for value in doc_vector.values()))
     norm_b = math.sqrt(sum(value**2 for value in art_vector.values()))
     base_score = dot_product / (norm_a * norm_b) if norm_a and norm_b else 0.0
 
+    # Boost score based on country matching to solve vocabulary mismatch
+    boost = 0.0
+    query_lower = doc_text.lower()
+    
+    country_terms = {
+        "CN": ["china", "chinese", "peking", "beijing"],
+        "PK": ["pakistan", "pakistani", "islamabad"],
+        "AF": ["afghanistan", "afghan", "kabul"],
+        "BD": ["bangladesh", "bangladeshi", "dhaka"],
+        "MM": ["myanmar", "burma", "burmese", "naypyidaw"],
+        "NP": ["nepal", "nepalese", "nepali", "kathmandu"],
+        "BT": ["bhutan", "bhutanes", "thimphu"],
+        "LK": ["sri lanka", "lankan", "colombo"],
+        "MV": ["maldives", "maldivian", "male"],
+        "IN": ["india", "indian", "delhi", "new delhi"],
+        "US": ["united states", "usa", "us", "american", "washington"],
+        "RU": ["russia", "russian", "moscow"],
+        "IR": ["iran", "iranian", "tehran"],
+        "IL": ["israel", "israeli", "jerusalem"],
+        "TW": ["taiwan", "taiwanese", "taipei"],
+        "JP": ["japan", "japanese", "tokyo"],
+        "UA": ["ukraine", "ukrainian", "kyiv"]
+    }
+    
+    art_country = (article.country_code or "").upper()
+    art_text = f"{article.title} {article.summary or ''} {article.content or ''}".lower()
+    
+    for code, terms in country_terms.items():
+        if any(term in query_lower for term in terms):
+            if art_country == code or any(term in art_text for term in terms):
+                boost += 0.4
+                if art_country == code:
+                    boost += 0.2  # Direct country tag match boost
+
     # Boost high-impact or high-confidence reports slightly for precision
-    boost = 0.1 if getattr(article, 'impact_level', '') == 'High Impact' else 0.0
+    if getattr(article, 'impact_level', '') == 'High Impact':
+        boost += 0.1
+        
     return base_score + boost
 
 
@@ -76,68 +109,79 @@ async def search_relevant_articles(db: AsyncSession, doc_text: str, limit: int =
     from backend.app.services.classifier import get_transformer
     import numpy as np
     
-    try:
-        transformer = get_transformer()
-        query_vector = transformer.encode(doc_text, convert_to_numpy=True)
-    except Exception as e:
-        logger.error(f"[Chat] Failed to encode query text: {e}")
-        stmt = select(Article).order_by(Article.published_at.desc()).limit(limit)
-        res = await db.execute(stmt)
-        return list(res.scalars().all())
-
-    if db.bind.dialect.name == "postgresql" and HAS_PGVECTOR:
-        try:
-            stmt = select(Article).order_by(cosine_distance(Article.embedding, query_vector.tolist())).limit(limit)
-            result = await db.execute(stmt)
-            return list(result.scalars().all())
-        except Exception as pg_err:
-            logger.warning(f"[Chat] pgvector query failed, falling back to local numpy similarity: {pg_err}")
-    
-    stmt = select(Article).order_by(Article.published_at.desc()).limit(200)
+    # Fetch a larger window of recent articles to ensure we find matches across countries
+    stmt = select(Article).order_by(Article.published_at.desc()).limit(500)
     result = await db.execute(stmt)
     articles = result.scalars().all()
     if not articles:
         return []
 
-    scored_articles = []
-    query_norm = np.linalg.norm(query_vector)
-    if query_norm <= 0:
-        return sorted(articles, key=lambda x: x.published_at, reverse=True)[:limit]
-
-    query_vec_norm = query_vector / query_norm
-
-    for art in articles:
-        embedding_val = art.embedding
-        if not embedding_val:
-            continue
-            
-        if isinstance(embedding_val, str):
+    # 1. Try vector-based search
+    try:
+        transformer = get_transformer()
+        query_vector = transformer.encode(doc_text, convert_to_numpy=True)
+        
+        if db.bind.dialect.name == "postgresql" and HAS_PGVECTOR:
             try:
-                import json
-                vec_list = json.loads(embedding_val)
-            except Exception:
-                continue
-        elif isinstance(embedding_val, (list, tuple)):
-            vec_list = embedding_val
-        else:
-            try:
-                vec_list = list(embedding_val)
-            except Exception:
-                continue
+                stmt_pg = select(Article).order_by(cosine_distance(Article.embedding, query_vector.tolist())).limit(limit)
+                result_pg = await db.execute(stmt_pg)
+                return list(result_pg.scalars().all())
+            except Exception as pg_err:
+                logger.warning(f"[Chat] pgvector query failed, falling back to local: {pg_err}")
+
+        # Local numpy similarity fallback using query vector
+        scored_articles = []
+        query_norm = np.linalg.norm(query_vector)
+        if query_norm > 0:
+            query_vec_norm = query_vector / query_norm
+            for art in articles:
+                embedding_val = art.embedding
+                if not embedding_val:
+                    continue
+                    
+                if isinstance(embedding_val, str):
+                    try:
+                        import json
+                        vec_list = json.loads(embedding_val)
+                    except Exception:
+                        continue
+                elif isinstance(embedding_val, (list, tuple)):
+                    vec_list = embedding_val
+                else:
+                    try:
+                        vec_list = list(embedding_val)
+                    except Exception:
+                        continue
+                        
+                if len(vec_list) != len(query_vector):
+                    continue
+                    
+                art_vec = np.array(vec_list, dtype=np.float32)
+                art_norm = np.linalg.norm(art_vec)
+                if art_norm <= 0:
+                    continue
+                    
+                art_vec_norm = art_vec / art_norm
+                similarity = float(np.dot(query_vec_norm, art_vec_norm))
+                scored_articles.append((similarity, art))
                 
-        if len(vec_list) != len(query_vector):
-            continue
+        if scored_articles:
+            scored_articles.sort(key=lambda x: x[0], reverse=True)
+            return [art for _, art in scored_articles[:limit]]
             
-        art_vec = np.array(vec_list, dtype=np.float32)
-        art_norm = np.linalg.norm(art_vec)
-        if art_norm <= 0:
-            continue
-            
-        art_vec_norm = art_vec / art_norm
-        similarity = float(np.dot(query_vec_norm, art_vec_norm))
-        scored_articles.append((similarity, art))
+    except Exception as e:
+        logger.warning(f"[Chat] Embedding search failed or skipped: {e}")
 
+    # 2. Fallback to pure Python TF-IDF/Term cosine similarity (always works!)
+    logger.info("[Chat] Falling back to text-overlap cosine similarity search.")
+    scored_articles = []
+    for art in articles:
+        score = score_article_similarity(doc_text, art)
+        if score > 0:
+            scored_articles.append((score, art))
+            
     if not scored_articles:
+        # Absolutely no match, return latest articles
         return sorted(articles, key=lambda x: x.published_at, reverse=True)[:limit]
 
     scored_articles.sort(key=lambda x: x[0], reverse=True)

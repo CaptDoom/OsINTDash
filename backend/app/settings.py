@@ -110,9 +110,9 @@ def get_settings() -> Settings:
         data_dir.mkdir(exist_ok=True)
         settings.sqlite_url = f"sqlite+aiosqlite:///{(data_dir / 'articles_v2.db').as_posix()}"
 
-    # Default to False to ensure the zero-key RSS crawler fallback runs in Live Mode
+    # Default to True to ensure the dashboard is pre-seeded with high-impact data on startup
     if settings.enable_demo_seed_data is None:
-        settings.enable_demo_seed_data = False
+        settings.enable_demo_seed_data = True
 
     return settings
 

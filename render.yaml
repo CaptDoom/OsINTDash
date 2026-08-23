@@ -8,6 +8,8 @@ services:
     envVars:
       - key: APP_ENV
         value: production
+      - key: ENABLE_DEMO_SEED_DATA
+        value: "true"
       - key: DATABASE_URL
         fromDatabase:
           name: drishya-db
