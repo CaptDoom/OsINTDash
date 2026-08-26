@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 
 interface Note {
   id: string;
@@ -19,6 +19,8 @@ export default function SharedNotes({ isDarkMode }: SharedNotesProps) {
   const [posting, setPosting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout>>();
 
   // Update expiry timers every 30 seconds
   useEffect(() => {
@@ -47,9 +49,57 @@ export default function SharedNotes({ isDarkMode }: SharedNotesProps) {
     }
   };
 
+  const connectWebSocket = useCallback(() => {
+    try {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/ws`;
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        // Subscribe to notes channel
+        ws.send(JSON.stringify({ type: 'subscribe', channel: 'notes' }));
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'note_created' && msg.note) {
+            setNotes((prev) => {
+              if (prev.some((n) => n.id === msg.note.id)) return prev;
+              return [msg.note, ...prev];
+            });
+          } else if (msg.type === 'note_updated' && msg.note) {
+            setNotes((prev) => prev.map((n) => (n.id === msg.note.id ? msg.note : n)));
+          } else if (msg.type === 'note_deleted' && msg.note_id) {
+            setNotes((prev) => prev.filter((n) => n.id !== msg.note_id));
+          }
+        } catch {
+          // Ignore malformed messages
+        }
+      };
+
+      ws.onclose = () => {
+        // Reconnect after 3 seconds
+        reconnectTimer.current = setTimeout(connectWebSocket, 3000);
+      };
+
+      ws.onerror = () => {
+        ws.close();
+      };
+    } catch {
+      // WebSocket not available, fall back to polling
+    }
+  }, []);
+
   useEffect(() => {
     fetchNotes();
-  }, []);
+    connectWebSocket();
+    return () => {
+      wsRef.current?.close();
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+    };
+  }, [connectWebSocket]);
 
   const handleAddNote = async (e: React.FormEvent) => {
     e.preventDefault();

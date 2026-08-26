@@ -1,14 +1,18 @@
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, ConfigDict
 
 from backend.app.database import get_db, SharedNote, NoteVersion
-from backend.app.api.routes.auth import SESSION_STORE
+from backend.app.api.routes.auth import SESSION_STORE, _session_get
+from backend.app.redis_pool import get_redis_pool, pubsub_publish
 
 router = APIRouter(prefix="/api/notes")
+
+# Note TTL: 24 hours
+NOTE_TTL_HOURS = 24
 
 class NoteResponse(BaseModel):
     id: str
@@ -70,6 +74,17 @@ async def create_note(payload: NoteCreate, request: Request, db: AsyncSession = 
     db.add(NoteVersion(note_id=note.id, content=note.content, author=note.author))
     await db.commit()
     await db.refresh(note)
+    
+    # Broadcast new note via Redis Pub/Sub for real-time delivery
+    await pubsub_publish("drishya:ws:notes", {
+        "type": "note_created",
+        "note": {
+            "id": note.id,
+            "content": note.content,
+            "author": note.author,
+            "created_at": note.created_at.isoformat() if note.created_at else None,
+        }
+    })
     return note
 
 
@@ -90,6 +105,16 @@ async def update_note(note_id: str, payload: NoteCreate, request: Request, db: A
     db.add(NoteVersion(note_id=note.id, content=note.content, author=author))
     await db.commit()
     await db.refresh(note)
+    
+    await pubsub_publish("drishya:ws:notes", {
+        "type": "note_updated",
+        "note": {
+            "id": note.id,
+            "content": note.content,
+            "author": note.author,
+            "created_at": note.created_at.isoformat() if note.created_at else None,
+        }
+    })
     return note
 
 
@@ -116,4 +141,8 @@ async def delete_note(note_id: str, db: AsyncSession = Depends(get_db)):
     
     await db.delete(note)
     await db.commit()
+    await pubsub_publish("drishya:ws:notes", {
+        "type": "note_deleted",
+        "note_id": note_id,
+    })
     return {"status": "deleted"}

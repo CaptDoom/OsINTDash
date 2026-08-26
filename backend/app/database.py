@@ -146,24 +146,36 @@ async def init_db_engine():
     
     db_url = database_url
 
-    # Try Postgres
+    # Try Postgres with connection pooling
     if DATABASE_IS_POSTGRES:
         try:
             logger.info(f"[Database] Attempting connection to PostgreSQL at {db_url.split('@')[-1]}")
-            engine = create_async_engine(db_url, echo=False)
+            engine = create_async_engine(
+                db_url,
+                echo=False,
+                pool_size=10,
+                max_overflow=20,
+                pool_pre_ping=True,
+                pool_recycle=1800,
+            )
             # Try to connect
             async with engine.connect() as conn:
                 await conn.execute(select(1))
             SessionLocal = async_sessionmaker(autocommit=False, autoflush=False, bind=engine, class_=AsyncSession)
-            logger.info("[Database] Connected to PostgreSQL successfully.")
+            logger.info("[Database] Connected to PostgreSQL with connection pool (pool_size=10, max_overflow=20).")
             return
         except Exception as e:
             logger.warning(f"[Database] PostgreSQL connection failed: {e}. Falling back to SQLite.")
 
-    # SQLite fallback
+    # SQLite fallback with optimized settings
     sqlite_path = settings.sqlite_url
     logger.info(f"[Database] Initializing SQLite local fallback at {sqlite_path}")
-    engine = create_async_engine(sqlite_path, echo=False)
+    engine = create_async_engine(
+        sqlite_path,
+        echo=False,
+        connect_args={"check_same_thread": False},
+        pool_pre_ping=True,
+    )
     SessionLocal = async_sessionmaker(autocommit=False, autoflush=False, bind=engine, class_=AsyncSession)
 
 async def seed_data_if_empty(session: AsyncSession):
@@ -399,6 +411,22 @@ async def create_tables():
                 except Exception as alter_err:
                     logger.error(f"[Database] Failed to add column '{col_name}': {alter_err}")
                     
+        # Create performance indexes for common query patterns
+        indexes = [
+            ("idx_articles_country_code", "high_impact_articles", "country_code"),
+            ("idx_articles_published_at", "high_impact_articles", "published_at"),
+            ("idx_articles_url", "high_impact_articles", "url"),
+            ("idx_articles_impact_level", "high_impact_articles", "impact_level"),
+            ("idx_articles_country_published", "high_impact_articles", "country_code, published_at"),
+            ("idx_notes_created_at", "shared_notes", "created_at"),
+            ("idx_alert_rules_enabled", "alert_rules", "enabled"),
+        ]
+        for idx_name, table, columns in indexes:
+            try:
+                await conn.execute(text(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table} ({columns})"))
+            except Exception as idx_err:
+                logger.debug(f"[Database] Index {idx_name} creation skipped: {idx_err}")
+
         logger.info("[Database] Tables created and migrations checked successfully.")
 
 

@@ -5,6 +5,7 @@ import logging
 import re
 import time
 import hashlib
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Any, List, Set, Optional
 from pydantic import BaseModel
@@ -53,9 +54,9 @@ async def enforce_auth_middleware(request: Request, call_next):
     path = request.url.path
     if path.startswith("/api/") and not path.startswith("/api/auth/") and path != "/api/system/status":
         if os.environ.get("TESTING") != "1":
-            from backend.app.api.routes.auth import SESSION_STORE
+            from backend.app.api.routes.auth import is_session_valid
             token = request.cookies.get("session_token")
-            if not token or token not in SESSION_STORE:
+            if not token or not await is_session_valid(token):
                 return JSONResponse(
                     status_code=401,
                     content={"detail": "Unauthorized. Active session token is missing or expired."}
@@ -82,23 +83,12 @@ async def observability_middleware(request, call_next):
 
 
 async def get_cached_response(key: str) -> Optional[dict]:
-    try:
-        import redis.asyncio as aioredis
-        conn = aioredis.from_url(settings.redis_url, socket_timeout=2.0)
-        val = await conn.get(key)
-        if val:
-            return json.loads(val)
-    except Exception:
-        pass
-    return None
+    from backend.app.redis_pool import cache_get
+    return await cache_get(key)
 
 async def set_cached_response(key: str, data: Any, ttl: int = 300) -> None:
-    try:
-        import redis.asyncio as aioredis
-        conn = aioredis.from_url(settings.redis_url, socket_timeout=2.0)
-        await conn.set(key, json.dumps(data, default=str), ex=ttl)
-    except Exception:
-        pass
+    from backend.app.redis_pool import cache_set
+    await cache_set(key, data, ttl)
 
 
 @app.get("/health")
@@ -151,22 +141,40 @@ async def readiness_check(db: AsyncSession = Depends(get_db)):
 async def metrics_endpoint():
     return PlainTextResponse(metrics.render_prometheus(), media_type="text/plain; version=0.0.4")
 
-# WebSocket connection manager
+# WebSocket connection manager with channel-based subscriptions
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Set[WebSocket] = set()
+        self.channel_subscribers: Dict[str, Set[WebSocket]] = {
+            "alerts": set(),
+            "weather": set(),
+            "chat": set(),
+            "notes": set(),
+            "map": set(),
+        }
 
-    async def connect(self, websocket: WebSocket):
+    async def connect(self, websocket: WebSocket, channels: Optional[List[str]] = None):
         await websocket.accept()
         self.active_connections.add(websocket)
+        if channels:
+            for ch in channels:
+                if ch in self.channel_subscribers:
+                    self.channel_subscribers[ch].add(websocket)
+        else:
+            # Default: subscribe to all channels
+            for ch in self.channel_subscribers:
+                self.channel_subscribers[ch].add(websocket)
 
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
+        for subs in self.channel_subscribers.values():
+            subs.discard(websocket)
 
-    async def broadcast(self, message: dict):
+    async def broadcast(self, message: dict, channel: Optional[str] = None):
         dead_connections = []
-        for connection in self.active_connections:
+        targets = self.channel_subscribers.get(channel, set()) if channel else self.active_connections
+        for connection in targets:
             try:
                 await connection.send_text(json.dumps(message))
             except Exception:
@@ -176,11 +184,20 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-async def _handle_websocket_connection(websocket: WebSocket):
-    await manager.connect(websocket)
+async def _handle_websocket_connection(websocket: WebSocket, channels: Optional[List[str]] = None):
+    await manager.connect(websocket, channels)
     try:
         while True:
-            await websocket.receive_text()
+            data = await websocket.receive_text()
+            # Handle channel subscription updates from client
+            try:
+                msg = json.loads(data)
+                if msg.get("type") == "subscribe" and "channel" in msg:
+                    ch = msg["channel"]
+                    if ch in manager.channel_subscribers:
+                        manager.channel_subscribers[ch].add(websocket)
+            except Exception:
+                pass
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 
@@ -390,10 +407,35 @@ async def periodic_ingestion_loop():
                 result["processed"],
                 result["high_impact"],
             )
+            # Broadcast ingestion summary via WebSocket channel
+            from backend.app.redis_pool import pubsub_publish
+            await pubsub_publish("drishya:ws:alerts", {
+                "type": "ingestion_complete",
+                "raw_articles": result["raw_articles"],
+                "processed": result["processed"],
+                "high_impact": result["high_impact"],
+                "timestamp": datetime_now().isoformat(),
+            })
         except Exception as e:
             logger.error(f"[Main] Ingestion error: {e}")
 
         await asyncio.sleep(5 * 60)
+
+
+async def _note_cleanup_loop():
+    """Background task to delete expired notes (older than 24h)."""
+    while True:
+        try:
+            async for db in get_db():
+                from backend.app.database import SharedNote
+                cutoff = datetime.now(timezone.utc) - timedelta_now(hours=24)
+                from sqlalchemy import delete as sql_delete
+                await db.execute(sql_delete(SharedNote).where(SharedNote.created_at < cutoff))
+                await db.commit()
+                break
+        except Exception as e:
+            logger.debug(f"[Main] Note cleanup error: {e}")
+        await asyncio.sleep(300)  # Run every 5 minutes
 
 def format_entities_for_frontend(flat_entities) -> dict:
     if not flat_entities:
@@ -498,39 +540,49 @@ async def redis_listener_task():
     Subscribes to Redis 'live_stream' channel and broadcasts received articles
     to all websocket clients connected to this node.
     Handles automatic reconnection and falls back to local memory_stream if Redis is offline.
+    Uses the shared Redis pool.
     """
-    import redis.asyncio as aioredis
+    from backend.app.redis_pool import get_redis_pool
     
     redis_online = False
     
     while True:
         try:
             logger.info("[Main] Attempting connection to Redis Pub/Sub...")
-            redis_conn = aioredis.from_url(settings.redis_url, socket_timeout=5.0)
-            # Test connection
-            await redis_conn.ping()
+            pool = await get_redis_pool()
+            if not pool:
+                raise ConnectionError("Redis pool unavailable")
             
-            pubsub = redis_conn.pubsub()
-            await pubsub.subscribe("live_stream")
-            logger.info("[Main] Redis pub/sub successfully subscribed to channel 'live_stream'.")
+            pubsub = pool.pubsub()
+            await pubsub.subscribe("live_stream", "drishya:ws:weather", "drishya:ws:notes", "drishya:ws:alerts")
+            logger.info("[Main] Redis pub/sub successfully subscribed to channels.")
             redis_online = True
             
             async for message in pubsub.listen():
                 if message["type"] == "message":
                     try:
                         data = json.loads(message["data"])
-                        sig_msg = data_to_signal(data)
-                        await manager.broadcast(sig_msg)
+                        channel = message.get("channel", "live_stream")
+                        
+                        if channel == "live_stream":
+                            sig_msg = data_to_signal(data)
+                            await manager.broadcast(sig_msg, channel="alerts")
+                            await manager.broadcast(sig_msg, channel="map")
+                        elif channel == "drishya:ws:weather":
+                            await manager.broadcast(data, channel="weather")
+                        elif channel == "drishya:ws:notes":
+                            await manager.broadcast(data, channel="notes")
+                        elif channel == "drishya:ws:alerts":
+                            await manager.broadcast(data, channel="alerts")
                     except Exception as ex:
                         logger.error(f"[Main] Error parsing pubsub message: {ex}")
         except Exception as e:
             logger.warning(f"[Main] Redis pub/sub error/offline: {e}.")
             if not redis_online:
                 logger.info("[Main] Falling back to local in-memory event stream.")
-                # Fallback to local memory stream
                 def on_live_signal(article):
                     sig_msg = data_to_signal(article)
-                    asyncio.create_task(manager.broadcast(sig_msg))
+                    asyncio.create_task(manager.broadcast(sig_msg, channel="alerts"))
                 memory_stream.subscribe(on_live_signal)
                 break
             else:
@@ -572,6 +624,8 @@ async def startup_event():
         logger.info("[Main] API startup complete; background ingestion and redis listener started.")
     else:
         logger.info("[Main] API startup complete; redis listener started (periodic ingestion disabled).")
+    # Start background note expiration cleanup
+    asyncio.create_task(_note_cleanup_loop())
 
 @app.get("/api/system/status")
 async def get_system_status():

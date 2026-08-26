@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 
 export type WeatherInfo = {
   sector: string;
@@ -25,6 +25,8 @@ export function BorderWeatherHUD({
   const [localWeatherData, setLocalWeatherData] = useState<Record<string, WeatherInfo> | null>(null);
   const [localLoading, setLocalLoading] = useState<boolean>(true);
   const [localError, setLocalError] = useState<string | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimer = useRef<ReturnType<typeof setTimeout>>();
 
   const isExternal = propsWeatherData !== undefined;
   const weatherData = isExternal ? propsWeatherData : localWeatherData;
@@ -49,13 +51,51 @@ export function BorderWeatherHUD({
     }
   };
 
-  useEffect(() => {
-    fetchWeather();
-    if (!isExternal) {
-      const interval = setInterval(fetchWeather, 5 * 60 * 1000);
-      return () => clearInterval(interval);
+  const connectWebSocket = useCallback(() => {
+    if (isExternal) return;
+    try {
+      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${protocol}//${window.location.host}/ws`;
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        ws.send(JSON.stringify({ type: 'subscribe', channel: 'weather' }));
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'weather_update' && msg.data) {
+            setLocalWeatherData(msg.data);
+            setLocalError(null);
+          }
+        } catch {
+          // Ignore malformed messages
+        }
+      };
+
+      ws.onclose = () => {
+        reconnectTimer.current = setTimeout(connectWebSocket, 5000);
+      };
+
+      ws.onerror = () => ws.close();
+    } catch {
+      // WebSocket not available, use polling fallback
     }
   }, [isExternal]);
+
+  useEffect(() => {
+    fetchWeather();
+    connectWebSocket();
+    // Also keep polling as a fallback for weather data (every 5 minutes)
+    const interval = setInterval(fetchWeather, 5 * 60 * 1000);
+    return () => {
+      clearInterval(interval);
+      wsRef.current?.close();
+      if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
+    };
+  }, [isExternal, connectWebSocket]);
 
   const getWeatherIcon = (cond: string) => {
     const c = cond.toLowerCase();

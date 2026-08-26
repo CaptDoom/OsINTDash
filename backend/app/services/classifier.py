@@ -285,17 +285,18 @@ class ImpactClassifier:
             "Political & Diplomatic",
             "Technology & Cyber",
         ]
+        # Pre-compiled regex patterns for O(1) classification
         self.label_keywords = {
-            "High Impact": r"\b(troop|deployment|missile|clash|invasion|drill|sanction|nuclear|navy|air force|border conflict|skirmish|casualty|coup|strike)s?\b",
-            "Medium Impact": r"\b(bilateral|agreement|trade deal|tariff|summit|protest|refugee|inflation|corruption|embassy|drone|port|aid)s?\b",
-            "Normal Impact": r"\b(quiz|sport|cricket|entertainment|weather|stock price|tourism|festival|culture|feature)s?\b",
+            "High Impact": re.compile(r"\b(troop|deployment|missile|clash|invasion|drill|sanction|nuclear|navy|air force|border conflict|skirmish|casualty|coup|strike)s?\b", re.IGNORECASE),
+            "Medium Impact": re.compile(r"\b(bilateral|agreement|trade deal|tariff|summit|protest|refugee|inflation|corruption|embassy|drone|port|aid)s?\b", re.IGNORECASE),
+            "Normal Impact": re.compile(r"\b(quiz|sport|cricket|entertainment|weather|stock price|tourism|festival|culture|feature)s?\b", re.IGNORECASE),
         }
         self.dept_keywords = {
-            "Military & Defense": r"\b(pla|loc|lac|military|troop|air force|navy|missile|radar|defense|border post|uav|drone|arms|exercise|drill|clash|patrol)s?\b",
-            "Economic & Financial": r"\b(economic|trade|finance|tariff|port|investment|infrastructure|road|highway|corridor|inflation|currency|gdp|aid)s?\b",
-            "Social Affairs & Welfare": r"\b(social|refugee|community|migration|protest|settlement|civilian|health|disease|aid|disaster|religion|citizenship)s?\b",
-            "Political & Diplomatic": r"\b(political|diplomat|embassy|border crossing|government|summit|treaty|talks|meeting|minister|president|signing)s?\b",
-            "Technology & Cyber": r"\b(cyber|ransomware|malware|hacker|cyberattack|semiconductor|chip|ai|artificial intelligence|robotics|quantum|satellite|surveillance)s?\b"
+            "Military & Defense": re.compile(r"\b(pla|loc|lac|military|troop|air force|navy|missile|radar|defense|border post|uav|drone|arms|exercise|drill|clash|patrol)s?\b", re.IGNORECASE),
+            "Economic & Financial": re.compile(r"\b(economic|trade|finance|tariff|port|investment|infrastructure|road|highway|corridor|inflation|currency|gdp|aid)s?\b", re.IGNORECASE),
+            "Social Affairs & Welfare": re.compile(r"\b(social|refugee|community|migration|protest|settlement|civilian|health|disease|aid|disaster|religion|citizenship)s?\b", re.IGNORECASE),
+            "Political & Diplomatic": re.compile(r"\b(political|diplomat|embassy|border crossing|government|summit|treaty|talks|meeting|minister|president|signing)s?\b", re.IGNORECASE),
+            "Technology & Cyber": re.compile(r"\b(cyber|ransomware|malware|hacker|cyberattack|semiconductor|chip|ai|artificial intelligence|robotics|quantum|satellite|surveillance)s?\b", re.IGNORECASE),
         }
         self._dept_centroids = None
         self._impact_centroids = None
@@ -325,13 +326,14 @@ class ImpactClassifier:
         return self._impact_centroids
 
     def classify_regex(self, text: str) -> Tuple[Optional[str], Optional[str]]:
+        text_lower = text.lower()
         scores = Counter()
         for label, pattern in self.label_keywords.items():
-            scores[label] += len(re.findall(pattern, text))
+            scores[label] += len(pattern.findall(text_lower))
 
         dept_scores = Counter()
         for label, pattern in self.dept_keywords.items():
-            dept_scores[label] += len(re.findall(pattern, text))
+            dept_scores[label] += len(pattern.findall(text_lower))
 
         impact = None
         if scores["High Impact"] >= 1:

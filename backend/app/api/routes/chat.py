@@ -1,5 +1,6 @@
 import os
 import re
+import hashlib
 import logging
 import math
 import asyncio
@@ -14,6 +15,7 @@ from backend.app.database import get_db, Article
 from backend.app.services.summarizer import call_openai, call_gemini, call_ollama
 from backend.app.config import settings
 from backend.app.services.job_store import job_store
+from backend.app.redis_pool import cache_get, cache_set
 
 try:
     from pgvector.sqlalchemy import cosine_distance
@@ -412,7 +414,15 @@ async def chat_query(payload: ChatQuery):
     query_text = payload.query
     if not query_text.strip():
         raise HTTPException(status_code=400, detail="Query text cannot be empty.")
-    
+
+    # Check Redis cache for frequent queries (10-minute TTL)
+    query_hash = hashlib.md5(query_text.lower().strip().encode()).hexdigest()
+    cache_key = f"drishya:chat:query:{query_hash}"
+    cached = await cache_get(cache_key)
+    if cached:
+        logger.info("[Chat] Cache hit for query: %s", query_text[:50])
+        return cached
+
     # 1. Search relevant articles
     matching_articles: List[Article] = []
     async for session in get_db():
@@ -492,7 +502,13 @@ async def chat_query(payload: ChatQuery):
         else:
             fused_summary = generate_local_fusion_fallback(query_text, matching_articles)
 
-    return {"summary": fused_summary, "relevant_articles": relevant_list}
+    response_data = {"summary": fused_summary, "relevant_articles": relevant_list}
+
+    # Cache frequent queries for 10 minutes (skip rule-based fallbacks)
+    if fused_summary and not fused_summary.startswith("**News Briefing"):
+        await cache_set(cache_key, response_data, ttl=600)
+
+    return response_data
 
 
 class CompleteRequest(BaseModel):

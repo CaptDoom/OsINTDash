@@ -1,6 +1,8 @@
 import uuid
+import json
 import bcrypt
 import logging
+import time
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Response, Request
 from sqlalchemy import select
@@ -9,14 +11,60 @@ from pydantic import BaseModel
 
 from backend.app.database import get_db, User
 from backend.app.observability import metrics
+from backend.app.redis_pool import get_redis_pool
 
 logger = logging.getLogger("drishya.auth")
 
 router = APIRouter(prefix="/api/auth")
 
-# In-memory session store
-# maps session_token -> {"id": user.id, "username": user.username, "role": user.role}
+# In-memory session store (fallback when Redis is unavailable)
 SESSION_STORE = {}
+SESSION_TTL = 86400  # 24 hours
+
+
+async def _session_set(token: str, user_data: dict) -> None:
+    """Store session in Redis with TTL, falling back to in-memory."""
+    SESSION_STORE[token] = user_data  # always keep in-memory fallback
+    pool = await get_redis_pool()
+    if pool:
+        try:
+            await pool.setex(
+                f"drishya:session:{token}",
+                SESSION_TTL,
+                json.dumps(user_data),
+            )
+        except Exception as exc:
+            logger.debug("[Auth] Redis session write failed: %s", exc)
+
+
+async def _session_get(token: str) -> Optional[dict]:
+    """Retrieve session from Redis first, then fall back to in-memory."""
+    pool = await get_redis_pool()
+    if pool:
+        try:
+            val = await pool.get(f"drishya:session:{token}")
+            if val:
+                return json.loads(val)
+        except Exception:
+            pass
+    return SESSION_STORE.get(token)
+
+
+async def _session_delete(token: str) -> None:
+    """Delete session from Redis and in-memory."""
+    SESSION_STORE.pop(token, None)
+    pool = await get_redis_pool()
+    if pool:
+        try:
+            await pool.delete(f"drishya:session:{token}")
+        except Exception:
+            pass
+
+
+async def is_session_valid(token: str) -> bool:
+    """O(1) session validation — Redis first, then in-memory."""
+    data = await _session_get(token)
+    return data is not None
 PENDING_CHALLENGES = {}
 
 class LoginRequest(BaseModel):
@@ -129,7 +177,7 @@ async def verify_mfa(payload: MFAVerifyRequest, response: Response):
         
     # Valid signature! Complete the session.
     session_token = str(uuid.uuid4())
-    SESSION_STORE[session_token] = session_data["user_data"]
+    await _session_set(session_token, session_data["user_data"])
     
     # Delete challenge from memory
     del PENDING_CHALLENGES[temp_token]
@@ -149,15 +197,17 @@ async def verify_mfa(payload: MFAVerifyRequest, response: Response):
 @router.post("/logout")
 async def logout(response: Response, request: Request):
     token = request.cookies.get("session_token")
-    if token in SESSION_STORE:
-        del SESSION_STORE[token]
+    if token:
+        await _session_delete(token)
     response.delete_cookie("session_token")
     return {"success": True}
 
 @router.get("/me", response_model=UserResponse)
 async def get_me(request: Request):
     token = request.cookies.get("session_token")
-    if not token or token not in SESSION_STORE:
+    if not token:
         raise HTTPException(status_code=401, detail="Unauthenticated session")
-    user_data = SESSION_STORE[token]
+    user_data = await _session_get(token)
+    if not user_data:
+        raise HTTPException(status_code=401, detail="Unauthenticated session")
     return UserResponse(id=user_data["id"], username=user_data["username"], role=user_data["role"])

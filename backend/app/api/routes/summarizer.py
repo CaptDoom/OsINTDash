@@ -1,4 +1,5 @@
 import re
+import hashlib
 import httpx
 import pypdf
 import docx
@@ -13,6 +14,7 @@ from pydantic import BaseModel
 from backend.app.database import get_db, Article
 from backend.app.config import settings
 from backend.app.services.summarizer import call_openai, call_gemini, call_ollama
+from backend.app.redis_pool import cache_get, cache_set
 
 router = APIRouter(prefix="/api/summarizer")
 
@@ -54,6 +56,12 @@ def parse_docx(file_bytes: bytes) -> str:
         return f"[Error parsing Word Document: {str(e)}]"
 
 async def scrape_url(url: str) -> str:
+    # Check Redis cache for previously scraped URLs (1-hour TTL)
+    url_hash = hashlib.md5(url.encode()).hexdigest()
+    cache_key = f"drishya:scrape:url:{url_hash}"
+    cached = await cache_get(cache_key)
+    if cached and isinstance(cached, str):
+        return cached
     try:
         async with httpx.AsyncClient(follow_redirects=True) as client:
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -64,7 +72,10 @@ async def scrape_url(url: str) -> str:
                 html = re.sub(r'<style.*?>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
                 text = re.sub(r'<[^>]+>', ' ', html)
                 text = re.sub(r'\s+', ' ', text).strip()
-                return f"URL Source ({url}):\n{text[:3000]}"
+                result = f"URL Source ({url}):\n{text[:3000]}"
+                # Cache for 1 hour
+                await cache_set(cache_key, result, ttl=3600)
+                return result
             return f"URL Source ({url}) failed with status {resp.status_code}"
     except Exception as e:
         return f"URL Source ({url}) failed: {str(e)}"
