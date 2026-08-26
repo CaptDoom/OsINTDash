@@ -6,7 +6,7 @@ from typing import Dict, Any, Optional
 from fastapi import APIRouter
 import httpx
 
-from backend.app.redis_pool import get_redis_pool
+from backend.app.redis_pool import cache_get, cache_set
 
 logger = logging.getLogger("drishya.weather")
 
@@ -138,6 +138,7 @@ SECTORS = {
     },
 }
 
+
 # 10-minute in-memory cache
 weather_cache: Dict[str, Any] = {
     "data": None,
@@ -201,17 +202,10 @@ async def get_border_weather():
     global _weather_checksum
     
     # 1. Check Redis cache first (5-min TTL)
-    pool = await get_redis_pool()
-    redis_key = "drishya:weather:border"
-    if pool:
-        try:
-            cached = await pool.get(redis_key)
-            if cached:
-                import json as _json
-                weather_data = _json.loads(cached)
-                return weather_data
-        except Exception:
-            pass
+    cache_key = "drishya:weather:border"
+    cached = await cache_get(cache_key)
+    if cached:
+        return cached
     
     # 2. Return in-memory cache if valid
     if weather_cache["data"] and now < weather_cache["expires_at"]:
@@ -283,10 +277,5 @@ async def get_border_weather():
     # 4. Cache in Redis (5-min TTL) and in-memory (10-min TTL)
     weather_cache["data"] = weather_data
     weather_cache["expires_at"] = now + 600.0
-    if pool:
-        try:
-            import json as _json
-            await pool.setex(redis_key, 300, _json.dumps(weather_data, default=str))
-        except Exception:
-            pass
+    await cache_set(cache_key, weather_data, ttl=300)
     return weather_data

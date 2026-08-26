@@ -115,12 +115,15 @@ async def readiness_check(db: AsyncSession = Depends(get_db)):
     except Exception as e:
         logger.error(f"[Readiness] Database check failed: {e}")
         
-    # 2. Check Redis connection
+    # 2. Check Redis connection via shared pool
     try:
-        import redis.asyncio as aioredis
-        redis_conn = aioredis.from_url(settings.redis_url, socket_timeout=2.0)
-        await redis_conn.ping()
-        redis_ok = True
+        from backend.app.redis_pool import get_redis_pool
+        pool = await get_redis_pool()
+        if pool:
+            await pool.ping()
+            redis_ok = True
+        else:
+            logger.error("[Readiness] Redis pool unavailable")
     except Exception as e:
         logger.error(f"[Readiness] Redis check failed: {e}")
         
@@ -172,8 +175,12 @@ class ConnectionManager:
             subs.discard(websocket)
 
     async def broadcast(self, message: dict, channel: Optional[str] = None):
+        # Snapshot the set to avoid mutation during iteration
+        if channel:
+            targets = list(self.channel_subscribers.get(channel, set()))
+        else:
+            targets = list(self.active_connections)
         dead_connections = []
-        targets = self.channel_subscribers.get(channel, set()) if channel else self.active_connections
         for connection in targets:
             try:
                 await connection.send_text(json.dumps(message))
@@ -224,9 +231,8 @@ async def websub_webhook(request: Request):
 
     asyncio.create_task(manager.broadcast({"type": "live_article", "article": payload}))
     try:
-        import redis.asyncio as aioredis
-        redis_conn = aioredis.from_url(settings.redis_url, decode_responses=True)
-        await redis_conn.publish("live_stream", json.dumps(payload, default=str))
+        from backend.app.redis_pool import pubsub_publish
+        await pubsub_publish("live_stream", payload)
     except Exception:
         pass
 
@@ -547,6 +553,7 @@ async def redis_listener_task():
     redis_online = False
     
     while True:
+        pubsub = None
         try:
             logger.info("[Main] Attempting connection to Redis Pub/Sub...")
             pool = await get_redis_pool()
@@ -578,6 +585,13 @@ async def redis_listener_task():
                         logger.error(f"[Main] Error parsing pubsub message: {ex}")
         except Exception as e:
             logger.warning(f"[Main] Redis pub/sub error/offline: {e}.")
+            # Clean up previous pubsub before reconnecting
+            if pubsub:
+                try:
+                    await pubsub.unsubscribe()
+                    await pubsub.close()
+                except Exception:
+                    pass
             if not redis_online:
                 logger.info("[Main] Falling back to local in-memory event stream.")
                 def on_live_signal(article):
@@ -588,6 +602,17 @@ async def redis_listener_task():
             else:
                 logger.info("[Main] Retrying Redis Pub/Sub connection in 5 seconds...")
                 await asyncio.sleep(5)
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Gracefully close the shared Redis connection pool on shutdown."""
+    try:
+        from backend.app.redis_pool import close_redis_pool
+        await close_redis_pool()
+        logger.info("[Main] Redis connection pool closed.")
+    except Exception as e:
+        logger.debug(f"[Main] Redis pool shutdown error: {e}")
+
 
 @app.on_event("startup")
 async def startup_event():

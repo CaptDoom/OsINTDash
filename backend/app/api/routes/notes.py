@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict
 
 from backend.app.database import get_db, SharedNote, NoteVersion
 from backend.app.api.routes.auth import SESSION_STORE, _session_get
-from backend.app.redis_pool import get_redis_pool, pubsub_publish
+from backend.app.redis_pool import pubsub_publish
 
 router = APIRouter(prefix="/api/notes")
 
@@ -59,9 +59,11 @@ async def create_note(payload: NoteCreate, request: Request, db: AsyncSession = 
     author = payload.author
     if not author:
         token = request.cookies.get("session_token")
-        if token and token in SESSION_STORE:
-            author = SESSION_STORE[token].get("username")
-        else:
+        if token:
+            user_data = await _session_get(token)
+            if user_data:
+                author = user_data.get("username")
+        if not author:
             author = "Strategic Command"
 
     note = SharedNote(
@@ -98,8 +100,10 @@ async def update_note(note_id: str, payload: NoteCreate, request: Request, db: A
         raise HTTPException(status_code=404, detail="Note not found")
     author = payload.author or note.author
     token = request.cookies.get("session_token")
-    if token and token in SESSION_STORE:
-        author = SESSION_STORE[token].get("username") or author
+    if token:
+        user_data = await _session_get(token)
+        if user_data:
+            author = user_data.get("username") or author
     note.content = payload.content.strip()
     note.author = author
     db.add(NoteVersion(note_id=note.id, content=note.content, author=author))

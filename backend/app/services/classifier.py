@@ -9,7 +9,6 @@ from collections import Counter
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-import redis.asyncio as aioredis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,45 +40,20 @@ class MemoryLiveStream:
 
 memory_stream = MemoryLiveStream()
 
-_redis_dedup = None
-_dedup_lock = None
-
-
-def _get_dedup_lock():
-    global _dedup_lock
-    if _dedup_lock is None:
-        import asyncio
-
-        _dedup_lock = asyncio.Lock()
-    return _dedup_lock
-
-
 async def _get_redis():
-    global _redis_dedup
-    if _redis_dedup is not None:
-        return _redis_dedup
+    """Return the shared Redis pool (or False if Redis dedup is disabled)."""
     if not settings.enable_redis_dedup:
-        _redis_dedup = False
-        return _redis_dedup
-
-    async with _get_dedup_lock():
-        if _redis_dedup is not None:
-            return _redis_dedup
-        try:
-            _redis_dedup = aioredis.from_url(settings.redis_url, decode_responses=True)
-            await _redis_dedup.ping()
-        except Exception as exc:
-            logger.warning("[Classifier] Redis unavailable for deduplication: %s", exc)
-            _redis_dedup = False
-    return _redis_dedup
+        return False
+    from backend.app.redis_pool import get_redis_pool
+    return await get_redis_pool()
 
 
 async def _bump_archive_version() -> None:
-    redis_conn = await _get_redis()
-    if not redis_conn:
+    pool = await _get_redis()
+    if not pool:
         return
     try:
-        await redis_conn.incr("drishya:archive:version")
+        await pool.incr("drishya:archive:version")
     except Exception:
         return
 
