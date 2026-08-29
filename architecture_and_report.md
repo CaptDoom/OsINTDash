@@ -1,87 +1,98 @@
-# Operational System Report - Drishya
+# Operational System Report: Drishya (OsINTDash)
 
-This report details the system architecture, code organization, data ingestion pipeline, and runtime capabilities of the **Drishya** dashboard (Current Version).
+This report details the system architecture, code organization, data ingestion pipeline, security model, and runtime capabilities of **Drishya (OsINTDash)**.
 
 ---
 
 ## 1. System Architecture
 
-The dashboard is structured as a decoupled web application comprising a high-performance Express ingestion backend and a real-time React/Vite single-page frontend.
+Drishya is architected as a decoupled, resilient tactical web application comprising:
+1. **React 18 / TypeScript SPA Frontend**: Telemetry UI compiled via Vite, featuring interactive D3 geospatial map overlays, weather boundary HUDs, real-time alert ticker, and live WebSocket streaming.
+2. **FastAPI Asynchronous Backend Ingestion Mesh**: Python asynchronous server running Uvicorn that aggregates, deduplicates, classifies, and broadcasts geopolitical signals across 30+ countries.
+3. **Dual-Database Resilient Pipeline**: Production PostgreSQL database with `pgvector` embeddings, paired with automatic zero-configuration SQLite local database fallback (`articles_v2.db`).
+4. **Redis Message Broker & Local In-Memory Fallback**: Redis Pub/Sub for distributed live alert broadcasting with automatic fallback to in-memory event queues when offline.
 
 ```mermaid
 graph TD
-  User[Browser Client] -- 1. Authenticates via WebAuthn MFA --> App[React App.tsx]
-  App -- 2. Single Poll query every 60s --> Express[Express Server server.js]
-  Express -- 3. Check Cache (<30s) --> Cache{Memory Cache}
-  Cache -- Valid --> ReturnCache[Return cached news]
-  Cache -- Expired --> PromiseAll[Ingest 9 Borders concurrently]
-  PromiseAll --> APIChain{API Token configured?}
-  APIChain -- Yes --> QueryProvider[Query News API / GNews / Currents]
-  APIChain -- No / Fail --> QueryRSS[Query Google News RSS fallback]
-  QueryProvider --> Aggregator[Deduplicate & filter last 1 hour]
-  QueryRSS --> Aggregator
-  Aggregator --> CacheUpdate[Update Cache & return JSON]
-  CacheUpdate --> Render[Update Dossier Grid cards]
+  User[Browser Client / Analyst] -- 1. Authenticates via WebAuthn MFA --> App[React 18 / Vite SPA]
+  App -- 2. REST Queries & SSE --> FastAPI[FastAPI Server: main.py]
+  App -- 3. Live WebSocket Push --> WS[/ws WebSocket Stream]
+
+  subgraph Ingestion & Processing Mesh
+    FastAPI -- 4. Periodic Ingestion Loop (Every 60s) --> Ingestion[Ingestion Engine: ingestion.py]
+    Ingestion -- 5. Parallel Query across 10+ Providers --> NewsAPIs[NewsAPI, GNews, Currents, Mediastack, etc.]
+    Ingestion -- 6. Parallel Fallback Scraping --> GoogleRSS[Google News RSS / World Feeds]
+    
+    NewsAPIs --> Classifier[Classifier & NLP Engine: classifier.py]
+    GoogleRSS --> Classifier
+    
+    Classifier -- 7. SHA-256 Deduplication & Regex Tagging --> DB[(SQLite / PostgreSQL DB)]
+    Classifier -- 8. Publishes Signal Updates --> Redis[(Redis Pub/Sub Store)]
+  end
+  
+  subgraph Geopolitical Intelligence Chatbot & RAG
+    App -- 9. Prompts / Uploads Intelligence Files --> ChatRouter[Routes: chat.py / summarizer.py]
+    ChatRouter -- 10. Document Text Extraction (PDF / DOCX / TXT) --> SimpleText[Extracted Content]
+    SimpleText -- 11. Vector & TF-IDF Similarity Search --> DB
+    SimpleText & DB -- 12. Context Augmentation --> LLM{Ollama: Llama 3.1 / Local Fallback}
+    LLM -- 13. Formatted Intelligence Briefing --> App
+  end
+
+  Redis --> WS
+  WS --> App
 ```
-
-### A. Frontend Layer (React + TypeScript + Vite)
-*   **View Layer**: Compiled using **Vite** for rapid hot-reloading and modular builds.
-*   **Styling Engine**: Styled using **Tailwind CSS** coupled with **Material Symbols Outlined** for visual telemetry.
-*   **State & Sync Management**: 
-    *   Tracks the selected country dossier (monitoring China, Pakistan, Afghanistan, Bangladesh, Myanmar, Nepal, Bhutan, Sri Lanka, and the Maldives).
-    *   Fires a single concurrent API request (`/api/news/all`) every **60 seconds**.
-    *   Maintains a depleting linear progress bar (0%–100%) showing countdown telemetry to the next sync.
-
-### B. Backend Ingestion Layer (Node.js + Express)
-*   **Server Framework**: Express handles routing, JSON payloads, and static file deliveries.
-*   **Cachability (Rate-Limit Protection)**: A 30-second server-side memory cache acts as a buffer. Frequently refreshed client views query this cache instead of calling external APIs, ensuring free key quotas aren't exhausted.
-*   **Mesh API Fallback Chain**: Queries news providers in priority order:
-    1.  **NewsAPI.org** (`NEWS_API_KEY`)
-    2.  **GNews.io** (`GNEWS_API_KEY`)
-    3.  **Currents API** (`CURRENTS_API_KEY`)
-    4.  **TheNewsAPI** (`THENEWS_API_KEY`)
-    5.  **Mediastack** (`MEDIASTACK_API_KEY`)
-    6.  **Newscatcher** (`NEWSCATCHER_API_KEY`)
-    7.  **Bing News Search** (`BING_NEWS_API_KEY`)
-    8.  **Google News RSS** (Universal Fallback, parsing feeds via `rss-parser`)
 
 ---
 
-## 2. Ingestion & Noise Filtering Engine
+## 2. Ingestion, Classification & Noise Filtering Engine
 
-To ensure raw OSINT feeds match strict intelligence criteria, the backend executes three processing filters:
+To ensure raw OSINT feeds meet strict intelligence standards, the backend executes a multi-stage filtering and enrichment pipeline:
 
-1.  **Noise/Clickbait Filter**: Rejects articles containing keywords associated with quizzes, trivia, stock market price alerts, sports contests, or unrelated entertainment news.
-2.  **Normalized Deduplication**: Normalizes article headlines (lowercasing, removing non-alphanumeric characters, and truncating to a 35-character hash) and rejects duplicates.
-3.  **Strict 1-Hour Temporal Filter**: Discards articles older than 1 hour. If the resulting feed is empty, it marks the country's summary with `"STATUS: STABLE // NO NEW SIGNAL IN DETECTED WINDOW"`.
+1. **Noise & False-Positive Elimination**: Uses strict word-boundary regular expressions (`\b...s?\b`) to prevent false-positive keyword collisions on common English terms.
+2. **Normalized Deduplication**: Generates deterministic SHA-256 hashes from normalized title strings and sources to reject duplicate wire releases.
+3. **Multi-Source Fallback Chain with Circuit Breakers**:
+   - Primary: NewsAPI.org, World News API, NewsData.io
+   - Secondary: GNews.io, Currents API, TheNewsAPI, Mediastack, Newscatcher, Bing News
+   - Universal Fallback: Google News RSS feeds parsed via `googlenewsdecoder` and `selectolax`
+4. **Adaptive Rate-Limiting & Exponential Backoff**: Automatically detects HTTP 429/401 errors, applies jittered backoff, and trips circuit breakers for failing providers without interrupting feed delivery.
 
 ---
 
 ## 3. Directory Structure
 
-The project code is organized as follows:
-
 ```text
-Dashboard/
-├── .env                  # API Credentials (NewsAPI.org & GNews key configured)
-├── package.json          # Node dependencies (express, rss-parser, concurrently, react, vite)
-├── index.html            # Main HTML document (Tailwind CSS, fonts, and Material icons)
-├── server/
-│   └── server.js         # Express routes, cache manager, scraping API chain & filters
-└── src/
-    ├── main.tsx          # React application mounting entry point
-    ├── App.tsx           # WebAuthn Login Gate, Dossier Grid View, sidebar country dossiers
-    └── styles.css        # Shimmer effects, scanline animations, and marquee alert ticker
+OsINTDash/
+├── backend/                  # FastAPI Application Mesh
+│   ├── app/
+│   │   ├── api/routes/       # Endpoints: alerts, archive, auth, chat, notes, summarizer, weather
+│   │   ├── config.py         # App configuration & environment loader
+│   │   ├── database.py       # Async SQLAlchemy engine (Postgres pgvector / SQLite)
+│   │   ├── ingestion.py      # Multi-API parallel scraper & retry mesh
+│   │   ├── classifier.py     # NLP classification & regex engine
+│   │   ├── summarizer.py     # Document text parsing & LLM brief synthesizer
+│   │   └── main.py           # FastAPI entrypoint, middleware, and WebSocket router
+│   ├── requirements.txt      # Python dependencies
+│   └── run.py                # Server launcher script
+├── src/                      # React 18 + TypeScript Frontend
+│   ├── components/           # UI components: Map, Hud, Dossier, Chat, Notes, Alerts
+│   ├── services/             # API clients & WebSocket connection handlers
+│   ├── App.tsx               # Main application layout and view router
+│   ├── main.tsx              # React mounting root
+│   └── styles.css            # Tactical HUD styling, animations, and scanline shaders
+├── data/                     # Local SQLite database fallback storage
+├── Dockerfile.backend        # Unified container definition
+├── Dockerfile.frontend       # Nginx container definition
+├── docker-compose.yml        # Docker compose stack
+├── package.json              # Project scripts and dependencies
+├── render.yaml               # Cloud blueprint
+└── vite.config.ts            # Vite proxy & build config
 ```
 
 ---
 
-## 4. Key UI Widgets & User Flow
+## 4. Key UI Widgets & User Workflows
 
-*   **Security Access Gate (MFA Simulation)**:
-    Authenticates via user emails (`analyst@intel.local`, `operator@intel.local`, `admin@intel.local`) and credentials. Clicking the fingerprint visual launches a simulated WebAuthn cryptographic handshake, authenticating user sessions.
-*   **Dossier Grid Landing View**:
-    *   **Neighbor Dossiers (Sidebar)**: Renders the active country list with green glowing indicators showing which borders have active signals in the last hour.
-    *   **Thematic News Cards**: 5 panels representing `Political`, `Social`, `Tech`, `Economic`, and `Military` streams. If active news is found, it renders article headings, descriptions, and source tags directly inside the card. If empty, the card displays a fallback briefing.
-    *   **UAV Production & Stability Gauges**: Interactive visual bars displaying local drone output volumes, security stability indices, and risk probabilities.
-    *   **Marquee Warning Ticker**: Displays running classification details and system alerts at the bottom of the screen.
+* **Security Access Gate (STRATCOM WebAuthn MFA)**: Authenticates user credentials (`analyst@intel.local`, `operator@intel.local`, `admin@intel.local`) with simulated cryptographic biometric handshake.
+* **D3 Live Map & Meteorological HUD**: Visualizes active threat sectors and 15 border meteorological weather stations with live temperatures, wind metrics, and barometric alerts.
+* **RAG Intelligence Synthesis (AI Summarizer)**: Ingests uploaded PDF, DOCX, TXT documents or URL links, fuses them with database news wires, and synthesizes strategic intelligence briefings.
+* **Ephemeral Shared Notes**: Operator whiteboard with 24-hour self-destruct countdown timers and 1-click "Pin to Notes" from any telemetry card.

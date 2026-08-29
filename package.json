@@ -1,8 +1,16 @@
 {
-  "name": "india-neighbor-news-dashboard",
-  "description": "An advanced, high-performance news and tactical telemetry intelligence dashboard (Drishya) monitoring India's border sectors and key global strategic sectors in real-time with comprehensive weather boundary HUDs and multi-source API integration.",
+  "name": "osintdash",
+  "description": "Drishya (OsINTDash) — Advanced real-time Open-Source Tactical Intelligence (OSINT) and geopolitical telemetry dashboard monitoring border sectors, strategic allies, and global superpowers with multi-source news ingestion, weather HUD, live D3 GIS overlays, and local LLM intelligence synthesis.",
   "private": true,
-  "version": "1.0.0",
+  "version": "2.0.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/CaptDoom/OsINTDash.git"
+  },
+  "bugs": {
+    "url": "https://github.com/CaptDoom/OsINTDash/issues"
+  },
+  "homepage": "https://github.com/CaptDoom/OsINTDash#readme",
   "type": "module",
   "scripts": {
     "dev": "node -e \"if(process.env.RENDER) { require('child_process').execSync('venv/bin/python -m uvicorn backend.app.main:app --host 0.0.0.0 --port ' + process.env.PORT, {stdio: 'inherit'}); } else { require('child_process').execSync('concurrently -k \\\"npm run dev:server\\\" \\\"npm run dev:web\\\"', {stdio: 'inherit'}); }\"",
