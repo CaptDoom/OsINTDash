@@ -28,3 +28,10 @@ venv/
 # Local runtime logs and launch metadata
 .runtime-logs/
 .dev-ports.json
+*.log
+
+# Screenshots and media artifacts
+*.png
+*.jpg
+*.jpeg
+*.gif
