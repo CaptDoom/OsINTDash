@@ -7,7 +7,6 @@ import { RiskLevelBadge, RiskLegend, type ThreatLevel } from './components/RiskL
 import { GlobalOverview } from './components/GlobalOverview';
 import { CountryCard } from './components/CountryCard';
 import { CountryDetailSlideout } from './components/CountryDetailSlideout';
-import { LivePulseIndicator } from './components/LivePulseIndicator';
 import IntelligenceDashboard from './components/IntelligenceDashboard';
 import worldCountries from 'world-countries';
 

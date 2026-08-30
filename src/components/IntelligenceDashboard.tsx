@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo, useRef, useCallback } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react';
 
 interface IntelligenceDashboardProps {
   isDarkMode: boolean;
@@ -92,28 +92,7 @@ const DEPT_ICONS: Record<string, string> = {
   'Technology & Cyber': '💻',
 };
 
-function MiniSparkline({ values, color }: { values: number[]; color: string }) {
-  if (values.length < 2) return null;
-  const max = Math.max(...values, 1);
-  const w = 80;
-  const h = 20;
-  const points = values.map((v, i) => {
-    const x = (i / (values.length - 1)) * w;
-    const y = h - (v / max) * h;
-    return `${x},${y}`;
-  }).join(' ');
 
-  return (
-    <svg width={w} height={h} className="inline-block ml-2 opacity-60">
-      <polyline
-        fill="none"
-        stroke={color}
-        strokeWidth="1.5"
-        points={points}
-      />
-    </svg>
-  );
-}
 
 function TrendBadge({ direction }: { direction: string }) {
   const config = {

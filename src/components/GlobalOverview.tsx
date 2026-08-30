@@ -1,4 +1,3 @@
-import React from 'react';
 import { RiskLevelBadge, type ThreatLevel, getRiskConfig } from './RiskLevel';
 
 type GlobalOverviewProps = {

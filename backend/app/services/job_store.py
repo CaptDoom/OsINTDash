@@ -34,22 +34,14 @@ class JobStore:
     def __init__(self) -> None:
         self._memory_jobs: Dict[str, JobRecord] = {}
         self._memory_subscribers: set[asyncio.Queue[Dict[str, Any]]] = set()
-        self._redis = None
-        self._redis_lock = asyncio.Lock()
 
     async def _get_redis(self):
-        async with self._redis_lock:
-            if self._redis is not None:
-                return self._redis
-            try:
-                import redis.asyncio as aioredis
-
-                self._redis = aioredis.from_url(settings.redis_url, decode_responses=True)
-                await self._redis.ping()
-            except Exception as exc:
-                logger.warning("Redis job store unavailable, using memory fallback: %s", exc)
-                self._redis = False
-            return self._redis
+        try:
+            from backend.app.redis_pool import get_redis_pool
+            return await get_redis_pool()
+        except Exception as exc:
+            logger.warning("Redis job store unavailable, using memory fallback: %s", exc)
+            return None
 
     @staticmethod
     def _key(job_type: str, job_id: str) -> str:
