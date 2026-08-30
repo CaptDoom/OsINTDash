@@ -411,7 +411,7 @@ RULES:
         high = sum(1 for a in articles if a.impact_level == "High Impact")
         medium = sum(1 for a in articles if a.impact_level == "Medium Impact")
         sources = list(set(a.source for a in articles if a.source))[:10]
-        yield f"event: metadata\ndata: {_json.dumps({
+        meta_data = {
             'country': country_name,
             'timeframe': timeframe_label,
             'total_articles': len(articles),
@@ -419,7 +419,8 @@ RULES:
             'medium_impact': medium,
             'sources': sources,
             'articles': article_meta[:20],
-        })}\n\n"
+        }
+        yield f"event: metadata\ndata: {_json.dumps(meta_data)}\n\n"
 
         # Stream LLM response
         try:
