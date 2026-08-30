@@ -504,26 +504,39 @@ def _normalize_api_article(article: Dict[str, Any], country_code: str, country_n
 
 
 def _search_query(country_name: str) -> str:
-    # Sub-regional sectors/geography terms
-    sectors = "LAC OR LOC OR Galwan OR Doklam OR Depsang OR Arunachal OR Kashmir OR Gwadar OR \"Chumbi Valley\" OR \"Siliguri Corridor\""
-    # Tactical event terms
-    events = "\"airspace violation\" OR \"infrastructure development\" OR \"troop buildup\" OR \"radar installation\" OR \"convoy movement\" OR \"uncrewed aerial vehicle\" OR UAV OR drone OR military OR border"
-    
-    # China, Pakistan, India
-    if country_name in ("China", "Pakistan", "India"):
-        return f'("{country_name}") AND ({sectors} OR {events})'
-    
-    # Fallback for other countries
-    return f'"{country_name}" AND (conflict OR security OR border OR military OR diplomatic OR infrastructure OR UAV OR drone OR protest)'
+    """Build a high-relevance search query per country."""
+    # Country-specific high-value topics
+    country_topics = {
+        "China": 'China AND (Taiwan OR \"South China Sea\" OR LAC OR border OR military OR trade OR sanctions OR tariffs OR technology OR semiconductor OR Xinjiang OR Hong Kong)',
+        "Pakistan": 'Pakistan AND (military OR border OR terrorism OR ceasefire OR Kashmir OR NATO OR Afghanistan OR Balochistan OR nuclear OR India)',
+        "India": 'India AND (military OR border OR LAC OR Kashmir OR defense OR nuclear OR election OR economy OR technology OR space)',
+        "Russia": 'Russia AND (Ukraine OR war OR sanctions OR military OR NATO OR oil OR gas OR nuclear OR ceasefire OR frontline)',
+        "Ukraine": 'Ukraine AND (war OR military OR Russia OR frontline OR NATO OR aid OR ceasefire OR missile OR drone OR offensive)',
+        "Iran": 'Iran AND (nuclear OR sanctions OR military OR proxy OR drone OR Middle East OR Israel OR missile OR IRGC)',
+        "Israel": 'Israel AND (Gaza OR military OR Hamas OR Hezbollah OR defense OR missile OR ceasefire OR Iron Dome OR drone)',
+        "Taiwan": 'Taiwan AND (China OR military OR defense OR strait OR semiconductor OR TSMC OR invasion OR blockade)',
+        "Japan": 'Japan AND (military OR defense OR China OR North Korea OR missile OR alliance OR AUKUS OR economy)',
+        "South Korea": '\"South Korea\" AND (North Korea OR military OR missile OR defense OR denuclearization OR economy)',
+        "Myanmar": 'Myanmar AND (conflict OR military OR coup OR resistance OR ethnic OR border OR humanitarian OR sanctions)',
+        "Afghanistan": 'Afghanistan AND (Taliban OR security OR border OR humanitarian OR Pakistan OR ISIS OR women OR refugees)',
+        "Bangladesh": 'Bangladesh AND (politics OR election OR economy OR border OR security OR Rohingya OR migration)',
+        "Nepal": 'Nepal AND (politics OR economy OR border OR India OR China OR infrastructure OR earthquake)',
+        "Sri Lanka": '\"Sri Lanka\" AND (economy OR debt OR port OR China OR India OR politics OR fisheries)',
+        "United States": 'United States AND (military OR NATO OR China OR sanctions OR economy OR election OR technology OR diplomacy)',
+    }
+    if country_name in country_topics:
+        return country_topics[country_name]
+    # Fallback: broad news query
+    return f'{country_name} AND (news OR politics OR economy OR security OR military OR conflict OR government)'
 
 
 def _search_query_broad(country_name: str, level: int = 0) -> str:
     if level == 0:
         return _search_query(country_name)
     elif level == 1:
-        return f'"{country_name}" border OR "{country_name}" military OR "{country_name}" conflict'
+        return f'{country_name} AND (news OR politics OR economy OR military)'
     else:
-        return f'"{country_name}"'
+        return f'{country_name}'
 
 
 
@@ -855,6 +868,31 @@ async def fetch_freenewsapi_feed(client: httpx.AsyncClient, country_code: str, c
     return detailed_articles
 
 
+async def fetch_gdelt_feed(client: httpx.AsyncClient, country_code: str, country_name: str, limit: int, breaker: CircuitState) -> List[Dict[str, Any]]:
+    """Fetch from GDELT Project — free, no API key, excellent global coverage."""
+    query = _search_query(country_name)
+    params = {
+        "query": query,
+        "mode": "ArtList",
+        "format": "json",
+        "maxrecords": min(limit, 50),
+        "sort": "DateDesc",
+        "timespan": "1d",
+    }
+    response = await _get_with_retry(
+        client, "https://api.gdeltproject.org/api/v2/doc/doc",
+        source_name="GDELT", breaker=breaker, params=params,
+    )
+    if not response or response.status_code != 200:
+        return []
+    try:
+        data = response.json()
+    except Exception:
+        return []
+    articles_raw = data.get("articles") or []
+    return [_normalize_gdelt_record(a, country_code, country_name) for a in articles_raw[:limit]]
+
+
 async def _fetch_all_news_sources(client: httpx.AsyncClient, country_code: str, country_name: str, limit: int) -> List[Dict[str, Any]]:
     source_limit = max(limit, 10)
     import difflib
@@ -879,6 +917,14 @@ async def _fetch_all_news_sources(client: httpx.AsyncClient, country_code: str, 
             pub_date = article.get("published_at")
             if pub_date and not is_article_fresh(pub_date):
                 continue
+            
+            # Country relevance check: article must mention the target country
+            combined_text = f"{title} {content} {summary}".lower()
+            country_lower = country_name.lower()
+            if country_lower not in combined_text:
+                # Also check country code
+                if country_code.lower() not in combined_text:
+                    continue
             
             url = article["url"]
             if url in seen_urls:
@@ -910,7 +956,10 @@ async def _fetch_all_news_sources(client: httpx.AsyncClient, country_code: str, 
                 all_articles.append(article)
 
     # 1. Fetch the known-good providers first, in priority order.
-    primary_sources = []
+    # GDELT is free and always available — put it first as primary source
+    primary_sources = [
+        (fetch_gdelt_feed, "GDELT"),
+    ]
     if settings.newsapi_key:
         primary_sources.append((fetch_newsapi_feed, "NewsAPI"))
     if settings.newsdata_api_key:
@@ -985,20 +1034,43 @@ async def _fetch_all_news_sources(client: httpx.AsyncClient, country_code: str, 
             if isinstance(result, list):
                 add_unique_articles(result)
 
-    return all_articles[:limit]
+    # Score and rank articles by quality before returning
+    scored = []
+    now = datetime.now(timezone.utc)
+    from backend.app.services.credibility import compute_source_reputation_score
+    for article in all_articles:
+        score = 0.0
+        # Source reputation (0-1)
+        score += compute_source_reputation_score(article.get("source", "")) * 0.3
+        # Recency boost: fresher = higher score (0-0.4)
+        pub = article.get("published_at")
+        if pub:
+            age_hours = max(0, (now - pub).total_seconds() / 3600)
+            if age_hours < 6:
+                score += 0.4
+            elif age_hours < 24:
+                score += 0.3
+            elif age_hours < 72:
+                score += 0.15
+            else:
+                score += 0.05
+        # Content length bonus (0-0.2) — longer content = more detail
+        content_len = len(article.get("content") or article.get("summary") or "")
+        score += min(0.2, content_len / 1000 * 0.2)
+        # Country name in title bonus (0-0.1)
+        title_lower = (article.get("title") or "").lower()
+        if country_name.lower() in title_lower:
+            score += 0.1
+        article["_relevance_score"] = round(score, 3)
+        scored.append(article)
+
+    scored.sort(key=lambda a: a["_relevance_score"], reverse=True)
+    return scored[:limit]
 
 
 async def fetch_rss_feed(client: httpx.AsyncClient, country_code: str, country_name: str, budget: int, breaker: CircuitState) -> List[Dict[str, Any]]:
-    priority = _country_priority(country_code)
-    sectors = "LAC OR LOC OR Galwan OR Doklam OR Depsang OR Arunachal OR Kashmir OR Gwadar OR \"Chumbi Valley\" OR \"Siliguri Corridor\""
-    events = "\"airspace violation\" OR \"infrastructure development\" OR \"troop buildup\" OR \"radar installation\" OR \"convoy movement\" OR \"uncrewed aerial vehicle\" OR UAV OR drone"
-    
-    if priority in {"critical", "high"}:
-        query = f'"{country_name}" ({sectors} OR {events} OR border OR military OR defense OR conflict)'
-    elif country_code in {"BT", "MV", "LK", "NP"}:
-        query = f'"{country_name}" (geopolitical OR relations OR security OR trade OR port)'
-    else:
-        query = f'"{country_name}" (news OR politics OR economic)'
+    # Use the same improved search queries as the API providers
+    query = _search_query(country_name)
 
 
     url = f"https://news.google.com/rss/search?q={encode_query(query)}&hl=en-US&gl=US&ceid=US:en"

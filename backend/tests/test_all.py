@@ -145,7 +145,7 @@ class TestNewsIngestion(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await breaker.get_failures(), 2)
 
     async def test_provider_results_are_deduplicated_and_limited(self):
-        long_content = " ".join(f"word{i}" for i in range(30))  # varied words to pass quality checks
+        long_content = "China border " + " ".join(f"word{i}" for i in range(28))  # varied words with country name
         now = datetime.now(timezone.utc)
         duplicate_a = {
             "title": "Border radar deployment near Tawang",
@@ -160,9 +160,9 @@ class TestNewsIngestion(unittest.IsolatedAsyncioTestCase):
             "published_at": now,
         }
         unique = {
-            "title": "Trade corridor talks resume",
+            "title": "China trade corridor talks resume",
             "url": "https://news.example/c",
-            "content": " ".join(f"unique{i}topic" for i in range(30)),
+            "content": "China trade " + " ".join(f"unique{i}topic" for i in range(28)),
             "published_at": now,
         }
 
@@ -171,7 +171,7 @@ class TestNewsIngestion(unittest.IsolatedAsyncioTestCase):
             return [duplicate_a, duplicate_b, unique]
 
         provider_names = [
-            "fetch_freenewsapi_feed", "fetch_newsapi_feed", "fetch_gnews_feed",
+            "fetch_gdelt_feed", "fetch_freenewsapi_feed", "fetch_newsapi_feed", "fetch_gnews_feed",
             "fetch_worldnews_feed", "fetch_finnhub_feed", "fetch_currents_feed",
             "fetch_thenews_feed", "fetch_mediastack_feed", "fetch_bing_news_feed",
         ]
@@ -182,8 +182,8 @@ class TestNewsIngestion(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(articles), 2)
         self.assertEqual(
-            [article["url"] for article in articles],
-            ["https://news.example/a", "https://news.example/c"],
+            set(article["url"] for article in articles),
+            {"https://news.example/a", "https://news.example/c"},
         )
 
     async def test_country_news_constructs_named_rss_breaker(self):
@@ -616,6 +616,135 @@ class TestFastAPIRoutes(unittest.TestCase):
         self.assertIn("summary", done_data)
         self.assertIsInstance(done_data["summary"], str)
         self.assertGreater(len(done_data["summary"]), 0)
+
+    def test_ready_endpoint(self):
+        response = self.client.get("/ready")
+        self.assertIn(response.status_code, [200, 503])
+        data = response.json()
+        self.assertIn("status", data)
+        self.assertIn("database", data)
+
+    def test_system_status_endpoint(self):
+        response = self.client.get("/api/system/status")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("configured_providers", data)
+        self.assertIn("weather_provider", data)
+        self.assertIn("llm_provider", data)
+
+    def test_scrape_endpoint(self):
+        response = self.client.post("/api/scrape", json={"urls": ["https://news.example/test"]})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data.get("success"))
+        self.assertIn("jobIds", data)
+
+    def test_credibility_endpoints(self):
+        # Status
+        status_resp = self.client.get("/api/credibility/status")
+        self.assertEqual(status_resp.status_code, 200)
+        status_data = status_resp.json()
+        self.assertIn("engine", status_data)
+        self.assertIn("provider_health", status_data)
+        self.assertIn("circuit_breakers", status_data)
+
+        # Provider health
+        health_resp = self.client.get("/api/credibility/provider-health")
+        self.assertEqual(health_resp.status_code, 200)
+
+        # Reset circuits
+        reset_resp = self.client.post("/api/credibility/reset-circuits")
+        self.assertEqual(reset_resp.status_code, 200)
+        self.assertEqual(reset_resp.json()["status"], "all_circuits_reset")
+
+    def test_archive_timeframe_endpoint(self):
+        response = self.client.get("/api/archive/1M?limit=10")
+        self.assertEqual(response.status_code, 200)
+        self.assertIsInstance(response.json(), list)
+
+    def test_archive_summary_endpoint(self):
+        response = self.client.post("/api/archive/summary/1M")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["timeframe"], "1M")
+        self.assertIn("summary", data)
+
+    def test_chat_complete_endpoint(self):
+        response = self.client.post(
+            "/api/chat/complete",
+            json={"system": "You are an analyst", "user": "Title: LAC patrol\nContent: Troops conducted regular patrols."}
+        )
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("summary", data)
+        self.assertIn("impact", data)
+
+    def test_chat_fusion_lifecycle(self):
+        import io
+        file_content = b"Strategic defense intelligence briefing report."
+        files = {"file": ("report.txt", io.BytesIO(file_content), "text/plain")}
+        response = self.client.post("/api/chat/fusion", files=files, data={"instructions": "Analyze risk"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("job_id", data)
+        job_id = data["job_id"]
+
+        status_resp = self.client.get(f"/api/chat/fusion/status/{job_id}")
+        self.assertEqual(status_resp.status_code, 200)
+        status_data = status_resp.json()
+        self.assertEqual(status_data["job_id"], job_id)
+
+    def test_auth_full_lifecycle(self):
+        import uuid
+        import hmac
+        import hashlib
+
+        username = f"analyst_{uuid.uuid4().hex[:8]}"
+        password = "SecurePassword123!"
+
+        # 1. Register
+        reg_resp = self.client.post(
+            "/api/auth/register",
+            json={"username": username, "password": password, "role": "Senior Analyst"}
+        )
+        self.assertEqual(reg_resp.status_code, 200)
+        user_info = reg_resp.json()
+        self.assertEqual(user_info["username"], username)
+        self.assertEqual(user_info["role"], "Senior Analyst")
+
+        # 2. Login (initiates MFA challenge)
+        login_resp = self.client.post(
+            "/api/auth/login",
+            json={"username": username, "password": password}
+        )
+        self.assertEqual(login_resp.status_code, 200)
+        login_data = login_resp.json()
+        self.assertTrue(login_data["mfa_required"])
+        temp_token = login_data["temp_token"]
+        challenge = login_data["challenge"]
+
+        # Compute HMAC signature for MFA
+        signature = hmac.new(password.encode("utf-8"), challenge.encode("utf-8"), hashlib.sha256).hexdigest()
+
+        # 3. Verify MFA
+        mfa_resp = self.client.post(
+            "/api/auth/verify_mfa",
+            json={"temp_token": temp_token, "signature": signature}
+        )
+        self.assertEqual(mfa_resp.status_code, 200)
+        self.assertTrue(mfa_resp.json()["success"])
+
+        # 4. Check /me with session cookie
+        me_resp = self.client.get("/api/auth/me")
+        self.assertEqual(me_resp.status_code, 200)
+        me_data = me_resp.json()
+        self.assertEqual(me_data["username"], username)
+        self.assertEqual(me_data["role"], "Senior Analyst")
+
+        # 5. Logout
+        logout_resp = self.client.post("/api/auth/logout")
+        self.assertEqual(logout_resp.status_code, 200)
+        self.assertTrue(logout_resp.json()["success"])
 
 if __name__ == "__main__":
     unittest.main()

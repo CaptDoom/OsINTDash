@@ -59,6 +59,18 @@ class JobStore:
     def _channel(job_type: str) -> str:
         return f"drishya:jobs:{job_type}"
 
+    @staticmethod
+    def _to_redis_mapping(job: JobRecord) -> Dict[str, str]:
+        mapping = {}
+        for k, v in asdict(job).items():
+            if v is None:
+                continue
+            if isinstance(v, (dict, list)):
+                mapping[k] = json.dumps(v)
+            else:
+                mapping[k] = str(v)
+        return mapping
+
     async def create(self, job_type: str, payload: Dict[str, Any]) -> JobRecord:
         job = JobRecord(
             job_id=payload.get("job_id") or payload.get("id") or f"{job_type}-{datetime.now().timestamp():.0f}",
@@ -70,7 +82,7 @@ class JobStore:
         )
         redis_conn = await self._get_redis()
         if redis_conn:
-            await redis_conn.hset(self._key(job_type, job.job_id), mapping=asdict(job) | {"payload": json.dumps(job.payload)})
+            await redis_conn.hset(self._key(job_type, job.job_id), mapping=self._to_redis_mapping(job))
             await redis_conn.publish(self._channel(job_type), json.dumps(asdict(job)))
         else:
             self._memory_jobs[job.job_id] = job
@@ -96,7 +108,7 @@ class JobStore:
         if redis_conn:
             await redis_conn.hset(
                 self._key(current.job_type, current.job_id),
-                mapping=asdict(current) | {"payload": json.dumps(current.payload)},
+                mapping=self._to_redis_mapping(current),
             )
             await redis_conn.publish(self._channel(current.job_type), json.dumps(asdict(current)))
         else:
