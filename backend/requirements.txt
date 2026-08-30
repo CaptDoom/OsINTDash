@@ -19,5 +19,6 @@ trafilatura<2.0.0
 googlenewsdecoder>=0.1.7
 selectolax>=0.4.11
 PySocks>=1.7.1
+websockets>=12.0
 
 
