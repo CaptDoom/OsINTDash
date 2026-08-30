@@ -4,6 +4,26 @@ interface AiSummarizerProps {
   isDarkMode: boolean;
 }
 
+interface ArticleMeta {
+  id: string;
+  title: string;
+  url: string;
+  source: string;
+  department: string;
+  impact_level: string;
+  published_at: string;
+}
+
+interface StreamMetadata {
+  country: string;
+  timeframe: string;
+  total_articles: number;
+  high_impact: number;
+  medium_impact: number;
+  sources: string[];
+  articles: ArticleMeta[];
+}
+
 const COUNTRIES = [
   { code: 'CN', name: 'China' },
   { code: 'IN', name: 'India' },
@@ -30,7 +50,9 @@ export default function AiSummarizer({ isDarkMode }: AiSummarizerProps) {
   const [files, setFiles] = useState<File[]>([]);
   const [generating, setGenerating] = useState(false);
   const [summary, setSummary] = useState('');
+  const [metadata, setMetadata] = useState<StreamMetadata | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [streamingPhase, setStreamingPhase] = useState<'idle' | 'fetching' | 'streaming' | 'done'>('idle');
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
@@ -47,7 +69,9 @@ export default function AiSummarizer({ isDarkMode }: AiSummarizerProps) {
     e.preventDefault();
     setGenerating(true);
     setSummary('');
+    setMetadata(null);
     setError(null);
+    setStreamingPhase('fetching');
 
     const formData = new FormData();
     formData.append('country_code', selectedCountry);
@@ -60,31 +84,87 @@ export default function AiSummarizer({ isDarkMode }: AiSummarizerProps) {
     });
 
     try {
-      const res = await fetch('/api/summarizer/generate', {
+      const res = await fetch('/api/summarizer/stream', {
         method: 'POST',
         body: formData,
       });
 
-      if (res.ok) {
-        const data = await res.json();
-        setSummary(data.summary);
-      } else {
+      if (!res.ok) {
         const errText = await res.text();
         setError(`Failed to generate summary: ${errText || res.statusText}`);
+        setGenerating(false);
+        setStreamingPhase('idle');
+        return;
+      }
+
+      const reader = res.body?.getReader();
+      if (!reader) {
+        setError('Streaming not supported by browser.');
+        setGenerating(false);
+        setStreamingPhase('idle');
+        return;
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let fullText = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        let eventType = '';
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            eventType = line.slice(7).trim();
+          } else if (line.startsWith('data: ')) {
+            const dataStr = line.slice(6);
+
+            if (eventType === 'metadata') {
+              try {
+                const meta = JSON.parse(dataStr);
+                setMetadata(meta);
+                setStreamingPhase('streaming');
+              } catch { /* ignore parse errors */ }
+            } else if (eventType === 'token') {
+              try {
+                const tokenData = JSON.parse(dataStr);
+                if (tokenData.text) {
+                  fullText += tokenData.text;
+                  setSummary(fullText);
+                }
+              } catch { /* ignore parse errors */ }
+            } else if (eventType === 'done') {
+              try {
+                const doneData = JSON.parse(dataStr);
+                if (doneData.summary) {
+                  setSummary(doneData.summary);
+                }
+              } catch { /* use accumulated text */ }
+              setStreamingPhase('done');
+            }
+            eventType = '';
+          }
+        }
       }
     } catch (err) {
       setError(`Network error calling summarizer: ${String(err)}`);
     } finally {
       setGenerating(false);
+      setStreamingPhase('idle');
     }
   };
 
   return (
     <div className={`space-y-6 ${isDarkMode ? 'text-[#d4e4fa]' : 'text-slate-800'}`}>
       <div className="border-b border-white/20 pb-3">
-        <h2 className="text-xl font-bold uppercase tracking-wider text-[#7bd0ff]">Time-Based AI Geopolitical Summarizer</h2>
+        <h2 className="text-xl font-bold uppercase tracking-wider text-[#7bd0ff]">Real-Time AI Geopolitical Summarizer</h2>
         <p className="text-xs opacity-70 mt-1">
-          Select target entity, timeframe, and upload optional documents or URLs to generate synthesized intelligence reports.
+          Stream synthesized intelligence reports in real-time. Select target entity, timeframe, and upload optional documents or URLs.
         </p>
       </div>
 
@@ -197,7 +277,12 @@ export default function AiSummarizer({ isDarkMode }: AiSummarizerProps) {
                 : 'bg-[#7bd0ff]/10 hover:bg-[#7bd0ff]/20 text-[#7bd0ff] border border-[#7bd0ff]/40 shadow-md'
             }`}
           >
-            {generating ? 'Compiling Context...' : 'Generate AI Briefing'}
+            {generating ? (
+              <span className="flex items-center justify-center gap-2">
+                <span className="w-3 h-3 rounded-full border border-[#7bd0ff] border-t-transparent animate-spin" />
+                {streamingPhase === 'fetching' ? 'Connecting...' : streamingPhase === 'streaming' ? 'Streaming...' : 'Compiling...'}
+              </span>
+            ) : 'Generate AI Briefing'}
           </button>
         </div>
 
@@ -210,18 +295,47 @@ export default function AiSummarizer({ isDarkMode }: AiSummarizerProps) {
             <h3 className="text-xs font-mono uppercase tracking-widest text-[#7bd0ff] border-b border-white/10 pb-2 mb-3 flex items-center gap-1.5">
               <span className="material-symbols-outlined text-base">analytics</span>
               Operational Summary Briefing
+              {streamingPhase === 'streaming' && (
+                <span className="ml-auto flex items-center gap-1.5 text-[10px] text-green-400">
+                  <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" />
+                  LIVE
+                </span>
+              )}
             </h3>
-            
-            {generating ? (
+
+            {/* Stream Metadata Bar */}
+            {metadata && (
+              <div className={`mb-3 p-3 rounded border ${isDarkMode ? 'border-white/10 bg-[#0a1929]/60' : 'border-slate-200 bg-slate-50'}`}>
+                <div className="flex flex-wrap gap-3 text-[10px] font-mono">
+                  <span className="text-[#7bd0ff]">
+                    <span className="material-symbols-outlined text-[10px] align-middle">public</span> {metadata.country}
+                  </span>
+                  <span className="opacity-60">|</span>
+                  <span>{metadata.timeframe}</span>
+                  <span className="opacity-60">|</span>
+                  <span>{metadata.total_articles} articles</span>
+                  <span className="opacity-60">|</span>
+                  <span className="text-red-400">{metadata.high_impact} high</span>
+                  <span className="text-yellow-400">{metadata.medium_impact} medium</span>
+                  <span className="opacity-60">|</span>
+                  <span className="opacity-70">Sources: {metadata.sources.slice(0, 5).join(', ')}{metadata.sources.length > 5 ? ` +${metadata.sources.length - 5}` : ''}</span>
+                </div>
+              </div>
+            )}
+
+            {generating && !summary ? (
               <div className="flex-1 flex flex-col items-center justify-center space-y-4">
                 <span className="w-8 h-8 rounded-full border-2 border-[#7bd0ff] border-t-transparent animate-spin" />
                 <p className="text-xs font-mono text-[#7bd0ff] animate-pulse">
-                  INGESTING SIGNAL MESH & SYNTHESIZING INTELLIGENCE...
+                  {streamingPhase === 'fetching' ? 'CONNECTING TO INTELLIGENCE MESH...' : 'INGESTING SIGNALS & SYNTHESIZING...'}
                 </p>
               </div>
             ) : summary ? (
               <div className="flex-1 text-xs leading-relaxed font-mono whitespace-pre-wrap overflow-y-auto text-[#bec6e0] max-h-[500px] pr-2">
                 {summary}
+                {streamingPhase === 'streaming' && (
+                  <span className="inline-block w-1.5 h-3 bg-[#7bd0ff] animate-pulse ml-0.5 align-middle" />
+                )}
               </div>
             ) : (
               <div className="flex-1 flex flex-col items-center justify-center text-center opacity-60">

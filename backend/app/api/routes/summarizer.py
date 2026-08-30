@@ -1,5 +1,6 @@
 import re
 import hashlib
+import logging
 import httpx
 import pypdf
 import docx
@@ -7,6 +8,8 @@ from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+
+logger = logging.getLogger("drishya.api.summarizer")
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
@@ -56,6 +59,13 @@ def parse_docx(file_bytes: bytes) -> str:
         return f"[Error parsing Word Document: {str(e)}]"
 
 async def scrape_url(url: str) -> str:
+    from backend.app.services.net_safety import is_safe_url
+
+    # SSRF protection: reject URLs pointing to private/loopback/link-local networks
+    if not is_safe_url(url):
+        logger.warning("[Summarizer] SSRF blocked: %s", url)
+        return f"URL Source ({url}) blocked: local/private network access is restricted."
+
     # Check Redis cache for previously scraped URLs (1-hour TTL)
     url_hash = hashlib.md5(url.encode()).hexdigest()
     cache_key = f"drishya:scrape:url:{url_hash}"
@@ -63,9 +73,17 @@ async def scrape_url(url: str) -> str:
     if cached and isinstance(cached, str):
         return cached
     try:
-        async with httpx.AsyncClient(follow_redirects=True) as client:
+        # follow_redirects=False + manual hop validation to prevent SSRF-via-redirect
+        async with httpx.AsyncClient(follow_redirects=False) as client:
             headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
             resp = await client.get(url, headers=headers, timeout=10.0)
+            hops = 0
+            while resp.is_redirect and hops < 3:
+                next_url = str(resp.next_request.url)
+                if not is_safe_url(next_url):
+                    return f"URL Source ({url}) blocked: redirect target is a restricted address."
+                resp = await client.get(next_url, headers=headers)
+                hops += 1
             if resp.status_code == 200:
                 html = resp.text
                 html = re.sub(r'<script.*?>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
@@ -297,3 +315,152 @@ INPUT SOURCES:
         summary_text = generate_fallback_summary(country_name, timeframe_label, articles, external_context)
 
     return {"summary": summary_text}
+
+
+@router.post("/stream")
+async def generate_streaming_summary(
+    country_code: str = Form(...),
+    timeframe: str = Form(...),
+    urls: Optional[str] = Form(None),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Streaming summarizer using Server-Sent Events.
+    Returns article metadata immediately, then streams the LLM briefing in real-time.
+    """
+    from fastapi.responses import StreamingResponse
+    import json as _json
+
+    country_name = COUNTRY_NAMES_BY_CODE.get(country_code.upper(), country_code)
+
+    # Calculate cutoff
+    now = datetime.now(timezone.utc)
+    if timeframe == "1M":
+        start_date, timeframe_label = now - timedelta(days=30), "1 Month"
+    elif timeframe == "6M":
+        start_date, timeframe_label = now - timedelta(days=180), "6 Months"
+    elif timeframe == "1Y":
+        start_date, timeframe_label = now - timedelta(days=365), "1 Year"
+    else:
+        raise HTTPException(status_code=400, detail="Invalid timeframe. Must be '1M', '6M', or '1Y'.")
+
+    # Fetch articles
+    stmt = select(Article).where(
+        Article.country_code == country_code.upper(),
+        Article.published_at >= start_date
+    ).order_by(Article.published_at.desc())
+    result = await db.execute(stmt)
+    articles = list(result.scalars().all())
+
+    # Build article metadata for frontend
+    article_meta = []
+    db_articles_context = ""
+    for idx, art in enumerate(articles[:40]):
+        db_articles_context += (
+            f"SOURCE [{idx+1}]: {art.title}\n"
+            f"URL: {art.url}\n"
+            f"Department: {art.department}\n"
+            f"Source: {art.source}\n"
+            f"Impact: {art.impact_level}\n"
+            f"Published: {art.published_at.isoformat()}\n"
+            f"Summary: {art.summary or art.content[:200]}\n\n"
+        )
+        article_meta.append({
+            "id": art.id, "title": art.title, "url": art.url,
+            "source": art.source, "department": art.department,
+            "impact_level": art.impact_level,
+            "published_at": art.published_at.isoformat(),
+        })
+
+    # Parse external URLs if provided
+    external_context = "No external sources provided."
+    if urls:
+        url_list = [u.strip() for u in urls.split(",") if u.strip()]
+        ext_texts = []
+        for url in url_list:
+            scraped = await scrape_url(url)
+            ext_texts.append(scraped)
+        if ext_texts:
+            external_context = "\n\n---\n\n".join(ext_texts)
+
+    # Build prompt
+    prompt = f"""
+You are an expert communicator who translates complex news into simple, plain English.
+Write a cohesive news and stability briefing for {country_name.upper()} over {timeframe_label}.
+
+NEWS REPORTS:
+{db_articles_context}
+
+EXTERNAL SOURCES:
+{external_context}
+
+FORMAT:
+**1. Summary** - 2-3 sentence overview.
+**2. Sector Details** - Group by: Military & Defense, Economic & Financial, Political & Diplomatic, Social & Welfare / Technology.
+**3. What This Means for Ordinary People** - Plain English impact.
+**4. Source Reliability** - Note which sources reported each key finding.
+
+RULES:
+- No jargon (no OSINT, telemetry, bilaterals, tactical, reconnaissance, frontier, strategic, etc.).
+- Be direct. Every sentence must add new information.
+- Keep under 400 words.
+"""
+
+    async def event_generator():
+        # First event: article metadata + stats
+        high = sum(1 for a in articles if a.impact_level == "High Impact")
+        medium = sum(1 for a in articles if a.impact_level == "Medium Impact")
+        sources = list(set(a.source for a in articles if a.source))[:10]
+        yield f"event: metadata\ndata: {_json.dumps({
+            'country': country_name,
+            'timeframe': timeframe_label,
+            'total_articles': len(articles),
+            'high_impact': high,
+            'medium_impact': medium,
+            'sources': sources,
+            'articles': article_meta[:20],
+        })}\n\n"
+
+        # Stream LLM response
+        try:
+            full_text = ""
+            if settings.openai_api_key:
+                from openai import AsyncOpenAI
+                client = AsyncOpenAI(api_key=settings.openai_api_key)
+                stream = await client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "You are a Senior Intel Fusion Officer providing clear, plain-English briefings."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.2,
+                    stream=True,
+                )
+                async for chunk in stream:
+                    delta = chunk.choices[0].delta.content if chunk.choices else None
+                    if delta:
+                        full_text += delta
+                        yield f"event: token\ndata: {_json.dumps({'text': delta})}\n\n"
+            else:
+                if settings.llm_provider == "ollama" and settings.ollama_base_url:
+                    try:
+                        full_text = await call_ollama(prompt, "You are a clear and simple writer.")
+                    except Exception:
+                        pass
+                if not full_text and settings.google_api_key:
+                    try:
+                        full_text = await call_gemini(prompt, "You are a clear and simple writer.")
+                    except Exception:
+                        pass
+                if not full_text:
+                    full_text = generate_fallback_summary(country_name, timeframe_label, articles, external_context)
+                yield f"event: token\ndata: {_json.dumps({'text': full_text})}\n\n"
+
+        except Exception as exc:
+            logger.error("[Summarizer Stream] LLM call failed: %s", exc)
+            full_text = generate_fallback_summary(country_name, timeframe_label, articles, external_context)
+            yield f"event: token\ndata: {_json.dumps({'text': full_text})}\n\n"
+
+        yield f"event: done\ndata: {_json.dumps({'summary': full_text})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")

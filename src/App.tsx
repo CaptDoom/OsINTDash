@@ -3,6 +3,11 @@ import { WorldGeoMap, type WorldGeoMapMarker, getContinentName } from './compone
 import { BorderWeatherHUD, type WeatherInfo } from './components/BorderWeatherHUD';
 import AiSummarizer from './components/AiSummarizer';
 import SharedNotes from './components/SharedNotes';
+import { RiskLevelBadge, RiskLegend, type ThreatLevel } from './components/RiskLevel';
+import { GlobalOverview } from './components/GlobalOverview';
+import { CountryCard } from './components/CountryCard';
+import { CountryDetailSlideout } from './components/CountryDetailSlideout';
+import { LivePulseIndicator } from './components/LivePulseIndicator';
 import worldCountries from 'world-countries';
 
 type TimeWindow = '1h' | '1d' | '1w' | '1m';
@@ -67,6 +72,7 @@ type Signal = {
   llm_provider?: string;
   llm_model?: string;
   trust?: TrustIndicator;
+  corroboration_status?: string;
   isNew?: boolean;
   is_breaking?: boolean;
   also_reported_by?: string[];
@@ -117,7 +123,7 @@ type WorldAlert = {
   timestamp: string;
 };
 
-type PanelView = 'country' | 'worldMap' | 'archive' | 'chatFusion' | 'aiSummarizer' | 'sharedNotes';
+type PanelView = 'country' | 'countryGrid' | 'worldMap' | 'archive' | 'chatFusion' | 'aiSummarizer' | 'sharedNotes';
 
 type WorldMapPan = {
   x: number;
@@ -1145,6 +1151,8 @@ function App() {
   const [selectedCategory, setSelectedCategory] = useState<Category>('Political');
   const [isCountrySelected, setIsCountrySelected] = useState(false);
   const [panelView, setPanelView] = useState<PanelView>('country');
+  const [isSlideoutOpen, setIsSlideoutOpen] = useState(false);
+  const [slideoutCategory, setSlideoutCategory] = useState<string>('All');
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [uiTheme, setUiTheme] = useState<RgbTheme>(defaultTheme);
@@ -2796,7 +2804,7 @@ function App() {
                 <div className="space-y-2 max-h-[300px] overflow-y-auto pr-1">
                   {[...countries, ...customCountries].map((country) => {
                     const isActive = selectedCountry.id === country.id;
-                    const threat = newsFeed[country.name]?.threat_level || country.threatLevel;
+                    const threat = (newsFeed[country.name]?.threat_level || country.threatLevel) as ThreatLevel;
                     return (
                       <button
                         key={country.id}
@@ -2805,6 +2813,8 @@ function App() {
                           setSelectedCountry(country);
                           setSelectedCategory('Political');
                           setIsCountrySelected(true);
+                          setSlideoutCategory('All');
+                          setIsSlideoutOpen(true);
                         }}
                         className={`w-full text-left px-3 py-2 border transition-colors flex justify-between items-center ${
                           isActive
@@ -2817,14 +2827,7 @@ function App() {
                         }`}
                       >
                         <span>{country.name}</span>
-                        <span className={`text-[9px] px-1 py-0.5 rounded font-mono font-bold ${
-                          threat === 'Critical' ? 'bg-red-500/20 text-red-400' :
-                          threat === 'High' ? 'bg-orange-500/20 text-orange-400' :
-                          threat === 'Moderate' ? 'bg-yellow-500/20 text-yellow-400' :
-                          'bg-green-500/20 text-green-400'
-                        }`}>
-                          {threat.toUpperCase()}
-                        </span>
+                        <RiskLevelBadge level={threat} size="sm" showIcon={false} />
                       </button>
                     );
                   })}
@@ -2833,6 +2836,27 @@ function App() {
 
               {/* Navigation buttons */}
               <div className="space-y-2 pt-4 border-t border-white/10">
+                <button
+                  onClick={() => {
+                    setPanelView('countryGrid');
+                    setIsCountrySelected(false);
+                    setIsWorldMapFullscreen(false);
+                  }}
+                  className={`w-full text-left px-3 py-2 border transition-colors ${
+                    panelView === 'countryGrid'
+                      ? isDarkMode
+                        ? 'bg-white text-black border-white'
+                        : 'bg-black text-white border-black'
+                      : isDarkMode
+                        ? 'border-white/20 hover:bg-white/10'
+                        : 'border-black/20 hover:bg-black/10'
+                  }`}
+                >
+                  <span className="flex items-center gap-2">
+                    <span className="material-symbols-outlined text-[14px]">dashboard</span>
+                    Country Grid
+                  </span>
+                </button>
                 <button
                   onClick={() => {
                     setPanelView('worldMap');
@@ -2849,7 +2873,10 @@ function App() {
                         : 'border-black/20 hover:bg-black/10'
                   }`}
                 >
-                  Live World Map
+                  <span className="flex items-center gap-2">
+                    <span className="material-symbols-outlined text-[14px]">public</span>
+                    Live World Map
+                  </span>
                 </button>
                 <button
                   onClick={() => {
@@ -3081,7 +3108,57 @@ function App() {
             )}
 
             <div className="border border-white/20 rounded p-4 min-h-[360px] drishya-scroll-panel">
-              {panelView === 'worldMap' ? (
+              {panelView === 'countryGrid' ? (
+                <>
+                  {/* Global Overview Bar */}
+                  <GlobalOverview
+                    totalCountries={[...countries, ...customCountries].length}
+                    criticalCount={Object.values(newsFeed).filter(i => i.threat_level === 'Critical').length || [...countries].filter(c => c.threatLevel === 'Critical').length}
+                    highCount={Object.values(newsFeed).filter(i => i.threat_level === 'High').length || [...countries].filter(c => c.threatLevel === 'High').length}
+                    moderateCount={Object.values(newsFeed).filter(i => i.threat_level === 'Moderate').length || [...countries].filter(c => c.threatLevel === 'Moderate').length}
+                    lowCount={Object.values(newsFeed).filter(i => i.threat_level === 'Low').length || [...countries].filter(c => c.threatLevel === 'Low').length}
+                    totalSignals={Object.values(newsFeed).reduce((sum, i) => sum + (i.signals?.length || 0), 0)}
+                    lastUpdated={worldAlertsUpdatedAt || new Date().toISOString()}
+                    isLive={true}
+                  />
+
+                  {/* Risk Legend */}
+                  <div className="mb-4">
+                    <RiskLegend />
+                  </div>
+
+                  {/* Country Cards Grid */}
+                  <div className="country-cards-grid">
+                    {[...countries, ...customCountries].map((country) => {
+                      const intel = newsFeed[country.name];
+                      const threat = intel?.threat_level || country.threatLevel as ThreatLevel;
+                      const signals = intel?.signals || [];
+                      const highSignals = signals.filter(s => s.impact === 'High').length;
+                      return (
+                        <CountryCard
+                          key={country.id}
+                          name={country.name}
+                          region={newsFeed[country.name]?.region || country.region}
+                          threatLevel={threat as ThreatLevel}
+                          signalCount={signals.length}
+                          highSignalCount={highSignals}
+                          stabilityIndex={country.stabilityIndex}
+                          riskProbability={country.riskProbability}
+                          isSelected={selectedCountry.id === country.id}
+                          onClick={() => {
+                            setSelectedCountry(country);
+                            setSelectedCategory('Political');
+                            setIsCountrySelected(true);
+                            setSlideoutCategory('All');
+                            setIsSlideoutOpen(true);
+                          }}
+                          signals={signals}
+                        />
+                      );
+                    })}
+                  </div>
+                </>
+              ) : panelView === 'worldMap' ? (
                 <>
                   <div className="flex items-center justify-between border-b border-white/20 pb-3">
                     <div>
@@ -3516,6 +3593,22 @@ function App() {
             </div>
           </div>
         </div>
+
+        {/* Country Detail Slide-out Panel */}
+        <CountryDetailSlideout
+          isOpen={isSlideoutOpen}
+          onClose={() => setIsSlideoutOpen(false)}
+          countryName={selectedCountry.name}
+          region={newsFeed[selectedCountry.name]?.region || selectedCountry.region}
+          threatLevel={(newsFeed[selectedCountry.name]?.threat_level || selectedCountry.threatLevel) as ThreatLevel}
+          signalCount={(newsFeed[selectedCountry.name]?.signals || []).length}
+          stabilityIndex={selectedCountry.stabilityIndex}
+          riskProbability={selectedCountry.riskProbability}
+          operationalSummary={newsFeed[selectedCountry.name]?.operational_summary || selectedCountry.summary}
+          signals={(newsFeed[selectedCountry.name]?.signals || []).map((s: any) => ({ ...s, country: selectedCountry.name }))}
+          selectedCategory={slideoutCategory}
+          onCategoryChange={setSlideoutCategory}
+        />
       </div>
     );
   }
@@ -5111,9 +5204,11 @@ function LiveChatFusion() {
       source: string;
       department: string;
       country_code: string;
+      impact_level?: string;
       summary: string;
       published_at: string;
     }>;
+    streaming?: boolean;
   }
 
   const [messages, setMessages] = useState<Message[]>([
@@ -5167,6 +5262,7 @@ function LiveChatFusion() {
 
     try {
       if (stagedFile) {
+        // File upload path: uses existing fusion endpoint
         const formData = new FormData();
         formData.append('file', stagedFile);
         if (textToSend.trim()) {
@@ -5224,36 +5320,86 @@ function LiveChatFusion() {
         setMessages((prev) => [...prev, botMessage]);
         setStagedFile(null);
       } else {
+        // Streaming text query path: uses SSE /api/chat/stream
         const historyPayload = messages.map(m => ({
           sender: m.sender,
           text: m.text
         }));
 
-        const response = await fetch('/api/chat/query', {
+        // Create a placeholder bot message that we'll stream into
+        const botMsgId = `msg-${Date.now()}-${Math.random()}`;
+        const placeholderMsg: Message = {
+          id: botMsgId,
+          sender: 'bot',
+          text: '',
+          timestamp: new Date(),
+          streaming: true,
+          articles: []
+        };
+        setMessages((prev) => [...prev, placeholderMsg]);
+
+        const response = await fetch('/api/chat/stream', {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({
-            query: textToSend,
-            history: historyPayload
-          })
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: textToSend, history: historyPayload })
         });
 
         if (!response.ok) {
           throw new Error(`Server status ${response.status}`);
         }
 
-        const data = await response.json();
-        const botMessage: Message = {
-          id: `msg-${Date.now()}-${Math.random()}`,
-          sender: 'bot',
-          text: data.summary || 'No detailed analysis returned.',
-          timestamp: new Date(),
-          articles: data.relevant_articles || []
-        };
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error('Streaming not supported');
 
-        setMessages((prev) => [...prev, botMessage]);
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let fullText = '';
+        let streamArticles: Message['articles'] = [];
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          let eventType = '';
+          for (const line of lines) {
+            if (line.startsWith('event: ')) {
+              eventType = line.slice(7).trim();
+            } else if (line.startsWith('data: ')) {
+              const dataStr = line.slice(6);
+              try {
+                const data = JSON.parse(dataStr);
+                if (eventType === 'articles' && data.articles) {
+                  streamArticles = data.articles;
+                  setMessages((prev) => prev.map(m =>
+                    m.id === botMsgId ? { ...m, articles: streamArticles } : m
+                  ));
+                } else if (eventType === 'token' && data.text) {
+                  fullText += data.text;
+                  const currentText = fullText;
+                  setMessages((prev) => prev.map(m =>
+                    m.id === botMsgId ? { ...m, text: currentText } : m
+                  ));
+                } else if (eventType === 'done') {
+                  if (data.summary) fullText = data.summary;
+                  if (data.relevant_articles) streamArticles = data.relevant_articles;
+                  setMessages((prev) => prev.map(m =>
+                    m.id === botMsgId ? { ...m, text: fullText, articles: streamArticles, streaming: false } : m
+                  ));
+                }
+              } catch { /* skip parse errors in SSE */ }
+              eventType = '';
+            }
+          }
+        }
+
+        // Final update: mark streaming complete
+        setMessages((prev) => prev.map(m =>
+          m.id === botMsgId ? { ...m, streaming: false } : m
+        ));
       }
     } catch (err) {
       console.error("[Chatbot] Query error:", err);
@@ -5350,6 +5496,9 @@ function LiveChatFusion() {
                 : 'bg-[#122131]/60 border border-[#45464d]/60 text-[#bec6e0] rounded-bl-none'
             }`}>
               {renderMessageText(msg.text)}
+              {msg.streaming && (
+                <span className="inline-block w-1.5 h-3 bg-[#7bd0ff] animate-pulse ml-0.5 align-middle" />
+              )}
             </div>
             
             <span className="text-[8px] opacity-50 font-mono mt-1 px-1">

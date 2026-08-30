@@ -6,7 +6,6 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
-import redis.asyncio as aioredis
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,9 +21,8 @@ def _utc_now() -> datetime:
 
 async def _redis_client():
     try:
-        redis_conn = aioredis.from_url(settings.redis_url, decode_responses=True)
-        await redis_conn.ping()
-        return redis_conn
+        from backend.app.redis_pool import get_redis_pool
+        return await get_redis_pool()
     except Exception:
         return None
 
@@ -46,30 +44,56 @@ def _article_block(article: Article) -> str:
 
 
 def _local_summary(articles: List[Article], timeframe: str) -> str:
-    by_dept: Dict[str, List[Article]] = {
-        "Military & Defense": [],
-        "Economic & Financial": [],
-        "Social Affairs & Welfare": [],
-        "Political & Diplomatic": [],
-    }
+    """Generate a structured briefing from articles without an LLM."""
+    by_dept: Dict[str, List[Article]] = {}
     for article in articles:
-        if article.department not in by_dept:
-            by_dept[article.department] = []
-        by_dept[article.department].append(article)
+        dept = article.department or "Unclassified"
+        if dept not in by_dept:
+            by_dept[dept] = []
+        by_dept[dept].append(article)
+
+    # Count by country
+    country_counts: Dict[str, int] = {}
+    for article in articles:
+        cc = article.country_code or "Unknown"
+        country_counts[cc] = country_counts.get(cc, 0) + 1
+    top_countries = sorted(country_counts.items(), key=lambda x: x[1], reverse=True)[:8]
+
+    # Count by impact
+    high = sum(1 for a in articles if a.impact_level == "High Impact")
+    medium = sum(1 for a in articles if a.impact_level == "Medium Impact")
+    normal = sum(1 for a in articles if a.impact_level == "Normal Impact")
 
     markdown = f"# News Briefing ({timeframe})\n"
     markdown += f"Generated: {_utc_now().isoformat()}\n\n"
-    for dept, grouped in by_dept.items():
-        markdown += f"## {dept}\n"
+    
+    # Executive summary
+    markdown += f"## Executive Summary\n"
+    markdown += f"**{len(articles)} total articles** across {len(by_dept)} sectors. "
+    markdown += f"Impact breakdown: **{high}** high, **{medium}** medium, **{normal}** normal.\n\n"
+    
+    if top_countries:
+        markdown += "**Top countries:** " + ", ".join(f"{cc} ({n})" for cc, n in top_countries) + "\n\n"
+    
+    # Per-department sections
+    dept_order = ["Military & Defense", "Economic & Financial", "Political & Diplomatic", "Social Affairs & Welfare", "Technology & Cyber"]
+    all_depts = list(by_dept.keys())
+    ordered_depts = dept_order + [d for d in all_depts if d not in dept_order]
+    
+    for dept in ordered_depts:
+        grouped = by_dept.get(dept, [])
         if not grouped:
-            markdown += "No reports in this area.\n\n"
             continue
+        markdown += f"## {dept}\n"
         markdown += f"*{len(grouped)} updates*\n\n"
         for index, article in enumerate(grouped[:5], start=1):
-            summary_text = article.summary or article.content[:160] + "..."
+            summary_text = article.summary or article.content[:160] + "..." if article.content else "No summary available."
+            source_rep = getattr(article, "source_reputation", "") or ""
+            rep_badge = f" [{source_rep}]" if source_rep and source_rep != "Unrated" else ""
             markdown += f"**{index}. [{article.title}]({article.url})**  \n"
-            markdown += f"Source: {article.source} | {article.country_code}  \n"
+            markdown += f"Source: {article.source or 'Unknown'}{rep_badge} | {article.country_code}  \n"
             markdown += f"{summary_text}  \n\n"
+    
     return markdown
 
 
@@ -194,30 +218,30 @@ Partial summaries:
 
 
 async def _read_cache(timeframe: str, version: str) -> Optional[str]:
-    redis_conn = await _redis_client()
-    if not redis_conn:
-        return None
+    from backend.app.redis_pool import cache_get
     cache_key = f"drishya:archive-summary:{timeframe}:{version}"
-    cached = await redis_conn.get(cache_key)
-    if cached:
+    cached = await cache_get(cache_key)
+    if cached and isinstance(cached, str):
         return cached
     return None
 
 
 async def _write_cache(timeframe: str, version: str, summary: str) -> None:
-    redis_conn = await _redis_client()
-    if not redis_conn:
-        return
+    from backend.app.redis_pool import cache_set
     cache_key = f"drishya:archive-summary:{timeframe}:{version}"
-    await redis_conn.set(cache_key, summary, ex=settings.archive_cache_ttl_seconds)
+    await cache_set(cache_key, summary, ttl=settings.archive_cache_ttl_seconds)
 
 
 async def _get_archive_version() -> str:
-    redis_conn = await _redis_client()
-    if not redis_conn:
+    from backend.app.redis_pool import cache_get
+    pool = await _redis_client()
+    if not pool:
         return "0"
-    version = await redis_conn.get("drishya:archive:version")
-    return version or "0"
+    try:
+        version = await pool.get("drishya:archive:version")
+        return version or "0"
+    except Exception:
+        return "0"
 
 
 async def generate_archive_summary(timeframe: str, db: AsyncSession) -> str:

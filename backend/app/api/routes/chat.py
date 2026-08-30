@@ -103,7 +103,29 @@ def score_article_similarity(doc_text: str, article: Article) -> float:
     # Boost high-impact or high-confidence reports slightly for precision
     if getattr(article, 'impact_level', '') == 'High Impact':
         boost += 0.1
-        
+    
+    # Source reputation boost: verified sources get higher ranking
+    try:
+        from backend.app.services.credibility import compute_source_reputation_score
+        rep_score = compute_source_reputation_score(getattr(article, 'source', None))
+        boost += rep_score * 0.15  # Max +0.15 for tier-1 sources
+    except Exception:
+        pass
+    
+    # Recency boost: newer articles score higher
+    from datetime import datetime, timezone
+    pub = getattr(article, 'published_at', None)
+    if pub:
+        if pub.tzinfo is None:
+            pub = pub.replace(tzinfo=timezone.utc)
+        age_hours = (datetime.now(timezone.utc) - pub).total_seconds() / 3600
+        if age_hours < 24:
+            boost += 0.15
+        elif age_hours < 72:
+            boost += 0.08
+        elif age_hours < 168:
+            boost += 0.03
+    
     return base_score + boost
 
 
@@ -189,8 +211,13 @@ async def search_relevant_articles(db: AsyncSession, doc_text: str, limit: int =
     scored_articles.sort(key=lambda x: x[0], reverse=True)
     return [art for _, art in scored_articles[:limit]]
 
+MAX_UPLOAD_BYTES = 15 * 1024 * 1024  # 15 MB
+ALLOWED_UPLOAD_EXTENSIONS = {".pdf", ".docx", ".doc", ".txt", ".md"}
+
+
 @router.post("/fusion")
 async def upload_and_fuse_document(
+    request: Request,
     file: UploadFile = File(...),
     instructions: Optional[str] = Form(None)
 ):
@@ -198,13 +225,35 @@ async def upload_and_fuse_document(
     Accepts a document upload with optional instruction prompts, stores it for background processing,
     and returns a job id immediately. The status endpoint exposes progress.
     """
-    temp_dir = Path(__file__).resolve().parents[3] / "scratch"
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_file_path = temp_dir / f"uploaded_{uuid_str()}_{file.filename}"
+    from backend.app.services.net_safety import sanitize_filename, is_allowed_upload_extension
 
+    # Path traversal prevention: strip directory components from filename
+    safe_name = sanitize_filename(file.filename or "upload")
+    if not is_allowed_upload_extension(safe_name, ALLOWED_UPLOAD_EXTENSIONS):
+        raise HTTPException(status_code=400, detail=f"Unsupported file type. Allowed: {', '.join(ALLOWED_UPLOAD_EXTENSIONS)}")
+
+    # Pre-check Content-Length header (advisory, attacker can spoof)
+    declared_len = request.headers.get("content-length")
+    if declared_len and int(declared_len) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File exceeds 15MB limit.")
+
+    temp_dir = Path(__file__).resolve().parents[3] / "scratch" / "uploads"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_file_path = temp_dir / f"uploaded_{uuid_str()}_{safe_name}"
+
+    # Chunked read with running-total cap — no single allocation exceeds MAX_UPLOAD_BYTES
+    size = 0
     try:
-        content = await file.read()
-        temp_file_path.write_bytes(content)
+        with open(temp_file_path, "wb") as out:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > MAX_UPLOAD_BYTES:
+                    out.close()
+                    temp_file_path.unlink(missing_ok=True)
+                    raise HTTPException(status_code=413, detail="File exceeds 15MB limit.")
+                out.write(chunk)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Failed to save file: {exc}")
 
@@ -509,6 +558,233 @@ async def chat_query(payload: ChatQuery):
         await cache_set(cache_key, response_data, ttl=600)
 
     return response_data
+
+
+# ─── Intent Detection ─────────────────────────────────────────────────────
+
+def detect_query_intent(query: str) -> dict:
+    """Analyze query to determine intent type and extract parameters."""
+    q = query.lower().strip()
+    intent = {"type": "general", "country": None, "timeframe": None, "department": None}
+
+    # Country detection
+    country_map = {
+        "china": "CN", "chinese": "CN", "beijing": "CN",
+        "pakistan": "PK", "pakistani": "PK", "islamabad": "PK",
+        "india": "IN", "indian": "IN", "delhi": "IN",
+        "afghanistan": "AF", "afghan": "AF", "kabul": "AF",
+        "myanmar": "MM", "burma": "MM",
+        "nepal": "NP", "nepalese": "NP",
+        "bangladesh": "BD", "dhaka": "BD",
+        "ukraine": "UA", "ukrainian": "UA", "kyiv": "UA",
+        "russia": "RU", "russian": "RU", "moscow": "RU",
+        "taiwan": "TW", "taiwanese": "TW",
+        "iran": "IR", "iranian": "IR", "tehran": "IR",
+        "israel": "IL", "israeli": "IL", "jerusalem": "IL",
+        "japan": "JP", "japanese": "JP",
+        "us": "US", "usa": "US", "united states": "US", "america": "US",
+        "south korea": "KR", "korea": "KR", "pyongyang": "KP",
+    }
+    for term, code in country_map.items():
+        if term in q:
+            intent["country"] = code
+            break
+
+    # Timeframe detection
+    if any(w in q for w in ["today", "right now", "current", "latest", "just now"]):
+        intent["timeframe"] = "24h"
+    elif any(w in q for w in ["this week", "past week", "last week", "7 days"]):
+        intent["timeframe"] = "7d"
+    elif any(w in q for w in ["this month", "past month", "last month", "30 days"]):
+        intent["timeframe"] = "30d"
+
+    # Intent type detection
+    if any(w in q for w in ["risk", "threat", "danger", "safe", "safety"]):
+        intent["type"] = "risk_assessment"
+    elif any(w in q for w in ["trend", "change", "escalat", "increas", "decreas", "compar"]):
+        intent["type"] = "trend_analysis"
+    elif any(w in q for w in ["what happened", "summary", "briefing", "overview", "report"]):
+        intent["type"] = "briefing"
+    elif any(w in q for w in ["source", "credibl", "reliab", "verify", "trust"]):
+        intent["type"] = "source_verification"
+    elif any(w in q for w in ["forecast", "predict", "expect", "outlook", "likely"]):
+        intent["type"] = "forecast"
+
+    # Department detection
+    dept_map = {
+        "military": "Military & Defense", "defense": "Military & Defense",
+        "army": "Military & Defense", "border": "Military & Defense",
+        "economic": "Economic & Financial", "trade": "Economic & Financial",
+        "finance": "Economic & Financial", "market": "Economic & Financial",
+        "political": "Political & Diplomatic", "diplomatic": "Political & Diplomatic",
+        "government": "Political & Diplomatic",
+        "social": "Social Affairs & Welfare", "community": "Social Affairs & Welfare",
+        "cyber": "Technology & Cyber", "technology": "Technology & Cyber",
+        "hacking": "Technology & Cyber", "tech": "Technology & Cyber",
+    }
+    for term, dept in dept_map.items():
+        if term in q:
+            intent["department"] = dept
+            break
+
+    return intent
+
+
+# ─── Streaming SSE Chat ───────────────────────────────────────────────────
+
+@router.post("/stream")
+async def chat_stream(payload: ChatQuery):
+    """
+    Streaming chat endpoint using Server-Sent Events.
+    Returns articles immediately, then streams LLM tokens in real-time.
+    """
+    from fastapi.responses import StreamingResponse
+    import json as _json
+
+    query_text = payload.query
+    if not query_text.strip():
+        raise HTTPException(status_code=400, detail="Query text cannot be empty.")
+
+    # Detect intent for enhanced prompting
+    intent = detect_query_intent(query_text)
+
+    # 1. Search relevant articles (with intent-aware filtering)
+    matching_articles: List[Article] = []
+    async for session in get_db():
+        matching_articles = await search_relevant_articles(session, query_text, limit=settings.fusion_top_k)
+        break
+
+    # Filter by intent
+    if intent["country"]:
+        matching_articles = [a for a in matching_articles if (a.country_code or "").upper() == intent["country"]] or matching_articles
+    if intent["department"]:
+        matching_articles = [a for a in matching_articles if a.department == intent["department"]] or matching_articles
+
+    # 2. Build article context
+    article_context = ""
+    relevant_list = []
+    for idx, art in enumerate(matching_articles[:8]):
+        article_context += (
+            f"SOURCE [{idx+1}]: {art.title}\n"
+            f"URL: {art.url}\n"
+            f"Country: {art.country_code}\n"
+            f"Department: {art.department}\n"
+            f"Source: {art.source}\n"
+            f"Impact: {art.impact_level}\n"
+            f"Published: {art.published_at.isoformat()}\n"
+            f"Summary: {art.summary or art.content[:200]}\n\n"
+        )
+        relevant_list.append({
+            "id": art.id,
+            "title": art.title,
+            "url": art.url,
+            "source": art.source,
+            "department": art.department,
+            "country_code": art.country_code,
+            "impact_level": art.impact_level,
+            "summary": art.summary or art.content[:200],
+            "published_at": art.published_at.isoformat(),
+        })
+
+    # 3. Build context-aware prompt
+    intent_hints = ""
+    if intent["type"] == "risk_assessment":
+        intent_hints = "Focus on safety, security, and risk factors. Highlight any threats or areas of concern."
+    elif intent["type"] == "trend_analysis":
+        intent_hints = "Compare current situation with recent past. Highlight what changed and in which direction."
+    elif intent["type"] == "briefing":
+        intent_hints = "Provide a structured executive briefing with key facts organized by sector."
+    elif intent["type"] == "source_verification":
+        intent_hints = "Discuss source credibility, cross-referencing status, and reliability of information."
+    elif intent["type"] == "forecast":
+        intent_hints = "Based on recent trends, provide an outlook. Note patterns and likely developments."
+
+    history_context = ""
+    if payload.history:
+        history_context = "CONVERSATION HISTORY:\n"
+        for msg in payload.history[-6:]:
+            role = "User" if msg.sender == "user" else "Assistant"
+            history_context += f"{role}: {msg.text}\n"
+        history_context += "\n"
+
+    prompt = f"""
+You are an expert geopolitical analyst providing clear, actionable intelligence.
+Write in plain, everyday English. No military or intelligence jargon.
+Be direct and concise. Every sentence must add new information.
+
+{history_context}
+{intent_hints}
+
+USER QUESTION: {query_text}
+
+NEWS REPORTS:
+{article_context}
+
+FORMAT:
+**What Happened** - 2-3 sentences on the key facts.
+**Key Details** - Who, what, where, when. Cite sources as [Title](URL).
+**Analysis** - Why this matters and what pattern it fits.
+**Impact** - What this means for everyday people in 1-2 sentences.
+
+RULES:
+- No jargon (no OSINT, telemetry, bilaterals, tactical, reconnaissance, frontier, strategic, etc.).
+- No filler words, no first-person, no opinions.
+- If no relevant reports exist, say: "No matching news found." and give a one-sentence safety note.
+- Keep the total response under 250 words.
+"""
+
+    # 4. Generate LLM response (streaming if OpenAI available, else standard)
+    async def event_generator():
+        # First: send article metadata as structured event
+        yield f"event: articles\ndata: {_json.dumps({'articles': relevant_list, 'intent': intent})}\n\n"
+
+        # Then: stream LLM text
+        try:
+            full_text = ""
+            if settings.openai_api_key:
+                from openai import AsyncOpenAI
+                client = AsyncOpenAI(api_key=settings.openai_api_key)
+                stream = await client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": "You are a clear and simple writer providing geopolitical intelligence."},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.2,
+                    stream=True,
+                )
+                async for chunk in stream:
+                    delta = chunk.choices[0].delta.content if chunk.choices else None
+                    if delta:
+                        full_text += delta
+                        yield f"event: token\ndata: {_json.dumps({'text': delta})}\n\n"
+            else:
+                # Non-streaming fallback (Gemini / Ollama / local)
+                if settings.llm_provider == "ollama" and settings.ollama_base_url:
+                    try:
+                        full_text = await call_ollama(prompt, "You are a clear and simple writer.")
+                    except Exception:
+                        pass
+                if not full_text and settings.google_api_key:
+                    try:
+                        full_text = await call_gemini(prompt, "You are a clear and simple writer.")
+                    except Exception:
+                        pass
+                if not full_text:
+                    full_text = generate_local_fusion_fallback(query_text, matching_articles)
+                # Send the full text in one event for non-streaming providers
+                yield f"event: token\ndata: {_json.dumps({'text': full_text})}\n\n"
+
+        except Exception as exc:
+            logger.error("[Chat Stream] LLM call failed: %s", exc)
+            full_text = generate_local_fusion_fallback(query_text, matching_articles)
+            yield f"event: token\ndata: {_json.dumps({'text': full_text})}\n\n"
+
+        # Final event with complete response
+        response_data = {"summary": full_text, "relevant_articles": relevant_list}
+        yield f"event: done\ndata: {_json.dumps(response_data)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 class CompleteRequest(BaseModel):

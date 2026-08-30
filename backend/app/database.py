@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timezone
 import uuid
 from typing import AsyncGenerator, List, Optional
-from sqlalchemy import Column, String, Text, DateTime, TypeDecorator, select, func, Float
+from sqlalchemy import Column, String, Text, DateTime, TypeDecorator, select, func, Float, text
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from backend.app.config import settings
@@ -122,6 +122,23 @@ class NoteVersion(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     author: Mapped[str] = mapped_column(String(128), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+# Verified Story Model (Cross-Corroboration Persistence)
+class VerifiedStory(Base):
+    __tablename__ = "verified_stories"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    story_key: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    headline: Mapped[str] = mapped_column(String(512), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="single_source")  # unverified, single_source, cross_referenced, verified
+    corroboration_score: Mapped[float] = mapped_column(Float, default=0.0)
+    unique_source_count: Mapped[int] = mapped_column(default=0)
+    sources_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON list of sources
+    first_seen: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    last_updated: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
 
 # Alert Rule Model
 class AlertRule(Base):
@@ -392,7 +409,8 @@ async def create_tables():
         await conn.run_sync(Base.metadata.create_all)
         
         # Check and run columns migrations dynamically
-        from sqlalchemy import text
+        # Each column check gets its own transaction so a failed probe
+        # doesn't poison the remaining checks (Postgres transaction-abort semantics).
         columns_to_add = [
             ("sector", "VARCHAR(256)"),
             ("entities", "TEXT"),
@@ -400,14 +418,17 @@ async def create_tables():
             ("also_reported_by", "TEXT")
         ]
         for col_name, col_type in columns_to_add:
-            try:
-                # Test column existence
-                await conn.execute(text(f"SELECT {col_name} FROM high_impact_articles LIMIT 1"))
-            except Exception:
-                # Column doesn't exist, execute alter table
-                logger.info(f"[Database] Column '{col_name}' not found. Altering table to add it.")
+            # Separate connection/transaction per column
+            async with engine.begin() as col_conn:
                 try:
-                    await conn.execute(text(f"ALTER TABLE high_impact_articles ADD COLUMN {col_name} {col_type}"))
+                    await col_conn.execute(text(f"SELECT {col_name} FROM high_impact_articles LIMIT 1"))
+                    continue  # column exists
+                except Exception:
+                    pass
+            async with engine.begin() as col_conn:
+                try:
+                    await col_conn.execute(text(f"ALTER TABLE high_impact_articles ADD COLUMN IF NOT EXISTS {col_name} {col_type}"))
+                    logger.info(f"[Database] Column '{col_name}' ensured.")
                 except Exception as alter_err:
                     logger.error(f"[Database] Failed to add column '{col_name}': {alter_err}")
                     
@@ -430,30 +451,38 @@ async def create_tables():
         logger.info("[Database] Tables created and migrations checked successfully.")
 
 
-    # Always ensure user accounts are seeded
-    async with SessionLocal() as session:
-        try:
-            import bcrypt
-            old_credentials = [
-                {"username": "operator@intel.local", "password": "Ops@2026", "role": "Operator"},
-                {"username": "analyst@intel.local", "password": "Intel@2026", "role": "Analyst"},
-                {"username": "admin@intel.local", "password": "Admin@2026", "role": "Admin"}
-            ]
-            for cred in old_credentials:
-                check_stmt = select(User).where(User.username == cred["username"])
-                check_res = await session.execute(check_stmt)
-                if not check_res.scalars().first():
-                    logger.info(f"[Database] Seeding secure user account: {cred['username']}")
-                    hashed = bcrypt.hashpw(cred["password"].encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-                    user_obj = User(
-                        username=cred["username"],
-                        password_hash=hashed,
-                        role=cred["role"]
-                    )
-                    session.add(user_obj)
-            await session.commit()
-        except Exception as e:
-            logger.error(f"[Database] User seeding failed: {e}")
+    # Seed default user accounts ONLY in demo mode (Fix A5/A7)
+    # In production, users must be created via /api/auth/register or admin tooling.
+    if settings.enable_demo_seed_data:
+        async with SessionLocal() as session:
+            try:
+                import bcrypt
+                import secrets as _secrets
+                demo_credentials = [
+                    {"username": "operator@intel.local", "role": "Operator"},
+                    {"username": "analyst@intel.local", "role": "Analyst"},
+                    {"username": "admin@intel.local", "role": "Admin"}
+                ]
+                for cred in demo_credentials:
+                    check_stmt = select(User).where(User.username == cred["username"])
+                    check_res = await session.execute(check_stmt)
+                    if not check_res.scalars().first():
+                        # Generate random password and log it — never hardcode in source
+                        generated_password = _secrets.token_urlsafe(12)
+                        logger.warning(
+                            "[Database] DEMO user seeded: %s / role=%s / password=%s",
+                            cred["username"], cred["role"], generated_password,
+                        )
+                        hashed = bcrypt.hashpw(generated_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+                        user_obj = User(
+                            username=cred["username"],
+                            password_hash=hashed,
+                            role=cred["role"]
+                        )
+                        session.add(user_obj)
+                await session.commit()
+            except Exception as e:
+                logger.error(f"[Database] Demo user seeding failed: {e}")
         
     # Run seeding if empty and enable_demo_seed_data is True
     if settings.enable_demo_seed_data:

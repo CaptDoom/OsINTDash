@@ -65,18 +65,37 @@ def compute_source_reputation(source: Optional[str]) -> str:
     
     # Wire agencies, major global and regional outlets
     verified = [
-        "reuters.com", "apnews.com", "aljazeera.com", "bbc.com", "dw.com",
+        # Wire agencies
+        "reuters.com", "apnews.com", "reuters", "apnews",
+        # Major global outlets
+        "aljazeera.com", "bbc.com", "bbc.co.uk", "dw.com", "dw.com",
         "france24.com", "theguardian.com", "nytimes.com", "bloomberg.com",
-        "reuters", "apnews", "aljazeera", "bbc", "dw", "france24", "theguardian",
-        "nytimes", "bloomberg", "reuters (seeded)", "bbc.com (demo)",
+        "washingtonpost.com", "cnn.com", "cnn.com", "wsj.com",
+        "ft.com", "economist.com", "foreignaffairs.com",
+        # Indian wire services
         "pti", "press trust of india", "ptinews.com",
         "ani", "asian news international", "aninews.in",
-        "xinhua", "xinhuanet.com", "scmp.com", "south china morning post",
-        "app.com.pk", "associated press of pakistan",
-        "thehindu.com", "the hindu",
+        "thehindu.com", "the hindu", "indianexpress.com",
         "timesofindia", "times of india", "indiatimes.com",
-        "dawn.com", "dawn news", "interfax.com", "tass.com", "tass",
-        "irna.ir", "irna"
+        "livemint.com", "ndtv.com", "ndtv.com", "hindustantimes.com",
+        # Chinese state media
+        "xinhua", "xinhuanet.com", "scmp.com", "south china morning post",
+        "globaltimes.cn", "cgtn.com", "chinadaily.com.cn",
+        # Pakistani outlets
+        "app.com.pk", "associated press of pakistan",
+        "dawn.com", "dawn news", "geo.tv", "thenews.com.pk",
+        # Russian/Soviet
+        "interfax.com", "tass.com", "tass", "rt.com",
+        # Iranian
+        "irna.ir", "irna", "presstv.ir",
+        # Korean
+        "yna.co.kr", "koreaherald.com", "koreatimes.co.kr",
+        # Japanese
+        "japantimes.co.jp", "kyodonews.net",
+        # European
+        "dpa.com", "afp.com", "anadolu.com.tr",
+        # Others
+        "straitstimes.com", "bangkokpost.com", "todayonline.com",
     ]
     for v in verified:
         if v in src:
@@ -413,6 +432,32 @@ class ImpactClassifier:
             dept = dept or dept_sem
         return imp, dept
 
+    def classify_with_confidence(self, title: str, content: str) -> Tuple[str, str, float]:
+        """Classify with a confidence score (0.0-1.0)."""
+        text = f"{title} {content[:1200]}".lower()
+        imp, dept = self.classify_regex(text)
+        
+        # Confidence based on match strength
+        imp_score = 0.0
+        dept_score = 0.0
+        if imp:
+            imp_matches = len(self.label_keywords[imp].findall(text))
+            imp_score = min(1.0, imp_matches / 3.0)  # 3+ matches = full confidence
+        if dept:
+            dept_matches = len(self.dept_keywords[dept].findall(text))
+            dept_score = min(1.0, dept_matches / 3.0)
+        
+        # If regex failed, use centroid (lower confidence)
+        if not imp or not dept:
+            imp_sem, dept_sem = self.classify_centroid(text)
+            imp = imp or imp_sem
+            dept = dept or dept_sem
+            imp_score = max(imp_score, 0.5)  # centroid gets 0.5 baseline
+            dept_score = max(dept_score, 0.5)
+        
+        confidence = (imp_score + dept_score) / 2.0
+        return imp, dept, confidence
+
 
     async def extract_intelligence(self, title: str, content: str, country_code: str) -> dict:
         """
@@ -692,6 +737,9 @@ class ImpactClassifier:
             return False
             
         # 1. Try Redis deduplication if enabled
+        # NOTE: We only CHECK here — the key is set AFTER successful DB persist
+        # (see confirm_persisted() below) to prevent false-positive dedup
+        # when the downstream DB insert fails.
         redis_conn = await _get_redis()
         if redis_conn:
             url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()
@@ -700,9 +748,6 @@ class ImpactClassifier:
                 exists = await redis_conn.exists(key)
                 if exists:
                     return True
-                # Set key with 7 days expiry
-                await redis_conn.setex(key, 604800, "1")
-                return False
             except Exception as e:
                 logger.debug(f"[Classifier] Redis dedup check failed: {e}")
 
@@ -731,7 +776,7 @@ class ImpactClassifier:
                 normalized_title = "".join(c for c in title.lower() if c.isalnum())
                 for r_title in recent_titles:
                     r_norm = "".join(c for c in r_title.lower() if c.isalnum())
-                    if normalized_title == r_norm or difflib.SequenceMatcher(None, title.lower(), r_title.lower()).ratio() > 0.80:
+                    if normalized_title == r_norm or difflib.SequenceMatcher(None, title.lower(), r_title.lower()).ratio() > 0.85:
                         logger.info(f"[Classifier] Dropping fuzzy title duplicate in DB: '{title}' matched '{r_title}'")
                         return True
             except Exception as e:
@@ -748,6 +793,20 @@ class ImpactClassifier:
             await redis_conn.publish("live_stream", json.dumps(payload))
         except Exception as exc:
             logger.debug("[Classifier] Live stream publish skipped: %s", exc)
+
+    async def confirm_persisted(self, url: str) -> None:
+        """Confirm a URL has been persisted to DB — only then set the Redis dedup key.
+        This prevents the optimistic-dedup bug where articles are marked 'seen'
+        before they actually make it into the database.
+        """
+        redis_conn = await _get_redis()
+        if not redis_conn or not url:
+            return
+        url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()
+        try:
+            await redis_conn.setex(f"drishya:dedup:{url_hash}", 604800, "1")
+        except Exception:
+            pass
 
     async def save_article(self, db: AsyncSession, article_data: Dict[str, Any], embedding: Optional[List[float]] = None) -> bool:
         return (await self.persist_high_impact_batch(db, [article_data], embeddings=[embedding] if embedding else None)) > 0
@@ -782,64 +841,109 @@ class ImpactClassifier:
                         logger.error(f"[Classifier] Failed to compute single embedding: {e}")
 
             # Check near-duplicates inside same country bucket
+            # On Postgres with pgvector: use efficient SQL nearest-neighbor query
+            # On SQLite: fall back to Python brute-force cosine similarity
             near_dup_found = False
             if cand_embedding:
                 try:
-                    import numpy as np
                     from sqlalchemy import select
                     country_code = article_data["country_code"]
                     
-                    stmt_ex = select(Article).where(Article.country_code == country_code)
-                    res_ex = await db.execute(stmt_ex)
-                    existing_articles = res_ex.scalars().all()
-                    
-                    cand_vec = np.array(cand_embedding, dtype=np.float32)
-                    cand_norm = np.linalg.norm(cand_vec)
-                    if cand_norm > 0:
-                        cand_vec_norm = cand_vec / cand_norm
-                        for existing_art in existing_articles:
-                            ex_vec_val = existing_art.embedding
-                            if not ex_vec_val:
-                                continue
-                                
-                            if isinstance(ex_vec_val, str):
-                                try:
+                    # Try pgvector SQL path first (Postgres)
+                    is_postgres = db.bind.dialect.name == "postgresql" if hasattr(db, 'bind') else False
+                    if is_postgres and HAS_PGVECTOR:
+                        try:
+                            from pgvector.sqlalchemy import Vector
+                            stmt_nn = (
+                                select(Article)
+                                .where(Article.country_code == country_code)
+                                .where(Article.embedding.isnot(None))
+                                .order_by(Article.embedding.cosine_distance(cand_embedding))
+                                .limit(5)
+                            )
+                            res_nn = await db.execute(stmt_nn)
+                            for existing_art in res_nn.scalars().all():
+                                # pgvector returns distance; we need to check similarity
+                                # cosine_distance = 1 - cosine_similarity
+                                ex_vec_val = existing_art.embedding
+                                if not ex_vec_val:
+                                    continue
+                                if isinstance(ex_vec_val, str):
                                     ex_vec_list = json.loads(ex_vec_val)
-                                except Exception:
-                                    continue
-                            elif isinstance(ex_vec_val, (list, tuple)):
-                                ex_vec_list = ex_vec_val
-                            else:
-                                try:
+                                elif isinstance(ex_vec_val, (list, tuple)):
                                     ex_vec_list = list(ex_vec_val)
-                                except Exception:
+                                else:
+                                    ex_vec_list = list(ex_vec_val)
+                                if len(ex_vec_list) != len(cand_embedding):
                                     continue
-                                    
-                            if len(ex_vec_list) != len(cand_vec):
-                                continue
-                                
-                            ex_vec = np.array(ex_vec_list, dtype=np.float32)
-                            ex_norm = np.linalg.norm(ex_vec)
-                            if ex_norm <= 0:
-                                continue
-                                
-                            ex_vec_norm = ex_vec / ex_norm
-                            similarity = float(np.dot(cand_vec_norm, ex_vec_norm))
-                            if similarity > 0.86:
-                                near_dup_found = True
-                                
-                                # Lead Article Election
-                                def get_rep_priority(rep: str) -> int:
-                                    if rep == "Verified Source":
-                                        return 3
-                                    if rep == "Developing":
-                                        return 2
-                                    if rep == "Unverified":
-                                        return 1
-                                    return 0
-                                
-                                cand_pri = get_rep_priority(reputation)
-                                ex_pri = get_rep_priority(existing_art.source_reputation)
+                                import numpy as np
+                                cand_vec = np.array(cand_embedding, dtype=np.float32)
+                                ex_vec = np.array(ex_vec_list, dtype=np.float32)
+                                cand_norm = np.linalg.norm(cand_vec)
+                                ex_norm = np.linalg.norm(ex_vec)
+                                if cand_norm > 0 and ex_norm > 0:
+                                    sim = float(np.dot(cand_vec / cand_norm, ex_vec / ex_norm))
+                                    if sim > 0.86:
+                                        near_dup_found = True
+                                        break
+                        except Exception as pg_err:
+                            logger.debug(f"[Classifier] pgvector near-dup failed, falling back to numpy: {pg_err}")
+                            is_postgres = False  # fall through to numpy path
+
+                    # SQLite fallback: Python brute-force cosine similarity
+                    if not near_dup_found and not is_postgres:
+                        import numpy as np
+                        stmt_ex = select(Article).where(Article.country_code == country_code)
+                        res_ex = await db.execute(stmt_ex)
+                        existing_articles = res_ex.scalars().all()
+
+                        cand_vec = np.array(cand_embedding, dtype=np.float32)
+                        cand_norm = np.linalg.norm(cand_vec)
+                        if cand_norm > 0:
+                            cand_vec_norm = cand_vec / cand_norm
+                            for existing_art in existing_articles:
+                                ex_vec_val = existing_art.embedding
+                                if not ex_vec_val:
+                                    continue
+
+                                if isinstance(ex_vec_val, str):
+                                    try:
+                                        ex_vec_list = json.loads(ex_vec_val)
+                                    except Exception:
+                                        continue
+                                elif isinstance(ex_vec_val, (list, tuple)):
+                                    ex_vec_list = ex_vec_val
+                                else:
+                                    try:
+                                        ex_vec_list = list(ex_vec_val)
+                                    except Exception:
+                                        continue
+
+                                if len(ex_vec_list) != len(cand_vec):
+                                    continue
+
+                                ex_vec = np.array(ex_vec_list, dtype=np.float32)
+                                ex_norm = np.linalg.norm(ex_vec)
+                                if ex_norm <= 0:
+                                    continue
+
+                                ex_vec_norm = ex_vec / ex_norm
+                                similarity = float(np.dot(cand_vec_norm, ex_vec_norm))
+                                if similarity > 0.86:
+                                    near_dup_found = True
+
+                                    # Lead Article Election
+                                    def get_rep_priority(rep: str) -> int:
+                                        if rep == "Verified Source":
+                                            return 3
+                                        if rep == "Developing":
+                                            return 2
+                                        if rep == "Unverified":
+                                            return 1
+                                        return 0
+
+                                    cand_pri = get_rep_priority(reputation)
+                                    ex_pri = get_rep_priority(existing_art.source_reputation)
                                 
                                 # Prepare also_reported_by lists
                                 existing_also_reported_by = []
@@ -1002,6 +1106,10 @@ class ImpactClassifier:
                     inserted = len(rows)
                     metrics.state.classification_batches_total += 1
                     await _bump_archive_version()
+                    # Confirm dedup keys in Redis ONLY after successful DB persist
+                    for row in rows:
+                        if row.url:
+                            await self.confirm_persisted(row.url)
                     logger.info("[Classifier] Batch saved %s high-impact articles.", inserted)
                 except Exception as exc:
                     await db.rollback()
@@ -1055,6 +1163,21 @@ async def classify_and_store_batch(
     )
     streamed = len(unique_articles) - high_impact
     metrics.state.ingestion_articles_total += len(unique_articles)
+
+    # ── Cross-Corroboration Pipeline ──
+    try:
+        from backend.app.services.credibility import corroboration_engine
+        for article in unique_articles:
+            corroboration_engine.process_article(article)
+        logger.info(
+            "[Classifier] Corroboration engine processed %d articles, "
+            "verified stories: %d",
+            len(unique_articles),
+            len(corroboration_engine.get_verified_stories()),
+        )
+    except Exception as e:
+        logger.error(f"[Classifier] Corroboration pipeline error: {e}")
+
     return {
         "processed": len(unique_articles),
         "high_impact": high_impact,

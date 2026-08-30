@@ -7,9 +7,10 @@ import time
 import hashlib
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from contextlib import asynccontextmanager
 from typing import Dict, Any, List, Set, Optional
 from pydantic import BaseModel
-from fastapi import FastAPI, Depends, Query, Request, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, Depends, Query, Request, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, PlainTextResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -17,7 +18,7 @@ from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.config import settings
 from backend.app.database import create_tables, get_db, Article, User
-from backend.app.api.routes import archive, chat, weather, auth, summarizer, notes, alerts
+from backend.app.api.routes import archive, chat, weather, auth, summarizer, notes, alerts, credibility
 from backend.app.services.ingestion import fetch_global_news
 from backend.app.services.classifier import ImpactClassifier, classify_and_store_batch, memory_stream, compute_source_reputation
 from backend.app.services.summarizer import call_openai, call_gemini
@@ -28,7 +29,81 @@ from backend.app.services.risk import calculate_country_risk
 logger = logging.getLogger("drishya.main")
 configure_logging(logging.DEBUG if settings.debug else logging.INFO)
 
-app = FastAPI(title=settings.app_name, version="2.1.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Manage startup and shutdown lifecycle for the FastAPI application."""
+    # --- Startup ---
+    testing = os.environ.get("TESTING") == "1"
+
+    # Startup Environment Validation
+    if not testing:
+        # Require at least one news provider API key
+        provider_keys = [
+            settings.newsapi_key, settings.gnews_api_key, settings.newsdata_api_key,
+            settings.currents_api_key, settings.thenews_api_key, settings.mediastack_api_key,
+            settings.newscatcher_api_key, settings.bing_news_api_key, settings.world_news_api_key,
+            settings.freenewsapi_key,
+        ]
+        if not any(provider_keys):
+            msg = (
+                "[Startup Validation] At least one news provider API key must be configured "
+                "(NEWS_API_KEY, GNEWS_API_KEY, NEWSDATA_API_KEY, etc.)."
+            )
+            logger.error(msg)
+            raise RuntimeError(msg)
+
+        # Verify Redis connectivity
+        try:
+            import redis.asyncio as aioredis
+            conn = aioredis.from_url(settings.redis_url, socket_timeout=3.0)
+            await conn.ping()
+            await conn.aclose()
+        except Exception as e:
+            msg = f"[Startup Validation] Redis is unreachable at {settings.redis_url}: {e}"
+            logger.error(msg)
+            raise RuntimeError(msg)
+
+    # Run DB initializations
+    await create_tables()
+
+    # Track background tasks for graceful shutdown
+    background_tasks: list[asyncio.Task] = []
+
+    if testing:
+        logger.info("[Main] API startup complete in test mode; background workers disabled.")
+    else:
+        # Start Redis listener for pub/sub live stream broadcasting
+        background_tasks.append(asyncio.create_task(redis_listener_task()))
+        # Start periodic ingestion if enabled
+        if settings.enable_periodic_ingestion:
+            background_tasks.append(asyncio.create_task(periodic_ingestion_loop()))
+            logger.info("[Main] API startup complete; background ingestion and redis listener started.")
+        else:
+            logger.info("[Main] API startup complete; redis listener started (periodic ingestion disabled).")
+        # Start background note expiration cleanup
+        background_tasks.append(asyncio.create_task(_note_cleanup_loop()))
+        # Start corroboration story persistence loop
+        background_tasks.append(asyncio.create_task(_corroboration_persistence_loop()))
+
+    yield
+
+    # --- Shutdown ---
+    # Cancel background tasks
+    for task in background_tasks:
+        task.cancel()
+    if background_tasks:
+        await asyncio.gather(*background_tasks, return_exceptions=True)
+
+    # Gracefully close the shared Redis connection pool
+    try:
+        from backend.app.redis_pool import close_redis_pool
+        await close_redis_pool()
+        logger.info("[Main] Redis connection pool closed.")
+    except Exception as e:
+        logger.debug(f"[Main] Redis pool shutdown error: {e}")
+
+
+app = FastAPI(title=settings.app_name, version="2.2.0", lifespan=lifespan)
 
 # CORS config
 app.add_middleware(
@@ -39,6 +114,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Rate Limiting Middleware
+try:
+    from backend.app.services.rate_limiter import RateLimitMiddleware
+    app.add_middleware(RateLimitMiddleware)
+    logger.info("[Main] Rate limiting middleware enabled.")
+except Exception as e:
+    logger.warning(f"[Main] Rate limiting middleware disabled: {e}")
+
 # Include specs and prompts routes
 app.include_router(archive.router)
 app.include_router(chat.router)
@@ -47,6 +130,7 @@ app.include_router(auth.router)
 app.include_router(summarizer.router)
 app.include_router(notes.router)
 app.include_router(alerts.router)
+app.include_router(credibility.router)
 
 
 @app.middleware("http")
@@ -443,6 +527,57 @@ async def _note_cleanup_loop():
             logger.debug(f"[Main] Note cleanup error: {e}")
         await asyncio.sleep(300)  # Run every 5 minutes
 
+
+async def _corroboration_persistence_loop():
+    """Background task to persist verified stories to the database every 5 minutes."""
+    while True:
+        try:
+            from backend.app.services.credibility import corroboration_engine
+            verified = corroboration_engine.get_verified_stories(min_score=0.3)
+            if verified:
+                async for db in get_db():
+                    from backend.app.database import VerifiedStory
+                    from sqlalchemy import select as sql_select
+                    existing_res = await db.execute(
+                        sql_select(VerifiedStory.story_key)
+                    )
+                    existing_keys = {row[0] for row in existing_res.all()}
+
+                    for story in verified:
+                        if story.story_key in existing_keys:
+                            # Update existing
+                            update_res = await db.execute(
+                                sql_select(VerifiedStory).where(VerifiedStory.story_key == story.story_key)
+                            )
+                            existing = update_res.scalar_one_or_none()
+                            if existing:
+                                existing.status = story.status.value
+                                existing.corroboration_score = story.corroboration_score
+                                existing.unique_source_count = story.unique_source_count
+                                existing.sources_json = json.dumps(story.sources[:10])
+                                existing.last_updated = datetime.now(timezone.utc)
+                        else:
+                            # Insert new
+                            new_story = VerifiedStory(
+                                story_key=story.story_key,
+                                headline=story.headline[:512],
+                                summary=story.summary[:1000] if story.summary else None,
+                                status=story.status.value,
+                                corroboration_score=story.corroboration_score,
+                                unique_source_count=story.unique_source_count,
+                                sources_json=json.dumps(story.sources[:10]),
+                                first_seen=story.first_seen,
+                                last_updated=story.last_updated,
+                            )
+                            db.add(new_story)
+                    await db.commit()
+                    logger.debug("[Main] Persisted %d verified stories to DB", len(verified))
+                    break
+        except Exception as e:
+            logger.debug(f"[Main] Corroboration persistence error: {e}")
+        await asyncio.sleep(300)  # Run every 5 minutes
+
+
 def format_entities_for_frontend(flat_entities) -> dict:
     if not flat_entities:
         return {
@@ -497,6 +632,38 @@ def format_entities_for_frontend(flat_entities) -> dict:
     }
 
 
+def article_to_signal_dict(art: Article, country_label: str, location_suffix: str = "Region") -> dict:
+    """
+    Consolidated signal serializer — single source of truth for article→signal dict shape.
+    Replaces the 3 duplicated inline blocks in get_all_news and get_specific_country_news.
+    """
+    try:
+        also_rep = json.loads(art.also_reported_by) if getattr(art, "also_reported_by", None) else []
+    except Exception:
+        also_rep = []
+    return {
+        "id": art.id,
+        "country": country_label,
+        "category": get_frontend_category(art.department, art.title, art.source),
+        "impact": {"High Impact": "High", "Medium Impact": "Medium"}.get(art.impact_level, "Low"),
+        "headline": art.title.strip(),
+        "summary": (
+            art.summary.strip() if art.summary and art.summary.strip()
+            else (art.content.strip()[:150] + "..." if art.content and art.content.strip() else "No summary available.")
+        ),
+        "source": art.source or "News Feed",
+        "timestamp": art.published_at.isoformat(),
+        "url": art.url,
+        "verification_status": getattr(art, "source_reputation", None) or "Verified Source",
+        "confidence_score": getattr(art, "confidence_score", None) or 0.98,
+        "entities": format_entities_for_frontend(getattr(art, "entities", None)),
+        "location_name": getattr(art, "sector", None) or f"{country_label} {location_suffix}",
+        "intel_category": art.department or "Military",
+        "also_reported_by": also_rep,
+        "source_links": build_source_links(art),
+    }
+
+
 def data_to_signal(data: dict) -> dict:
     if data.get("type") == "mesh_status":
         return data
@@ -518,6 +685,18 @@ def data_to_signal(data: dict) -> dict:
     except Exception:
         also_rep = []
 
+    # Enrich with corroboration status
+    corroboration_status = "single_source"
+    try:
+        from backend.app.services.credibility import corroboration_engine
+        story = corroboration_engine.get_story_by_key(
+            hashlib.md5((data.get("title", "") + country_code).encode()).hexdigest()[:16]
+        )
+        if story:
+            corroboration_status = story.status.value
+    except Exception:
+        pass
+
     return {
         "type": "signal",
         "country": country_name,
@@ -533,6 +712,7 @@ def data_to_signal(data: dict) -> dict:
             "url": data.get("url"),
             "verification_status": data.get("source_reputation") or "Verified Source",
             "confidence_score": data.get("confidence_score") or 0.98,
+            "corroboration_status": corroboration_status,
             "entities": format_entities_for_frontend(data.get("entities")),
             "location_name": data.get("sector") or f"{country_name} Region",
             "intel_category": data.get("department") or "Military",
@@ -603,54 +783,7 @@ async def redis_listener_task():
                 logger.info("[Main] Retrying Redis Pub/Sub connection in 5 seconds...")
                 await asyncio.sleep(5)
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Gracefully close the shared Redis connection pool on shutdown."""
-    try:
-        from backend.app.redis_pool import close_redis_pool
-        await close_redis_pool()
-        logger.info("[Main] Redis connection pool closed.")
-    except Exception as e:
-        logger.debug(f"[Main] Redis pool shutdown error: {e}")
 
-
-@app.on_event("startup")
-async def startup_event():
-    testing = os.environ.get("TESTING") == "1"
-
-    # Startup Environment Validation
-    if not testing:
-        required_settings = {
-            "NEWS_API_KEY": "newsapi_key",
-            "REDIS_URL": "redis_url",
-        }
-        missing = [
-            env_name
-            for env_name, setting_name in required_settings.items()
-            if not os.environ.get(env_name) and not getattr(settings, setting_name, None)
-        ]
-        if missing:
-            msg = f"[Startup Validation] Missing required environment variables: {', '.join(missing)}"
-            logger.error(msg)
-            raise RuntimeError(msg)
-
-    # Run DB initializations
-    await create_tables()
-
-    if testing:
-        logger.info("[Main] API startup complete in test mode; background workers disabled.")
-        return
-
-    # Start Redis listener for pub/sub live stream broadcasting.
-    asyncio.create_task(redis_listener_task())
-    # Start periodic ingestion if enabled
-    if settings.enable_periodic_ingestion:
-        asyncio.create_task(periodic_ingestion_loop())
-        logger.info("[Main] API startup complete; background ingestion and redis listener started.")
-    else:
-        logger.info("[Main] API startup complete; redis listener started (periodic ingestion disabled).")
-    # Start background note expiration cleanup
-    asyncio.create_task(_note_cleanup_loop())
 
 @app.get("/api/system/status")
 async def get_system_status():
@@ -680,11 +813,26 @@ async def get_system_status():
 
     mode = "demo" if settings.enable_demo_seed_data else "live"
 
+    # Credibility engine status
+    credibility_info = {}
+    try:
+        from backend.app.services.credibility import corroboration_engine
+        from backend.app.services.circuit_breaker import health_monitor
+        verified = corroboration_engine.get_verified_stories(min_score=0.3)
+        credibility_info = {
+            "tracked_stories": len(corroboration_engine.stories),
+            "verified_stories": len(verified),
+            "provider_health": health_monitor.get_all_status(),
+        }
+    except Exception:
+        pass
+
     return {
         "mode": mode,
         "configured_providers": configured,
         "llm_provider": llm_prov,
-        "weather_provider": weather_prov
+        "weather_provider": weather_prov,
+        "credibility": credibility_info,
     }
 
 
@@ -710,6 +858,136 @@ async def get_country_risk(
         **calculate_country_risk(result.scalars().all()),
         "generated_at": datetime_now().isoformat(),
     }
+
+
+@app.get("/api/intelligence/dashboard")
+async def intelligence_dashboard(
+    days: int = Query(7, ge=1, le=90),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Threat intelligence dashboard endpoint.
+    Returns aggregated metrics, trend analysis, source health, and top stories.
+    """
+    cutoff = datetime_now() - timedelta_now(days=days)
+    stmt = select(Article).where(Article.published_at >= cutoff).order_by(Article.published_at.desc())
+    result = await db.execute(stmt)
+    articles = list(result.scalars().all())
+
+    if not articles:
+        return {
+            "period_days": days,
+            "total_articles": 0,
+            "summary": "No articles in this time period.",
+            "trends": {},
+            "top_stories": [],
+            "source_health": {},
+            "generated_at": datetime_now().isoformat(),
+        }
+
+    # --- Aggregate Metrics ---
+    high_impact = [a for a in articles if a.impact_level == "High Impact"]
+    medium_impact = [a for a in articles if a.impact_level == "Medium Impact"]
+    normal_impact = [a for a in articles if a.impact_level == "Normal Impact"]
+
+    # Articles by department
+    by_dept: dict[str, int] = {}
+    for a in articles:
+        dept = a.department or "Unclassified"
+        by_dept[dept] = by_dept.get(dept, 0) + 1
+
+    # Articles by country
+    by_country: dict[str, int] = {}
+    for a in articles:
+        cc = a.country_code or "Unknown"
+        by_country[cc] = by_country.get(cc, 0) + 1
+    top_countries = sorted(by_country.items(), key=lambda x: x[1], reverse=True)[:10]
+
+    # --- Trend Analysis (day-by-day) ---
+    from collections import defaultdict as dd
+    daily_counts: dd[str, dict] = dd(lambda: {"total": 0, "high": 0, "medium": 0, "normal": 0})
+    for a in articles:
+        day = a.published_at.strftime("%Y-%m-%d")
+        daily_counts[day]["total"] += 1
+        if a.impact_level == "High Impact":
+            daily_counts[day]["high"] += 1
+        elif a.impact_level == "Medium Impact":
+            daily_counts[day]["medium"] += 1
+        else:
+            daily_counts[day]["normal"] += 1
+
+    sorted_days = sorted(daily_counts.keys())
+    trend_direction = "stable"
+    if len(sorted_days) >= 2:
+        first_half = sum(daily_counts[d]["high"] for d in sorted_days[:len(sorted_days)//2])
+        second_half = sum(daily_counts[d]["high"] for d in sorted_days[len(sorted_days)//2:])
+        if second_half > first_half * 1.3:
+            trend_direction = "rising"
+        elif second_half < first_half * 0.7:
+            trend_direction = "falling"
+
+    daily_trend = {d: daily_counts[d] for d in sorted_days}
+
+    # --- Source Health ---
+    from collections import Counter as Cnt
+    source_counts = Cnt(a.source for a in articles if a.source)
+    top_sources = source_counts.most_common(15)
+
+    source_health = {}
+    for source, count in top_sources:
+        high_ratio = sum(1 for a in articles if a.source == source and a.impact_level == "High Impact") / max(count, 1)
+        try:
+            from backend.app.services.credibility import compute_source_reputation_score, classify_source_tier
+            rep_score = compute_source_reputation_score(source)
+            tier = classify_source_tier(source).value
+        except Exception:
+            rep_score = 0.5
+            tier = "unknown"
+        source_health[source] = {
+            "article_count": count,
+            "high_impact_ratio": round(high_ratio, 2),
+            "reputation_score": rep_score,
+            "tier": tier,
+        }
+
+    # --- Top Stories (highest impact, most recent) ---
+    top_stories = []
+    for a in high_impact[:10]:
+        try:
+            also_rep = json.loads(a.also_reported_by) if getattr(a, "also_reported_by", None) else []
+        except Exception:
+            also_rep = []
+        top_stories.append({
+            "id": a.id,
+            "title": a.title,
+            "summary": a.summary or a.content[:200],
+            "country": country_name_from_code(a.country_code),
+            "department": a.department,
+            "source": a.source,
+            "url": a.url,
+            "timestamp": a.published_at.isoformat(),
+            "corroborated_by": len(also_rep),
+        })
+
+    return {
+        "period_days": days,
+        "total_articles": len(articles),
+        "impact_breakdown": {
+            "high": len(high_impact),
+            "medium": len(medium_impact),
+            "normal": len(normal_impact),
+        },
+        "by_department": by_dept,
+        "top_countries": [{"code": cc, "name": country_name_from_code(cc), "count": n} for cc, n in top_countries],
+        "trend": {
+            "direction": trend_direction,
+            "daily": daily_trend,
+        },
+        "source_health": source_health,
+        "top_stories": top_stories,
+        "generated_at": datetime_now().isoformat(),
+    }
+
 
 @app.get("/api/news/all")
 async def get_all_news(
@@ -911,7 +1189,6 @@ async def get_all_news(
     return results
 
 
-from contextlib import asynccontextmanager
 from fastapi import BackgroundTasks
 
 @asynccontextmanager
@@ -975,7 +1252,7 @@ async def get_specific_country_news(
     is_stale = True
     if db_articles:
         latest_art = db_articles[0]
-        now = datetime.now(timezone.utc) if latest_art.published_at.tzinfo is not None else datetime.utcnow()
+        now = datetime.now(timezone.utc)
         time_diff = (now - latest_art.published_at).total_seconds()
         if time_diff < 900 and len(db_articles) >= 15:
             is_stale = False
@@ -1153,23 +1430,9 @@ async def trigger_scrape_endpoint(payload: dict):
     return {"success": True, "jobIds": job_ids}
 
 def is_safe_url(url: str) -> bool:
-    import urllib.parse
-    import socket
-    import ipaddress
-    try:
-        parsed = urllib.parse.urlparse(url)
-        hostname = parsed.hostname
-        if not hostname:
-            return False
-        ips = socket.getaddrinfo(hostname, None)
-        for ip_info in ips:
-            ip_str = ip_info[4][0]
-            ip = ipaddress.ip_address(ip_str)
-            if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified:
-                return False
-        return True
-    except Exception:
-        return False
+    """SSRF protection: delegates to shared utility."""
+    from backend.app.services.net_safety import is_safe_url as _is_safe
+    return _is_safe(url)
 
 # Scrape Job Worker doing real scraping
 async def run_mock_scrape_job(job_id: str, url: str, platform: str):

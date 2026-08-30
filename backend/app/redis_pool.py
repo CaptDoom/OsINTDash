@@ -32,7 +32,7 @@ async def get_redis_pool() -> Optional[aioredis.Redis]:
         except Exception:
             # Connection is stale; tear down and recreate below
             try:
-                await _pool.close()
+                await _pool.aclose()
             except Exception:
                 pass
             _pool = None
@@ -44,7 +44,7 @@ async def get_redis_pool() -> Optional[aioredis.Redis]:
                 return _pool
             except Exception:
                 try:
-                    await _pool.close()
+                    await _pool.aclose()
                 except Exception:
                     pass
                 _pool = None
@@ -72,7 +72,7 @@ async def close_redis_pool() -> None:
     global _pool
     if _pool is not None:
         try:
-            await _pool.close()
+            await _pool.aclose()
         except Exception:
             pass
         _pool = None

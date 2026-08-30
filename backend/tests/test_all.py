@@ -145,15 +145,26 @@ class TestNewsIngestion(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await breaker.get_failures(), 2)
 
     async def test_provider_results_are_deduplicated_and_limited(self):
+        long_content = " ".join(f"word{i}" for i in range(30))  # varied words to pass quality checks
+        now = datetime.now(timezone.utc)
         duplicate_a = {
             "title": "Border radar deployment near Tawang",
             "url": "https://news.example/a",
+            "content": long_content,
+            "published_at": now,
         }
         duplicate_b = {
             "title": "Border radar deployment near Tawang sector",
             "url": "https://news.example/b",
+            "content": long_content,
+            "published_at": now,
         }
-        unique = {"title": "Trade corridor talks resume", "url": "https://news.example/c"}
+        unique = {
+            "title": "Trade corridor talks resume",
+            "url": "https://news.example/c",
+            "content": " ".join(f"unique{i}topic" for i in range(30)),
+            "published_at": now,
+        }
 
         async def provider(_client, _code, _name, _limit, breaker):
             self.assertTrue(breaker.source_name)
@@ -202,6 +213,58 @@ class TestSummarizerFallback(unittest.TestCase):
         self.assertIn("News Briefing", summary)
         self.assertIn("Military & Defense", summary)
         self.assertIn("Border Radar Sweeps", summary)
+
+class TestIntentDetection(unittest.TestCase):
+    """Unit tests for the chat intent detection function."""
+
+    def test_risk_assessment_detection(self):
+        from backend.app.api.routes.chat import detect_query_intent
+        intent = detect_query_intent("What is the risk level in Pakistan?")
+        self.assertEqual(intent["type"], "risk_assessment")
+        self.assertEqual(intent["country"], "PK")
+
+    def test_trend_analysis_detection(self):
+        from backend.app.api.routes.chat import detect_query_intent
+        intent = detect_query_intent("How are things trending in China this week?")
+        self.assertEqual(intent["type"], "trend_analysis")
+        self.assertEqual(intent["country"], "CN")
+        self.assertEqual(intent["timeframe"], "7d")
+
+    def test_briefing_detection(self):
+        from backend.app.api.routes.chat import detect_query_intent
+        intent = detect_query_intent("Give me a summary of Myanmar")
+        self.assertEqual(intent["type"], "briefing")
+        self.assertEqual(intent["country"], "MM")
+
+    def test_source_verification_detection(self):
+        from backend.app.api.routes.chat import detect_query_intent
+        intent = detect_query_intent("Is the source about Russia credible?")
+        self.assertEqual(intent["type"], "source_verification")
+        self.assertEqual(intent["country"], "RU")
+
+    def test_forecast_detection(self):
+        from backend.app.api.routes.chat import detect_query_intent
+        intent = detect_query_intent("What is the outlook for Ukraine next month?")
+        self.assertEqual(intent["type"], "forecast")
+        self.assertEqual(intent["country"], "UA")
+
+    def test_department_detection(self):
+        from backend.app.api.routes.chat import detect_query_intent
+        intent = detect_query_intent("Any cyber attacks in India?")
+        self.assertEqual(intent["department"], "Technology & Cyber")
+        self.assertEqual(intent["country"], "IN")
+
+    def test_default_general_intent(self):
+        from backend.app.api.routes.chat import detect_query_intent
+        intent = detect_query_intent("hello")
+        self.assertEqual(intent["type"], "general")
+        self.assertIsNone(intent["country"])
+
+    def test_timeframe_today(self):
+        from backend.app.api.routes.chat import detect_query_intent
+        intent = detect_query_intent("What is happening right now?")
+        self.assertEqual(intent["timeframe"], "24h")
+
 
 class TestFastAPIRoutes(unittest.TestCase):
     def setUp(self):
@@ -386,6 +449,173 @@ class TestFastAPIRoutes(unittest.TestCase):
         del_resp = self.client.delete(f"/api/notes/{note_id}")
         self.assertEqual(del_resp.status_code, 200)
         self.assertEqual(del_resp.json(), {"status": "deleted"})
+
+    # ─── Intelligence Dashboard ──────────────────────────────────────
+
+    def test_intelligence_dashboard_empty(self):
+        """Dashboard returns valid structure even with no articles."""
+        response = self.client.get("/api/intelligence/dashboard?days=1")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("period_days", data)
+        self.assertIn("total_articles", data)
+        self.assertIn("impact_breakdown", data)
+        self.assertIn("by_department", data)
+        self.assertIn("top_countries", data)
+        self.assertIn("trend", data)
+        self.assertIn("source_health", data)
+        self.assertIn("top_stories", data)
+        self.assertIn("generated_at", data)
+        self.assertEqual(data["period_days"], 1)
+
+    def test_intelligence_dashboard_trend_structure(self):
+        """Trend data has correct nested structure."""
+        response = self.client.get("/api/intelligence/dashboard?days=30")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        trend = data["trend"]
+        self.assertIn("direction", trend)
+        self.assertIn(trend["direction"], ["rising", "stable", "falling"])
+        self.assertIn("daily", trend)
+        self.assertIsInstance(trend["daily"], dict)
+
+    def test_intelligence_dashboard_impact_breakdown(self):
+        """Impact breakdown contains expected keys."""
+        response = self.client.get("/api/intelligence/dashboard?days=7")
+        self.assertEqual(response.status_code, 200)
+        breakdown = response.json()["impact_breakdown"]
+        self.assertIn("high", breakdown)
+        self.assertIn("medium", breakdown)
+        self.assertIn("normal", breakdown)
+        self.assertIsInstance(breakdown["high"], int)
+
+    def test_intelligence_dashboard_top_stories_structure(self):
+        """Top stories have all required fields when present."""
+        response = self.client.get("/api/intelligence/dashboard?days=30")
+        self.assertEqual(response.status_code, 200)
+        for story in response.json()["top_stories"]:
+            for key in ["id", "title", "summary", "country", "department", "source", "url", "timestamp", "corroborated_by"]:
+                self.assertIn(key, story)
+
+    def test_intelligence_dashboard_source_health(self):
+        """Source health entries have reputation data."""
+        response = self.client.get("/api/intelligence/dashboard?days=30")
+        self.assertEqual(response.status_code, 200)
+        for source, info in response.json()["source_health"].items():
+            self.assertIn("article_count", info)
+            self.assertIn("high_impact_ratio", info)
+            self.assertIn("reputation_score", info)
+            self.assertIn("tier", info)
+            self.assertIsInstance(info["reputation_score"], float)
+            self.assertGreaterEqual(info["reputation_score"], 0.0)
+            self.assertLessEqual(info["reputation_score"], 1.0)
+
+    # ─── Chat Streaming ──────────────────────────────────────────────
+
+    def test_chat_stream_returns_sse(self):
+        """Streaming chat endpoint returns SSE with articles and done events."""
+        response = self.client.post("/api/chat/stream", json={"query": "test"})
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/event-stream", response.headers["content-type"])
+        body = response.text
+        # Must have articles event and done event
+        self.assertIn("event: articles", body)
+        self.assertIn("event: token", body)
+        self.assertIn("event: done", body)
+
+    def test_chat_stream_empty_query_rejected(self):
+        """Empty query should return 400."""
+        response = self.client.post("/api/chat/stream", json={"query": ""})
+        self.assertEqual(response.status_code, 400)
+
+    def test_chat_stream_articles_contain_intent(self):
+        """Articles event includes detected intent metadata."""
+        response = self.client.post("/api/chat/stream", json={"query": "risk in Pakistan"})
+        self.assertEqual(response.status_code, 200)
+        body = response.text
+        # Extract the articles event data
+        import re, json
+        match = re.search(r"event: articles\ndata: ({.*?})\n\n", body)
+        self.assertIsNotNone(match)
+        event_data = json.loads(match.group(1))
+        self.assertIn("articles", event_data)
+        self.assertIn("intent", event_data)
+        self.assertEqual(event_data["intent"]["country"], "PK")
+        self.assertEqual(event_data["intent"]["type"], "risk_assessment")
+
+    def test_chat_stream_done_event_has_summary(self):
+        """Done event contains summary and relevant_articles."""
+        response = self.client.post("/api/chat/stream", json={"query": "military news"})
+        self.assertEqual(response.status_code, 200)
+        body = response.text
+        import re, json
+        match = re.search(r"event: done\ndata: ({.*?})\n\n", body)
+        self.assertIsNotNone(match)
+        done_data = json.loads(match.group(1))
+        self.assertIn("summary", done_data)
+        self.assertIn("relevant_articles", done_data)
+        self.assertIsInstance(done_data["relevant_articles"], list)
+
+    # ─── Summarizer Streaming ────────────────────────────────────────
+
+    def test_summarizer_stream_returns_sse(self):
+        """Streaming summarizer returns SSE with metadata and token events."""
+        response = self.client.post(
+            "/api/summarizer/stream",
+            data={"country_code": "CN", "timeframe": "1M"}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("text/event-stream", response.headers["content-type"])
+        body = response.text
+        self.assertIn("event: metadata", body)
+        self.assertIn("event: token", body)
+        self.assertIn("event: done", body)
+
+    def test_summarizer_stream_metadata_structure(self):
+        """Metadata event contains country stats and article list."""
+        response = self.client.post(
+            "/api/summarizer/stream",
+            data={"country_code": "CN", "timeframe": "1M"}
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.text
+        import re, json
+        match = re.search(r"event: metadata\ndata: ({.*?})\n\n", body)
+        self.assertIsNotNone(match)
+        meta = json.loads(match.group(1))
+        self.assertIn("country", meta)
+        self.assertIn("timeframe", meta)
+        self.assertIn("total_articles", meta)
+        self.assertIn("high_impact", meta)
+        self.assertIn("medium_impact", meta)
+        self.assertIn("sources", meta)
+        self.assertIn("articles", meta)
+        self.assertEqual(meta["country"], "China")
+        self.assertEqual(meta["timeframe"], "1 Month")
+
+    def test_summarizer_stream_invalid_timeframe(self):
+        """Invalid timeframe returns 400."""
+        response = self.client.post(
+            "/api/summarizer/stream",
+            data={"country_code": "CN", "timeframe": "5Y"}
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_summarizer_stream_done_event(self):
+        """Done event contains the full summary text."""
+        response = self.client.post(
+            "/api/summarizer/stream",
+            data={"country_code": "CN", "timeframe": "1M"}
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.text
+        import re, json
+        match = re.search(r"event: done\ndata: ({.*?})\n\n", body)
+        self.assertIsNotNone(match)
+        done_data = json.loads(match.group(1))
+        self.assertIn("summary", done_data)
+        self.assertIsInstance(done_data["summary"], str)
+        self.assertGreater(len(done_data["summary"]), 0)
 
 if __name__ == "__main__":
     unittest.main()

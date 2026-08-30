@@ -70,23 +70,31 @@ class CircuitState:
         self._open_until = 0.0
         self._rate_limit_failures = 0
 
+    async def _get_pool(self):
+        """Get shared Redis pool, or None if unavailable."""
+        if not self.redis_url or not settings.enable_redis_breaker_persistence:
+            return None
+        try:
+            from backend.app.redis_pool import get_redis_pool
+            return await get_redis_pool()
+        except Exception:
+            return None
+
     async def get_failures(self) -> int:
-        if self.redis_url and settings.enable_redis_breaker_persistence:
+        pool = await self._get_pool()
+        if pool:
             try:
-                import redis.asyncio as aioredis
-                conn = aioredis.from_url(self.redis_url, decode_responses=True)
-                val = await conn.get(f"drishya:breaker:{self.source_name}:failures")
+                val = await pool.get(f"drishya:breaker:{self.source_name}:failures")
                 return int(val) if val else 0
             except Exception:
                 pass
         return self._failures
 
     async def get_open_until(self) -> float:
-        if self.redis_url and settings.enable_redis_breaker_persistence:
+        pool = await self._get_pool()
+        if pool:
             try:
-                import redis.asyncio as aioredis
-                conn = aioredis.from_url(self.redis_url, decode_responses=True)
-                val = await conn.get(f"drishya:breaker:{self.source_name}:open_until")
+                val = await pool.get(f"drishya:breaker:{self.source_name}:open_until")
                 return float(val) if val else 0.0
             except Exception:
                 pass
@@ -102,14 +110,13 @@ class CircuitState:
         if failures >= settings.circuit_breaker_failure_threshold:
             open_until = asyncio.get_event_loop().time() + cooldown_seconds
 
-        if self.redis_url and settings.enable_redis_breaker_persistence:
+        pool = await self._get_pool()
+        if pool:
             try:
-                import redis.asyncio as aioredis
-                conn = aioredis.from_url(self.redis_url, decode_responses=True)
                 ttl = int(cooldown_seconds) if open_until > 0 else 86400
-                await conn.set(f"drishya:breaker:{self.source_name}:failures", str(failures), ex=ttl)
+                await pool.set(f"drishya:breaker:{self.source_name}:failures", str(failures), ex=ttl)
                 if open_until > 0:
-                    await conn.set(f"drishya:breaker:{self.source_name}:open_until", str(open_until), ex=ttl)
+                    await pool.set(f"drishya:breaker:{self.source_name}:open_until", str(open_until), ex=ttl)
                 return
             except Exception:
                 pass
@@ -120,13 +127,12 @@ class CircuitState:
     async def set_tripped(self, cooldown_seconds: float) -> None:
         open_until = asyncio.get_event_loop().time() + cooldown_seconds
         failures = settings.circuit_breaker_failure_threshold
-        if self.redis_url and settings.enable_redis_breaker_persistence:
+        pool = await self._get_pool()
+        if pool:
             try:
-                import redis.asyncio as aioredis
-                conn = aioredis.from_url(self.redis_url, decode_responses=True)
                 ttl = int(cooldown_seconds)
-                await conn.set(f"drishya:breaker:{self.source_name}:failures", str(failures), ex=ttl)
-                await conn.set(f"drishya:breaker:{self.source_name}:open_until", str(open_until), ex=ttl)
+                await pool.set(f"drishya:breaker:{self.source_name}:failures", str(failures), ex=ttl)
+                await pool.set(f"drishya:breaker:{self.source_name}:open_until", str(open_until), ex=ttl)
                 return
             except Exception:
                 pass
@@ -142,12 +148,11 @@ class CircuitState:
         return False
 
     async def reset(self) -> None:
-        if self.redis_url and settings.enable_redis_breaker_persistence:
+        pool = await self._get_pool()
+        if pool:
             try:
-                import redis.asyncio as aioredis
-                conn = aioredis.from_url(self.redis_url, decode_responses=True)
-                await conn.delete(f"drishya:breaker:{self.source_name}:failures")
-                await conn.delete(f"drishya:breaker:{self.source_name}:open_until")
+                await pool.delete(f"drishya:breaker:{self.source_name}:failures")
+                await pool.delete(f"drishya:breaker:{self.source_name}:open_until")
                 return
             except Exception:
                 pass
@@ -176,6 +181,12 @@ def sanitize_article_text(text: str) -> str:
         r"reporting by",
         r"editing by",
         r"click here to",
+        r"cookie(s)? (policy|notice|settings)",
+        r"privacy (policy|notice)",
+        r"terms (of|&) (service|use|conditions)",
+        r"advertisement",
+        r"loading\.\.\.",
+        r"please enable javascript",
     ]
     for line in lines:
         line_stripped = line.strip()
@@ -193,6 +204,34 @@ def sanitize_article_text(text: str) -> str:
     text = re.sub(wire_pattern, "", text, count=1)
     
     return text.strip()
+
+
+def is_article_fresh(published_at: datetime, max_age_days: int = 7) -> bool:
+    """Check if an article is within the freshness window."""
+    if not published_at:
+        return False
+    age = datetime.now(timezone.utc) - published_at
+    return age.days <= max_age_days
+
+
+def has_minimum_content_quality(title: str, content: str, summary: str = "") -> bool:
+    """Validate that an article has minimum content quality."""
+    # Title must exist and be at least 10 characters
+    if not title or len(title.strip()) < 10:
+        return False
+    # Content or summary must have at least 50 characters of real text
+    text = (content or summary or "").strip()
+    if len(text) < 50:
+        return False
+    # Reject articles that are mostly boilerplate/placeholder
+    words = text.split()
+    if len(words) < 8:
+        return False
+    # Reject articles with too many repeated words (spam/placeholder)
+    word_set = set(w.lower() for w in words)
+    if len(word_set) < len(words) * 0.3 and len(words) > 15:
+        return False
+    return True
 
 
 async def scrape_full_text(client: httpx.AsyncClient, url: str) -> str:
@@ -350,11 +389,10 @@ async def notify_circuit_breaker(source_name: str, action: str, reason: str):
         memory_stream.publish(payload)
     except Exception:
         pass
-        
+    
     try:
-        import redis.asyncio as aioredis
-        redis_conn = aioredis.from_url(settings.redis_url, decode_responses=True)
-        await redis_conn.publish("live_stream", json.dumps(payload))
+        from backend.app.redis_pool import pubsub_publish
+        await pubsub_publish("live_stream", payload)
     except Exception as e:
         logger.debug("[Ingestion] Redis breaker notification failed: %s", e)
 
@@ -828,20 +866,45 @@ async def _fetch_all_news_sources(client: httpx.AsyncClient, country_code: str, 
         for article in articles_list:
             if not article.get("title") or not article.get("url"):
                 continue
-            url = article["url"]
+            
             title = article["title"]
+            content = article.get("content") or article.get("summary") or ""
+            summary = article.get("summary") or ""
+            
+            # Reject articles that fail content quality check
+            if not has_minimum_content_quality(title, content, summary):
+                continue
+            
+            # Reject stale articles (older than 7 days)
+            pub_date = article.get("published_at")
+            if pub_date and not is_article_fresh(pub_date):
+                continue
+            
+            url = article["url"]
             if url in seen_urls:
                 continue
                 
-            # Fuzzy title match
+            # Fuzzy title match (threshold 0.85 to reduce false positives)
             is_dup = False
             norm_title = "".join(c for c in title.lower() if c.isalnum())
             for accepted in all_articles:
                 acc_title = accepted.get("title", "")
                 acc_norm = "".join(c for c in acc_title.lower() if c.isalnum())
-                if norm_title == acc_norm or difflib.SequenceMatcher(None, title.lower(), acc_title.lower()).ratio() > 0.80:
+                if norm_title == acc_norm or difflib.SequenceMatcher(None, title.lower(), acc_title.lower()).ratio() > 0.85:
                     is_dup = True
                     break
+            
+            # Content-based dedup: catch same content with different titles
+            if not is_dup and len(content) > 100:
+                content_norm = "".join(c for c in content.lower()[:500] if c.isalnum())
+                for accepted in all_articles:
+                    acc_content = accepted.get("content") or accepted.get("summary") or ""
+                    acc_content_norm = "".join(c for c in acc_content.lower()[:500] if c.isalnum())
+                    if content_norm and acc_content_norm and len(content_norm) > 50:
+                        if difflib.SequenceMatcher(None, content_norm, acc_content_norm).ratio() > 0.90:
+                            is_dup = True
+                            break
+            
             if not is_dup:
                 seen_urls.add(url)
                 all_articles.append(article)
@@ -863,7 +926,26 @@ async def _fetch_all_news_sources(client: httpx.AsyncClient, country_code: str, 
             if breaker is None:
                 breaker = CircuitState(source_name)
                 SOURCE_BREAKERS[source_name] = breaker
-            return await fetch_func(client, country_code, country_name, source_limit, breaker)
+            import time as _time
+            _start = _time.monotonic()
+            try:
+                result = await fetch_func(client, country_code, country_name, source_limit, breaker)
+                _dur = (_time.monotonic() - _start) * 1000
+                try:
+                    from backend.app.services.circuit_breaker import health_monitor
+                    health_monitor.record_request(source_name, _dur, success=True)
+                except Exception:
+                    pass
+                return result
+            except Exception as exc:
+                _dur = (_time.monotonic() - _start) * 1000
+                try:
+                    from backend.app.services.circuit_breaker import health_monitor
+                    health_monitor.record_request(source_name, _dur, success=False)
+                    health_monitor.record_error(source_name, str(exc)[:200])
+                except Exception:
+                    pass
+                raise
         
     if primary_sources:
         primary_tasks = [
