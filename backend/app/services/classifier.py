@@ -37,6 +37,12 @@ class MemoryLiveStream:
     def subscribe(self, callback: Any) -> None:
         self.subscribers.append(callback)
 
+    def unsubscribe(self, callback: Any) -> None:
+        try:
+            self.subscribers.remove(callback)
+        except ValueError:
+            pass
+
 
 memory_stream = MemoryLiveStream()
 

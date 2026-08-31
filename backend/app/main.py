@@ -478,7 +478,7 @@ async def run_ingestion_cycle(test_mode: bool = False):
 
 
 async def periodic_ingestion_loop():
-    logger.info("[Main] Starting background ingestion loop for all configured countries.")
+    logger.info("[Main] Starting background ingestion loop for all configured countries (realtime mode: 2 min interval).")
     while True:
         try:
             result = await run_ingestion_cycle(test_mode=False)
@@ -500,7 +500,7 @@ async def periodic_ingestion_loop():
         except Exception as e:
             logger.error(f"[Main] Ingestion error: {e}")
 
-        await asyncio.sleep(5 * 60)
+        await asyncio.sleep(2 * 60)  # Realtime: every 2 minutes
 
 
 async def _note_cleanup_loop():
@@ -774,6 +774,49 @@ async def redis_listener_task():
                 logger.info("[Main] Retrying Redis Pub/Sub connection in 5 seconds...")
                 await asyncio.sleep(5)
 
+
+
+@app.get("/api/events/stream")
+async def events_sse_stream():
+    """Server-Sent Events endpoint for lightweight realtime clients.
+
+    Streams all live events (articles, alerts, weather, notes) as SSE.
+    Clients can connect with: new EventSource('/api/events/stream')
+    """
+    async def event_generator():
+        import asyncio as _aio
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def on_event(payload):
+            try:
+                queue.put_nowait(payload)
+            except Exception:
+                pass
+
+        # Subscribe to the in-memory event stream
+        memory_stream.subscribe(on_event)
+
+        try:
+            while True:
+                try:
+                    payload = await _aio.wait_for(queue.get(), timeout=30.0)
+                    import json as _json
+                    yield f"data: {_json.dumps(payload, default=str)}\n\n"
+                except _aio.TimeoutError:
+                    # Send heartbeat to keep connection alive
+                    yield ": heartbeat\n\n"
+        except GeneratorExit:
+            memory_stream.unsubscribe(on_event)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/system/status")

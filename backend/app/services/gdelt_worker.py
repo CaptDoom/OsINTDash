@@ -525,6 +525,35 @@ async def ingest_gdelt_events() -> Dict[str, int]:
             stats["inserted"] = inserted
             logger.info("[GDELT] Successfully inserted %d events into database.", inserted)
 
+            # ── 8. Broadcast new events via WebSocket for realtime delivery ──
+            if inserted > 0:
+                try:
+                    from backend.app.redis_pool import pubsub_publish
+                    # Broadcast the most impactful events (High Impact first)
+                    high_impact = [a for a in candidate_articles if a["impact_level"] == "High Impact"]
+                    medium_impact = [a for a in candidate_articles if a["impact_level"] == "Medium Impact"]
+                    broadcast = high_impact[:10] + medium_impact[:5]  # Cap at 15 per cycle
+
+                    for art in broadcast:
+                        from backend.app.main import data_to_signal
+                        signal = data_to_signal({
+                            "title": art["title"],
+                            "summary": art["summary"],
+                            "content": art["content"],
+                            "url": art["url"],
+                            "source": art["source"],
+                            "country_code": art["country_code"],
+                            "published_at": art["published_at"].isoformat(),
+                            "impact_level": art["impact_level"],
+                            "department": art["department"],
+                        })
+                        await pubsub_publish("live_stream", signal.get("signal", signal))
+
+                    if broadcast:
+                        logger.info("[GDELT] Broadcast %d events via WebSocket", len(broadcast))
+                except Exception as broadcast_err:
+                    logger.debug("[GDELT] WebSocket broadcast failed: %s", broadcast_err)
+
     except Exception as e:
         stats["errors"] += 1
         logger.error("[GDELT] Ingestion error: %s", e, exc_info=True)
@@ -543,14 +572,14 @@ async def ingest_gdelt_events() -> Dict[str, int]:
 # ---------------------------------------------------------------------------
 # Background loop — runs inside the FastAPI lifespan.
 # ---------------------------------------------------------------------------
-async def gdelt_ingestion_loop(interval_seconds: int = 900):
+async def gdelt_ingestion_loop(interval_seconds: int = 300):
     """
     Background task that polls GDELT every `interval_seconds` (default 15 min).
 
     Implements exponential backoff on consecutive failures so a persistently
     broken GDELT endpoint does not hammer the network or logs.
     """
-    logger.info("[GDELT] Background ingestion loop started (interval=%ds).", interval_seconds)
+    logger.info("[GDELT] Background ingestion loop started (interval=%ds, realtime mode).", interval_seconds)
 
     backoff = INITIAL_BACKOFF_SECONDS
 
