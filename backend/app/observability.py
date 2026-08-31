@@ -58,6 +58,12 @@ class MetricsState:
     auth_login_failures_total: int = 0
     scrape_real_fetch_total: int = 0
     scrape_fetch_failures_total: int = 0
+    gdelt_cycles_total: int = 0
+    gdelt_events_fetched_total: int = 0
+    gdelt_events_filtered_total: int = 0
+    gdelt_events_deduped_total: int = 0
+    gdelt_events_inserted_total: int = 0
+    gdelt_ingestion_errors_total: int = 0
 
 
 class MetricsRegistry:
@@ -119,6 +125,24 @@ class MetricsRegistry:
             "# HELP drishya_scrape_fetch_failures_total Total real scraper download attempts failed",
             "# TYPE drishya_scrape_fetch_failures_total counter",
             f"drishya_scrape_fetch_failures_total {self.state.scrape_fetch_failures_total}",
+            "# HELP drishya_gdelt_cycles_total Total GDELT polling cycles completed",
+            "# TYPE drishya_gdelt_cycles_total counter",
+            f"drishya_gdelt_cycles_total {self.state.gdelt_cycles_total}",
+            "# HELP drishya_gdelt_events_fetched_total Raw GDELT events parsed per cycle",
+            "# TYPE drishya_gdelt_events_fetched_total counter",
+            f"drishya_gdelt_events_fetched_total {self.state.gdelt_events_fetched_total}",
+            "# HELP drishya_gdelt_events_filtered_total GDELT events matching target countries",
+            "# TYPE drishya_gdelt_events_filtered_total counter",
+            f"drishya_gdelt_events_filtered_total {self.state.gdelt_events_filtered_total}",
+            "# HELP drishya_gdelt_events_deduped_total GDELT events skipped by GLOBALEVENTID dedup",
+            "# TYPE drishya_gdelt_events_deduped_total counter",
+            f"drishya_gdelt_events_deduped_total {self.state.gdelt_events_deduped_total}",
+            "# HELP drishya_gdelt_events_inserted_total GDELT events persisted to database",
+            "# TYPE drishya_gdelt_events_inserted_total counter",
+            f"drishya_gdelt_events_inserted_total {self.state.gdelt_events_inserted_total}",
+            "# HELP drishya_gdelt_ingestion_errors_total GDELT ingestion cycle errors",
+            "# TYPE drishya_gdelt_ingestion_errors_total counter",
+            f"drishya_gdelt_ingestion_errors_total {self.state.gdelt_ingestion_errors_total}",
         ]
         return "\n".join(lines) + "\n"
 

@@ -83,6 +83,7 @@ class Article(Base):
     entities: Mapped[Optional[str]] = mapped_column(Text, nullable=True) # JSON list
     action_type: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     also_reported_by: Mapped[Optional[str]] = mapped_column(Text, nullable=True) # JSON list
+    gdelt_event_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, unique=True) # GDELT GLOBALEVENTID for dedup
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
@@ -362,38 +363,76 @@ async def seed_data_if_empty(session: AsyncSession):
                 })
                 texts_to_embed.append(f"{title} {summary}")
 
-    # Generate embeddings in batch
+    # Generate embeddings in batch — skip on failure so articles are never lost
+    embeddings = [None] * len(articles_to_create)
     try:
         from backend.app.services.classifier import get_embeddings_cached
         embeddings = await get_embeddings_cached(texts_to_embed)
+        # Validate dimensions match; if not, drop embeddings and continue
+        expected_dim = settings.embedding_dimensions
+        if embeddings and embeddings[0] is not None:
+            actual_dim = len(embeddings[0]) if isinstance(embeddings[0], (list, tuple)) else 0
+            if actual_dim != expected_dim:
+                logger.warning(f"[Database] Embedding dimension mismatch: expected {expected_dim}, got {actual_dim}. Skipping embeddings.")
+                embeddings = [None] * len(articles_to_create)
     except Exception as e:
-        logger.error(f"[Database] Failed to compute embeddings during seeding: {e}")
-        embeddings = [None] * len(articles_to_create)
+        logger.warning(f"[Database] Failed to compute embeddings during seeding (continuing without): {e}")
 
     is_postgres = session.bind.dialect.name == "postgresql"
     seeded_count = 0
-    for art_dict, emb in zip(articles_to_create, embeddings):
-        db_article = Article(
-            title=art_dict["title"],
-            headline=art_dict["headline"],
-            summary=art_dict["summary"],
-            content=art_dict["content"],
-            url=art_dict["url"],
-            source=art_dict["source"],
-            country_code=art_dict["country_code"],
-            published_at=art_dict["published_at"],
-            impact_level=art_dict["impact_level"],
-            department=art_dict["department"]
-        )
-        if emb:
-            if is_postgres:
-                db_article.embedding = emb
-            else:
-                db_article.embedding = json.dumps(emb)
-        session.add(db_article)
-        seeded_count += 1
+    # Insert in batches to avoid massive transaction on failure
+    BATCH_SIZE = 200
+    for batch_start in range(0, len(articles_to_create), BATCH_SIZE):
+        batch_end = min(batch_start + BATCH_SIZE, len(articles_to_create))
+        batch_articles = articles_to_create[batch_start:batch_end]
+        batch_embeddings = embeddings[batch_start:batch_end]
+        try:
+            for art_dict, emb in zip(batch_articles, batch_embeddings):
+                db_article = Article(
+                    title=art_dict["title"],
+                    headline=art_dict["headline"],
+                    summary=art_dict["summary"],
+                    content=art_dict["content"],
+                    url=art_dict["url"],
+                    source=art_dict["source"],
+                    country_code=art_dict["country_code"],
+                    published_at=art_dict["published_at"],
+                    impact_level=art_dict["impact_level"],
+                    department=art_dict["department"]
+                )
+                if emb:
+                    if is_postgres:
+                        db_article.embedding = emb
+                    else:
+                        db_article.embedding = json.dumps(emb)
+                session.add(db_article)
+                seeded_count += 1
+            await session.commit()
+        except Exception as e:
+            logger.error(f"[Database] Batch commit failed at {batch_start}: {e}")
+            await session.rollback()
+            # Retry without embeddings
+            for art_dict in batch_articles:
+                db_article = Article(
+                    title=art_dict["title"],
+                    headline=art_dict["headline"],
+                    summary=art_dict["summary"],
+                    content=art_dict["content"],
+                    url=art_dict["url"],
+                    source=art_dict["source"],
+                    country_code=art_dict["country_code"],
+                    published_at=art_dict["published_at"],
+                    impact_level=art_dict["impact_level"],
+                    department=art_dict["department"]
+                )
+                session.add(db_article)
+                seeded_count += 1
+            try:
+                await session.commit()
+            except Exception as e2:
+                logger.error(f"[Database] Retry commit also failed: {e2}")
+                await session.rollback()
 
-    await session.commit()
     logger.info(f"[Database] Seeding finished. Added {seeded_count} articles across {len(countries_map)} countries.")
 
 async def create_tables():
@@ -415,22 +454,28 @@ async def create_tables():
             ("sector", "VARCHAR(256)"),
             ("entities", "TEXT"),
             ("action_type", "VARCHAR(128)"),
-            ("also_reported_by", "TEXT")
+            ("also_reported_by", "TEXT"),
+            ("gdelt_event_id", "VARCHAR(32)"),
         ]
         for col_name, col_type in columns_to_add:
             # Separate connection/transaction per column
+            # SQLite does not support ADD COLUMN IF NOT EXISTS, so we probe
+            # first and only attempt the ALTER if the column is missing.
             async with engine.begin() as col_conn:
                 try:
                     await col_conn.execute(text(f"SELECT {col_name} FROM high_impact_articles LIMIT 1"))
-                    continue  # column exists
+                    continue  # column already exists
                 except Exception:
-                    pass
+                    pass  # column missing — fall through to add it
             async with engine.begin() as col_conn:
                 try:
-                    await col_conn.execute(text(f"ALTER TABLE high_impact_articles ADD COLUMN IF NOT EXISTS {col_name} {col_type}"))
+                    await col_conn.execute(text(f"ALTER TABLE high_impact_articles ADD COLUMN {col_name} {col_type}"))
                     logger.info(f"[Database] Column '{col_name}' ensured.")
                 except Exception as alter_err:
-                    logger.error(f"[Database] Failed to add column '{col_name}': {alter_err}")
+                    # SQLite raises OperationalError("duplicate column name") if the
+                    # column already exists from a concurrent or prior migration.
+                    if "duplicate column" not in str(alter_err).lower():
+                        logger.error(f"[Database] Failed to add column '{col_name}': {alter_err}")
                     
         # Create performance indexes for common query patterns
         indexes = [
@@ -439,6 +484,7 @@ async def create_tables():
             ("idx_articles_url", "high_impact_articles", "url"),
             ("idx_articles_impact_level", "high_impact_articles", "impact_level"),
             ("idx_articles_country_published", "high_impact_articles", "country_code, published_at"),
+            ("idx_articles_gdelt_event_id", "high_impact_articles", "gdelt_event_id"),
             ("idx_notes_created_at", "shared_notes", "created_at"),
             ("idx_alert_rules_enabled", "alert_rules", "enabled"),
         ]

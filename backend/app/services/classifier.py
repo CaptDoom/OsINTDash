@@ -1056,6 +1056,7 @@ class ImpactClassifier:
                     entities=entities_json,
                     action_type=article_data.get("action_type"),
                     also_reported_by=also_rep_json,
+                    gdelt_event_id=article_data.get("gdelt_event_id"),
                 )
             )
 
@@ -1097,6 +1098,7 @@ class ImpactClassifier:
                             "entities": row.entities,
                             "action_type": row.action_type,
                             "also_reported_by": row.also_reported_by,
+                            "gdelt_event_id": row.gdelt_event_id,
                             "created_at": row.created_at,
                         }
                         for row in rows

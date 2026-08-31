@@ -20,6 +20,7 @@ from backend.app.config import settings
 from backend.app.database import create_tables, get_db, Article, User
 from backend.app.api.routes import archive, chat, weather, auth, summarizer, notes, alerts, credibility
 from backend.app.services.ingestion import fetch_global_news
+from backend.app.services.gdelt_worker import gdelt_ingestion_loop
 from backend.app.services.classifier import ImpactClassifier, classify_and_store_batch, memory_stream, compute_source_reputation
 from backend.app.services.summarizer import call_openai, call_gemini
 from backend.app.observability import configure_logging, metrics, request_id_var
@@ -81,6 +82,8 @@ async def lifespan(app: FastAPI):
             logger.info("[Main] API startup complete; background ingestion and redis listener started.")
         else:
             logger.info("[Main] API startup complete; redis listener started (periodic ingestion disabled).")
+        # Start GDELT 2.0 Events ingestion loop (polls every 15 min)
+        background_tasks.append(asyncio.create_task(gdelt_ingestion_loop()))
         # Start background note expiration cleanup
         background_tasks.append(asyncio.create_task(_note_cleanup_loop()))
         # Start corroboration story persistence loop
@@ -1176,6 +1179,52 @@ async def get_all_news(
             "source_status": "normal"
         }
  
+    # Second pass: live-ingest countries that still have zero signals
+    zero_signal_countries = [c for c, r in results.items() if not r.get("signals")]
+    if zero_signal_countries:
+        import asyncio as _aio
+        _sem = _aio.Semaphore(3)
+
+        async def _live_fetch_country(cname: str):
+            async with _sem:
+                ccode = get_country_code(cname)
+                if not ccode:
+                    return
+                try:
+                    async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(15.0, connect=5.0)) as client:
+                        raw = await fetch_country_news(client, ccode, budget=15)
+                        if raw:
+                            # Store in DB for future requests
+                            from backend.app.services.classifier import classify_and_store_batch as _csb
+                            await _csb(db, raw)
+                            # Build signals from raw articles
+                            live_signals = []
+                            for art in raw:
+                                if not (art.get("title") and art.get("url")):
+                                    continue
+                                live_signals.append({
+                                    "id": art.get("id", f"live-{cname}-{len(live_signals)}"),
+                                    "country": cname,
+                                    "category": get_frontend_category(art.get("department", ""), art.get("title", ""), art.get("source", "")),
+                                    "impact": art.get("impact", "Medium"),
+                                    "headline": art.get("title", ""),
+                                    "summary": (art.get("summary") or art.get("content") or "Live intelligence feed.")[:300],
+                                    "source": art.get("source", "Live Feed"),
+                                    "timestamp": (art.get("published_at") or now).isoformat() if hasattr((art.get("published_at") or now), 'isoformat') else str(art.get("published_at", now)),
+                                    "url": art.get("url", ""),
+                                    "verification_status": "Live Source",
+                                    "confidence_score": 0.95,
+                                    "source_links": [{"name": art.get("source", "Source"), "url": art.get("url", "")}] if art.get("url") else [],
+                                })
+                            if live_signals:
+                                results[cname]["signals"] = live_signals
+                                results[cname]["operational_summary"] = f"Live ingestion retrieved {len(live_signals)} reports for {cname}."
+                                logger.info("[Live Ingest] Populated %d signals for %s", len(live_signals), cname)
+                except Exception as e:
+                    logger.warning("[Live Ingest] Failed for %s: %s", cname, e)
+
+        await _aio.gather(*[_live_fetch_country(c) for c in zero_signal_countries], return_exceptions=True)
+
     await set_cached_response(cache_key, results, ttl=300)
     return results
 
@@ -1244,12 +1293,32 @@ async def get_specific_country_news(
     if db_articles:
         latest_art = db_articles[0]
         now = datetime.now(timezone.utc)
-        time_diff = (now - latest_art.published_at).total_seconds()
-        if time_diff < 900 and len(db_articles) >= 15:
-            is_stale = False
+        pub_at = latest_art.published_at
+        if pub_at and pub_at.tzinfo is None:
+            pub_at = pub_at.replace(tzinfo=timezone.utc)
+        if pub_at:
+            time_diff = (now - pub_at).total_seconds()
+            if time_diff < 900 and len(db_articles) >= 15:
+                is_stale = False
             
     if is_stale:
-        background_tasks.add_task(fetch_and_classify_background, code, name)
+        # When DB is nearly empty, run a quick synchronous fetch so the first response includes data
+        if len(db_articles) < 5:
+            try:
+                async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(20.0)) as client:
+                    raw_articles = await fetch_country_news(client, code, budget=15)
+                    if raw_articles:
+                        await classify_and_store_batch(db, raw_articles)
+                        # Re-query DB after ingestion
+                        stmt = select(Article).where(Article.country_code == code).order_by(Article.published_at.desc()).limit(150)
+                        res = await db.execute(stmt)
+                        db_articles = res.scalars().all()
+            except Exception as e:
+                logger.warning("[Country News] Sync ingestion failed for %s: %s", name, e)
+                # Fallback to background task
+                background_tasks.add_task(fetch_and_classify_background, code, name)
+        else:
+            background_tasks.add_task(fetch_and_classify_background, code, name)
                 
     db_signals = []
     for art in db_articles:
@@ -1397,6 +1466,22 @@ async def refresh_news_endpoint():
     except Exception as exc:
         logger.error("[Main] Manual refresh failed: %s", exc)
         raise HTTPException(status_code=500, detail="News refresh failed")
+
+@app.post("/api/gdelt/ingest")
+async def trigger_gdelt_ingestion():
+    """Manually trigger a single GDELT 2.0 Events ingestion cycle.
+
+    Returns the same stats dict as the background worker:
+    fetched, filtered, deduped, inserted, errors.
+    """
+    try:
+        from backend.app.services.gdelt_worker import ingest_gdelt_events
+        result = await ingest_gdelt_events()
+        return {"success": True, **result}
+    except Exception as exc:
+        logger.error("[Main] Manual GDELT ingestion failed: %s", exc)
+        raise HTTPException(status_code=500, detail="GDELT ingestion failed")
+
 
 @app.get("/api/scrape/status")
 async def scrape_status_stream():
