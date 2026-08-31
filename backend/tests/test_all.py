@@ -746,5 +746,23 @@ class TestFastAPIRoutes(unittest.TestCase):
         self.assertEqual(logout_resp.status_code, 200)
         self.assertTrue(logout_resp.json()["success"])
 
+    def test_demo_seed_user_login(self):
+        import hmac, hashlib
+        login_resp = self.client.post(
+            "/api/auth/login",
+            json={"username": "admin@intel.local", "password": "Admin@2026!"}
+        )
+        self.assertEqual(login_resp.status_code, 200)
+        data = login_resp.json()
+        self.assertTrue(data["mfa_required"])
+        sig = hmac.new("Admin@2026!".encode("utf-8"), data["challenge"].encode("utf-8"), hashlib.sha256).hexdigest()
+        mfa_resp = self.client.post(
+            "/api/auth/verify_mfa",
+            json={"temp_token": data["temp_token"], "signature": sig}
+        )
+        self.assertEqual(mfa_resp.status_code, 200)
+        self.assertEqual(mfa_resp.json()["user"]["username"], "admin@intel.local")
+        self.assertEqual(mfa_resp.json()["user"]["role"], "Admin")
+
 if __name__ == "__main__":
     unittest.main()

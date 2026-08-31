@@ -451,36 +451,33 @@ async def create_tables():
         logger.info("[Database] Tables created and migrations checked successfully.")
 
 
-    # Seed default user accounts ONLY in demo mode (Fix A5/A7)
-    # In production, users must be created via /api/auth/register or admin tooling.
+    # Seed default user accounts in demo mode
     if settings.enable_demo_seed_data:
         async with SessionLocal() as session:
             try:
                 import bcrypt
-                import secrets as _secrets
                 demo_credentials = [
-                    {"username": "operator@intel.local", "role": "Operator"},
-                    {"username": "analyst@intel.local", "role": "Analyst"},
-                    {"username": "admin@intel.local", "role": "Admin"}
+                    {"username": "admin@intel.local", "role": "Admin", "password": "Admin@2026!"},
+                    {"username": "analyst@intel.local", "role": "Analyst", "password": "Analyst@2026!"},
+                    {"username": "operator@intel.local", "role": "Operator", "password": "Operator@2026!"},
                 ]
                 for cred in demo_credentials:
                     check_stmt = select(User).where(User.username == cred["username"])
                     check_res = await session.execute(check_stmt)
-                    if not check_res.scalars().first():
-                        # Generate random password and log it — never hardcode in source
-                        generated_password = _secrets.token_urlsafe(12)
-                        logger.warning(
-                            "[Database] DEMO user seeded: %s / role=%s / password=%s",
-                            cred["username"], cred["role"], generated_password,
-                        )
-                        hashed = bcrypt.hashpw(generated_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+                    existing_user = check_res.scalars().first()
+                    hashed = bcrypt.hashpw(cred["password"].encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+                    if not existing_user:
                         user_obj = User(
                             username=cred["username"],
                             password_hash=hashed,
                             role=cred["role"]
                         )
                         session.add(user_obj)
+                    else:
+                        existing_user.password_hash = hashed
+                        existing_user.role = cred["role"]
                 await session.commit()
+                logger.info("[Database] Demo user accounts seeded successfully.")
             except Exception as e:
                 logger.error(f"[Database] Demo user seeding failed: {e}")
         
