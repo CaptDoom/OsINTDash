@@ -7,7 +7,6 @@ import { RiskLevelBadge, RiskLegend, type ThreatLevel } from './components/RiskL
 import { GlobalOverview } from './components/GlobalOverview';
 import { CountryCard } from './components/CountryCard';
 import { CountryDetailSlideout } from './components/CountryDetailSlideout';
-import IntelligenceDashboard from './components/IntelligenceDashboard';
 import worldCountries from 'world-countries';
 
 type TimeWindow = '1h' | '1d' | '1w' | '1m';
@@ -123,7 +122,7 @@ type WorldAlert = {
   timestamp: string;
 };
 
-type PanelView = 'country' | 'countryGrid' | 'worldMap' | 'archive' | 'chatFusion' | 'aiSummarizer' | 'sharedNotes' | 'intelDashboard';
+type PanelView = 'country' | 'countryGrid' | 'worldMap' | 'archive' | 'chatFusion' | 'aiSummarizer' | 'sharedNotes';
 
 type WorldMapPan = {
   x: number;
@@ -2856,24 +2855,7 @@ function App() {
                 >
                   Shared Notes
                 </button>
-                <button
-                  onClick={() => {
-                    setPanelView('intelDashboard');
-                    setIsCountrySelected(false);
-                    setIsWorldMapFullscreen(false);
-                  }}
-                  className={`w-full text-left px-3 py-2 border transition-colors ${
-                    panelView === 'intelDashboard'
-                      ? isDarkMode
-                        ? 'bg-white text-black border-white'
-                        : 'bg-black text-white border-black'
-                      : isDarkMode
-                        ? 'border-white/20 hover:bg-white/10'
-                        : 'border-black/20 hover:bg-black/10'
-                  }`}
-                >
-                  📊 Intelligence Dashboard
-                </button>
+
               </div>
             </div>
 
@@ -3300,8 +3282,7 @@ function App() {
                 <AiSummarizer isDarkMode={isDarkMode} />
               ) : panelView === 'sharedNotes' ? (
                 <SharedNotes isDarkMode={isDarkMode} />
-              ) : panelView === 'intelDashboard' ? (
-                <IntelligenceDashboard isDarkMode={isDarkMode} />
+
               ) : !isCountrySelected ? (
                 <div className="h-full flex items-center justify-center text-center text-white/70">
                   <p className={isDarkMode ? 'text-white/70' : 'text-black/70'}>Select a country to view its latest news categories.</p>

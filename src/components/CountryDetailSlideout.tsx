@@ -59,6 +59,16 @@ function getFlagEmoji(countryCode: string): string {
   try { return String.fromCodePoint(...codePoints); } catch { return ''; }
 }
 
+function buildSearchUrl(headline: string, countryName?: string, sourceName?: string): string {
+  const query = [headline, countryName, sourceName].filter(Boolean).join(' ');
+  return `https://www.google.com/search?q=${encodeURIComponent(query)}`;
+}
+
+function getSignalUrl(signal: Signal, countryName: string): string {
+  if (signal.url && signal.url.startsWith('http')) return signal.url;
+  return buildSearchUrl(signal.headline, countryName, signal.source);
+}
+
 const COUNTRY_CODE_MAP: Record<string, string> = {
   China: 'CN', Pakistan: 'PK', Afghanistan: 'AF', Bangladesh: 'BD',
   Myanmar: 'MM', Nepal: 'NP', Bhutan: 'BT', 'Sri Lanka': 'LK',
@@ -195,7 +205,7 @@ export function CountryDetailSlideout({
               filteredSignals.slice(0, 50).map((signal, idx) => (
                 <a
                   key={signal.id || idx}
-                  href={signal.url || '#'}
+                  href={getSignalUrl(signal, countryName)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="slideout-signal-card"
@@ -235,6 +245,23 @@ export function CountryDetailSlideout({
                       </span>
                     )}
                   </div>
+                  {signal.source_links && signal.source_links.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mt-1.5">
+                      {signal.source_links.map((link, li) => (
+                        <span key={li} className="text-[9px]">
+                          <a
+                            href={link.url || buildSearchUrl(signal.headline, countryName, link.name)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="underline opacity-70 hover:opacity-100 transition-opacity"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            {link.name} ↗
+                          </a>
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </a>
               ))
             )}

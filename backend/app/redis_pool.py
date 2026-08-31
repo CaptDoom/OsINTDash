@@ -20,17 +20,22 @@ logger = logging.getLogger("drishya.redis_pool")
 
 _pool: Optional[aioredis.Redis] = None
 _lock = asyncio.Lock()
+_redis_last_failure: float = 0.0
+_REDIS_COOLDOWN_SECONDS = 30.0
 
 
 async def get_redis_pool() -> Optional[aioredis.Redis]:
     """Return a shared Redis connection pool, creating it lazily on first use."""
-    global _pool
+    global _pool, _redis_last_failure
+    import time as _t
+    if _redis_last_failure and (_t.monotonic() - _redis_last_failure) < _REDIS_COOLDOWN_SECONDS:
+        return None
+
     if _pool is not None:
         try:
             await _pool.ping()
             return _pool
         except Exception:
-            # Connection is stale; tear down and recreate below
             try:
                 await _pool.aclose()
             except Exception:
@@ -53,17 +58,19 @@ async def get_redis_pool() -> Optional[aioredis.Redis]:
             _pool = aioredis.from_url(
                 settings.redis_url,
                 decode_responses=True,
-                socket_timeout=3.0,
-                socket_connect_timeout=3.0,
+                socket_timeout=2.0,
+                socket_connect_timeout=2.0,
                 max_connections=20,
-                retry_on_timeout=True,
+                retry_on_timeout=False,
             )
             await _pool.ping()
+            _redis_last_failure = 0.0
             logger.info("[Redis] Shared connection pool created successfully.")
             return _pool
         except Exception as exc:
             logger.warning("[Redis] Failed to create connection pool: %s", exc)
             _pool = None
+            _redis_last_failure = _t.monotonic()
             return None
 
 
