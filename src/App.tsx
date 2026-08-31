@@ -1128,10 +1128,6 @@ function App() {
     role: 'ADMIN',
     clearance: 'TOP SECRET // SCI // NOFORN'
   });
-  const [loginForm, setLoginForm] = useState({ email: '', password: '' });
-  const [loginError, setLoginError] = useState('');
-  const [isWebAuthnSimulating, setIsWebAuthnSimulating] = useState(false);
-  const [webauthnSuccess, setWebauthnSuccess] = useState(false);
   const [securityForm, setSecurityForm] = useState({ currentPassword: '', newId: '', newPassword: '', confirmPassword: '' });
   const [securityError, setSecurityError] = useState('');
   const [securityNotice, setSecurityNotice] = useState('');
@@ -2300,103 +2296,6 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [authUser, selectedSignalsFiltered, keyboardCursorIndex, layoutMode]);
 
-  const handleLogin = async (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    setLoginError('');
-
-    if (!loginForm.email || !loginForm.password) {
-      setLoginError('ID and password are required.');
-      return;
-    }
-
-    setIsWebAuthnSimulating(true);
-
-    try {
-      const response = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username: loginForm.email.trim(),
-          password: loginForm.password
-        })
-      });
-
-      if (!response.ok) {
-        const errData = await response.json();
-        setLoginError(errData.detail || 'Invalid ID or password.');
-        setIsWebAuthnSimulating(false);
-        return;
-      }
-
-      const data = await response.json();
-      let finalUserData = null;
-
-      if (data.mfa_required) {
-        let signature = '';
-        if (globalThis.crypto?.subtle) {
-          const enc = new TextEncoder();
-          const keyBytes = enc.encode(loginForm.password);
-          const msgBytes = enc.encode(data.challenge);
-          const cryptoKey = await globalThis.crypto.subtle.importKey(
-            "raw",
-            keyBytes,
-            { name: "HMAC", hash: { name: "SHA-256" } },
-            false,
-            ["sign"]
-          );
-          const signatureBuffer = await globalThis.crypto.subtle.sign(
-            "HMAC",
-            cryptoKey,
-            msgBytes
-          );
-          const hashArray = Array.from(new Uint8Array(signatureBuffer));
-          signature = hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
-        } else {
-          throw new Error('Web Crypto API not available for MFA simulation');
-        }
-
-        const mfaResponse = await fetch('/api/auth/verify_mfa', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            temp_token: data.temp_token,
-            signature: signature
-          })
-        });
-
-        if (!mfaResponse.ok) {
-          const errData = await mfaResponse.json();
-          setLoginError(errData.detail || 'MFA validation failed.');
-          setIsWebAuthnSimulating(false);
-          return;
-        }
-
-        const mfaData = await mfaResponse.json();
-        finalUserData = mfaData.user;
-      } else {
-        finalUserData = data.user;
-      }
-
-      setTimeout(() => {
-        setWebauthnSuccess(true);
-        setTimeout(() => {
-          setAuthUser({
-            id: finalUserData.id,
-            name: finalUserData.username,
-            role: finalUserData.role.toUpperCase(),
-            clearance: clearanceForRole(finalUserData.role),
-          });
-          setIsWebAuthnSimulating(false);
-          setWebauthnSuccess(false);
-        }, 800);
-      }, 1000);
-
-    } catch (err) {
-      setLoginError('Telemetry security system offline. Connection failed.');
-      setIsWebAuthnSimulating(false);
-    }
-  };
-
   const handleCredentialUpdate = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!authUser) return;
@@ -2472,9 +2371,6 @@ function App() {
       role: 'ADMIN',
       clearance: 'TOP SECRET // SCI // NOFORN'
     });
-    setLoginForm({ email: '', password: '' });
-    setIsWebAuthnSimulating(false);
-    setWebauthnSuccess(false);
   };
 
   if (authUser) {
