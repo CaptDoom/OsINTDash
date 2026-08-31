@@ -3771,6 +3771,32 @@ function App() {
                     </div>
                   </div>
 
+                  {/* Quick Demo Credentials */}
+                  <div className="flex items-center justify-center gap-2 pt-1 pb-1">
+                    <span className="text-[10px] uppercase tracking-wider text-[#8e9099]">Quick Demo:</span>
+                    <button
+                      type="button"
+                      onClick={() => setLoginForm({ email: 'admin@intel.local', password: 'Admin@2026!' })}
+                      className="px-2 py-1 text-[10px] font-mono font-bold bg-[#7bd0ff]/10 hover:bg-[#7bd0ff]/20 text-[#7bd0ff] border border-[#7bd0ff]/30 rounded transition-all"
+                    >
+                      Admin
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setLoginForm({ email: 'analyst@intel.local', password: 'Analyst@2026!' })}
+                      className="px-2 py-1 text-[10px] font-mono font-bold bg-[#7bd0ff]/10 hover:bg-[#7bd0ff]/20 text-[#7bd0ff] border border-[#7bd0ff]/30 rounded transition-all"
+                    >
+                      Analyst
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setLoginForm({ email: 'operator@intel.local', password: 'Operator@2026!' })}
+                      className="px-2 py-1 text-[10px] font-mono font-bold bg-[#7bd0ff]/10 hover:bg-[#7bd0ff]/20 text-[#7bd0ff] border border-[#7bd0ff]/30 rounded transition-all"
+                    >
+                      Operator
+                    </button>
+                  </div>
+
                   {loginError && <p className="text-xs text-[#ffb4ab] bg-[#93000a]/20 border border-[#ffb4ab]/30 p-2 rounded text-center">{loginError}</p>}
 
                   <button

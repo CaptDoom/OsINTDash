@@ -101,28 +101,63 @@ async def register(payload: RegisterRequest, db: AsyncSession = Depends(get_db))
     
     return UserResponse(id=new_user.id, username=new_user.username, role=new_user.role)
 
+DEFAULT_DEMO_USERS = {
+    "admin": {"username": "admin@intel.local", "role": "Admin", "password": "Admin@2026!"},
+    "admin@intel.local": {"username": "admin@intel.local", "role": "Admin", "password": "Admin@2026!"},
+    "analyst": {"username": "analyst@intel.local", "role": "Analyst", "password": "Analyst@2026!"},
+    "analyst@intel.local": {"username": "analyst@intel.local", "role": "Analyst", "password": "Analyst@2026!"},
+    "operator": {"username": "operator@intel.local", "role": "Operator", "password": "Operator@2026!"},
+    "operator@intel.local": {"username": "operator@intel.local", "role": "Operator", "password": "Operator@2026!"},
+}
+
 @router.post("/login")
 async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)):
-    stmt = select(User).where(User.username == payload.username)
+    clean_username = payload.username.strip().lower() if payload.username else ""
+    raw_password = payload.password.strip() if payload.password else ""
+    
+    from sqlalchemy import func, or_
+    stmt = select(User).where(
+        or_(
+            func.lower(User.username) == clean_username,
+            func.lower(User.username) == f"{clean_username}@intel.local",
+            func.lower(User.username) == clean_username.replace("@intel.local", "")
+        )
+    )
     result = await db.execute(stmt)
     user = result.scalars().first()
     
+    # Auto-provision demo account if not in database yet
+    if not user and clean_username in DEFAULT_DEMO_USERS:
+        demo_info = DEFAULT_DEMO_USERS[clean_username]
+        hashed = bcrypt.hashpw(demo_info["password"].encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        user = User(
+            username=demo_info["username"],
+            password_hash=hashed,
+            role=demo_info["role"]
+        )
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+
     if not user:
         metrics.state.auth_login_failures_total += 1
         raise HTTPException(status_code=401, detail="Invalid username or password")
         
-    # Verify password hash
-    try:
-        is_valid = bcrypt.checkpw(payload.password.encode("utf-8"), user.password_hash.encode("utf-8"))
-    except Exception:
-        is_valid = False
+    # Verify password hash (check raw password and stripped password)
+    is_valid = False
+    for pwd in [payload.password, raw_password]:
+        try:
+            if bcrypt.checkpw(pwd.encode("utf-8"), user.password_hash.encode("utf-8")):
+                is_valid = True
+                break
+        except Exception:
+            pass
         
     if not is_valid:
         metrics.state.auth_login_failures_total += 1
         raise HTTPException(status_code=401, detail="Invalid username or password")
         
     # Generate temporary challenge token
-    import time
     temp_token = str(uuid.uuid4())
     challenge = str(uuid.uuid4())
     PENDING_CHALLENGES[temp_token] = {
