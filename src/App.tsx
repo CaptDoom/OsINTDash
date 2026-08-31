@@ -2311,7 +2311,7 @@ function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          username: loginForm.email,
+          username: loginForm.email.trim(),
           password: loginForm.password
         })
       });

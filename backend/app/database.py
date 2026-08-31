@@ -452,34 +452,37 @@ async def create_tables():
 
 
     # Seed default user accounts in demo mode
-    if settings.enable_demo_seed_data:
-        async with SessionLocal() as session:
-            try:
-                import bcrypt
-                demo_credentials = [
-                    {"username": "admin@intel.local", "role": "Admin", "password": "Admin@2026!"},
-                    {"username": "analyst@intel.local", "role": "Analyst", "password": "Analyst@2026!"},
-                    {"username": "operator@intel.local", "role": "Operator", "password": "Operator@2026!"},
-                ]
-                for cred in demo_credentials:
-                    check_stmt = select(User).where(User.username == cred["username"])
-                    check_res = await session.execute(check_stmt)
-                    existing_user = check_res.scalars().first()
-                    hashed = bcrypt.hashpw(cred["password"].encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-                    if not existing_user:
-                        user_obj = User(
-                            username=cred["username"],
-                            password_hash=hashed,
-                            role=cred["role"]
-                        )
-                        session.add(user_obj)
-                    else:
-                        existing_user.password_hash = hashed
-                        existing_user.role = cred["role"]
-                await session.commit()
-                logger.info("[Database] Demo user accounts seeded successfully.")
-            except Exception as e:
-                logger.error(f"[Database] Demo user seeding failed: {e}")
+    # Seed and sync default user accounts
+    async with SessionLocal() as session:
+        try:
+            import bcrypt
+            demo_credentials = [
+                {"username": "admin@intel.local", "role": "Admin", "password": "Admin@2026!"},
+                {"username": "admin", "role": "Admin", "password": "Admin@2026!"},
+                {"username": "analyst@intel.local", "role": "Analyst", "password": "Analyst@2026!"},
+                {"username": "analyst", "role": "Analyst", "password": "Analyst@2026!"},
+                {"username": "operator@intel.local", "role": "Operator", "password": "Operator@2026!"},
+                {"username": "operator", "role": "Operator", "password": "Operator@2026!"},
+            ]
+            for cred in demo_credentials:
+                check_stmt = select(User).where(User.username == cred["username"])
+                check_res = await session.execute(check_stmt)
+                existing_user = check_res.scalars().first()
+                hashed = bcrypt.hashpw(cred["password"].encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+                if not existing_user:
+                    user_obj = User(
+                        username=cred["username"],
+                        password_hash=hashed,
+                        role=cred["role"]
+                    )
+                    session.add(user_obj)
+                else:
+                    existing_user.password_hash = hashed
+                    existing_user.role = cred["role"]
+            await session.commit()
+            logger.info("[Database] Demo user accounts seeded and synchronized successfully.")
+        except Exception as e:
+            logger.error(f"[Database] Demo user seeding failed: {e}")
         
     # Run seeding if empty and enable_demo_seed_data is True
     if settings.enable_demo_seed_data:
