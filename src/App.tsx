@@ -1121,8 +1121,13 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // 2. Authentication States
-  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  // 2. Authentication States (Defaulted to active session)
+  const [authUser, setAuthUser] = useState<AuthUser | null>({
+    id: 'admin@intel.local',
+    name: 'Administrator',
+    role: 'ADMIN',
+    clearance: 'TOP SECRET // SCI // NOFORN'
+  });
   const [loginForm, setLoginForm] = useState({ email: '', password: '' });
   const [loginError, setLoginError] = useState('');
   const [isWebAuthnSimulating, setIsWebAuthnSimulating] = useState(false);
@@ -2461,7 +2466,12 @@ function App() {
     } catch (err) {
       console.warn('Logout request failed:', err);
     }
-    setAuthUser(null);
+    setAuthUser({
+      id: 'admin@intel.local',
+      name: 'Administrator',
+      role: 'ADMIN',
+      clearance: 'TOP SECRET // SCI // NOFORN'
+    });
     setLoginForm({ email: '', password: '' });
     setIsWebAuthnSimulating(false);
     setWebauthnSuccess(false);
@@ -3708,170 +3718,7 @@ function App() {
     );
   };
 
-  // Login MFA Screen
-  if (!authUser) {
-    return (
-      <div
-        className="theme-rgb-all min-h-screen flex flex-col font-mono relative z-10 overflow-hidden tactical-gradient"
-        style={{ ['--theme-rgb' as string]: `${uiTheme.r}, ${uiTheme.g}, ${uiTheme.b}` }}
-      >
-        {renderWorldMapBackdrop(0.18)}
-        {/* Subtle dot backdrop */}
-        <div className="fixed inset-0 pointer-events-none opacity-20">
-          <div className="absolute top-0 left-0 w-full h-full" style={{ backgroundImage: 'radial-gradient(#1e293b 1px, transparent 1px)', backgroundSize: '32px 32px' }} />
-        </div>
 
-        {/* Header */}
-        <header className="w-full flex justify-between items-center px-6 py-4 z-10">
-          <div className="flex items-center gap-2">
-            <span className="material-symbols-outlined text-[#7bd0ff]" style={{ fontVariationSettings: "'FILL' 1" }}>security</span>
-            <h1 className="text-xl font-bold tracking-wider text-[#7bd0ff]">DRISHYA</h1>
-          </div>
-          <div>
-            <span className="text-xs text-[#ffb4ab] border border-[#ffb4ab]/30 px-2 py-0.5 bg-[#93000a]/10">SECURE SHELL GATE</span>
-          </div>
-        </header>
-
-        {/* Auth Canvas */}
-        <main className="flex-grow flex items-center justify-center px-6 z-10">
-          <div className="max-w-md w-full">
-            <div className="bg-[#122131] border border-[#45464d] p-8 relative glow-border overflow-hidden rounded">
-              <div className="scan-line" />
-
-              {!isWebAuthnSimulating ? (
-                /* Stage 1: Key credential inputs */
-                <form className="space-y-6" onSubmit={handleLogin}>
-                  <div className="text-center mb-6">
-                    <h2 className="text-[#d4e4fa] text-lg font-bold">Node credentials</h2>
-                    <p className="text-xs text-[#c6c6cd] mt-1">Provide credentials to initialize security key biometric verification.</p>
-                  </div>
-
-                  <div className="space-y-4">
-                    <div>
-                      <label className="block text-xs uppercase tracking-wider text-[#c6c6cd] mb-1">Email</label>
-                      <input
-                        type="text"
-                        required
-                        className="w-full bg-[#051424] border border-[#45464d] px-3 py-2 text-sm text-[#d4e4fa] focus:border-[#7bd0ff] focus:ring-0 focus:outline-none rounded"
-                        value={loginForm.email}
-                        onChange={(e) => setLoginForm((prev) => ({ ...prev, email: e.target.value }))}
-                        placeholder="Enter your ID"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-xs uppercase tracking-wider text-[#c6c6cd] mb-1">Password</label>
-                      <input
-                        type="password"
-                        required
-                        className="w-full bg-[#051424] border border-[#45464d] px-3 py-2 text-sm text-[#d4e4fa] focus:border-[#7bd0ff] focus:ring-0 focus:outline-none rounded"
-                        value={loginForm.password}
-                        onChange={(e) => setLoginForm((prev) => ({ ...prev, password: e.target.value }))}
-                        placeholder="••••••••"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Quick Demo Credentials */}
-                  <div className="flex items-center justify-center gap-2 pt-1 pb-1">
-                    <span className="text-[10px] uppercase tracking-wider text-[#8e9099]">Quick Demo:</span>
-                    <button
-                      type="button"
-                      onClick={() => setLoginForm({ email: 'admin@intel.local', password: 'Admin@2026!' })}
-                      className="px-2 py-1 text-[10px] font-mono font-bold bg-[#7bd0ff]/10 hover:bg-[#7bd0ff]/20 text-[#7bd0ff] border border-[#7bd0ff]/30 rounded transition-all"
-                    >
-                      Admin
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setLoginForm({ email: 'analyst@intel.local', password: 'Analyst@2026!' })}
-                      className="px-2 py-1 text-[10px] font-mono font-bold bg-[#7bd0ff]/10 hover:bg-[#7bd0ff]/20 text-[#7bd0ff] border border-[#7bd0ff]/30 rounded transition-all"
-                    >
-                      Analyst
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setLoginForm({ email: 'operator@intel.local', password: 'Operator@2026!' })}
-                      className="px-2 py-1 text-[10px] font-mono font-bold bg-[#7bd0ff]/10 hover:bg-[#7bd0ff]/20 text-[#7bd0ff] border border-[#7bd0ff]/30 rounded transition-all"
-                    >
-                      Operator
-                    </button>
-                  </div>
-
-                  {loginError && <p className="text-xs text-[#ffb4ab] bg-[#93000a]/20 border border-[#ffb4ab]/30 p-2 rounded text-center">{loginError}</p>}
-
-                  <button
-                    type="submit"
-                    className="w-full py-3 bg-[#7bd0ff]/10 hover:bg-[#7bd0ff]/20 text-[#7bd0ff] border border-[#7bd0ff]/40 text-xs uppercase tracking-wider font-bold transition-all rounded"
-                  >
-                    Initiate Authentication
-                  </button>
-
-                </form>
-              ) : (
-                /* Stage 2: WebAuthn verification simulation */
-                <div className="text-center py-4">
-                  <div className="flex justify-center mb-6">
-                    <div className="inline-flex items-center px-3 py-1 bg-[#1c2b3c] border border-[#4edea3]/30 rounded-full">
-                      <span className="material-symbols-outlined text-[#4edea3] text-sm mr-2" style={{ fontVariationSettings: "'FILL' 1" }}>verified_user</span>
-                      <span className="text-[10px] font-bold text-[#4edea3] tracking-widest uppercase">Zero-Trust Authenticated</span>
-                    </div>
-                  </div>
-
-                  <div className="relative w-24 h-24 mx-auto mb-6 flex items-center justify-center">
-                    <div className="absolute inset-0 rounded-full bg-[#7bd0ff]/5 blur-lg" />
-                    {webauthnSuccess ? (
-                      <div className="relative w-16 h-16 border border-[#4edea3]/40 flex items-center justify-center rounded-full bg-[#010f1f] animate-bounce">
-                        <span className="material-symbols-outlined text-2xl text-[#4edea3]">verified</span>
-                      </div>
-                    ) : (
-                      <div className="relative w-16 h-16 border-2 border-t-[#7bd0ff] border-r-transparent border-[#7bd0ff]/20 flex items-center justify-center rounded-full bg-[#010f1f] animate-spin">
-                        <span className="material-symbols-outlined text-xl text-[#7bd0ff]">sync</span>
-                      </div>
-                    )}
-                  </div>
-
-                  <h2 className="text-[#d4e4fa] text-lg font-bold mb-1">STRATCOM Authentication</h2>
-                  <p className="text-xs text-[#c6c6cd] max-w-xs mx-auto mb-6 leading-relaxed">
-                    Establishing secure encrypted tunnel. Verifying digital identity parameters...
-                  </p>
-
-                  <div className="space-y-2 bg-[#0d1c2d] p-4 border border-[#45464d] text-left text-xs">
-                    <div className="flex justify-between">
-                      <span className="text-[#c6c6cd]">PROTOCOL</span>
-                      <span className="text-[#bec6e0] font-bold">WEBAUTHN 2.0</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-[#c6c6cd]">ENCRYPTION</span>
-                      <span className="text-[#bec6e0] font-bold">AES-256-GCM</span>
-                    </div>
-                  </div>
-
-                  <button
-                    onClick={() => setIsWebAuthnSimulating(false)}
-                    className="mt-6 text-xs text-[#c6c6cd]/75 hover:text-[#d4e4fa] underline underline-offset-4"
-                  >
-                    Cancel Request
-                  </button>
-                </div>
-              )}
-            </div>
-            <div className="mt-6 text-center">
-              <p className="text-[9px] text-[#c6c6cd]/40 tracking-widest uppercase">Obsidian Sentinel Security Framework v4.2.1</p>
-            </div>
-          </div>
-        </main>
-
-        {/* Global Footer */}
-        <footer className="w-full bg-[#051424] border-t border-[#93000a] py-2 px-6 flex justify-between items-center text-[10px] text-[#c6c6cd]">
-          <span>CLASSIFIED // TOP SECRET // NODE 9-B</span>
-          <div className="flex items-center gap-1.5 text-[#ffb4ab]">
-            <span className="w-1.5 h-1.5 rounded-full bg-[#ffb4ab] animate-ping" />
-            <span className="font-bold">SYSTEM THREAT LEVEL: LOW</span>
-          </div>
-        </footer>
-      </div>
-    );
-  }
 
   return (
     <div

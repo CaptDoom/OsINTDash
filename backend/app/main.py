@@ -134,19 +134,6 @@ app.include_router(alerts.router)
 app.include_router(credibility.router)
 
 
-@app.middleware("http")
-async def enforce_auth_middleware(request: Request, call_next):
-    path = request.url.path
-    if path.startswith("/api/") and not path.startswith("/api/auth/") and path != "/api/system/status":
-        if os.environ.get("TESTING") != "1":
-            from backend.app.api.routes.auth import is_session_valid
-            token = request.cookies.get("session_token")
-            if not token or not await is_session_valid(token):
-                return JSONResponse(
-                    status_code=401,
-                    content={"detail": "Unauthorized. Active session token is missing or expired."}
-                )
-    return await call_next(request)
 
 
 @app.middleware("http")
