@@ -37,7 +37,6 @@ async def lifespan(app: FastAPI):
 
     # Startup Environment Validation
     if not testing:
-        # Require at least one news provider API key
         provider_keys = [
             settings.newsapi_key, settings.gnews_api_key, settings.newsdata_api_key,
             settings.currents_api_key, settings.thenews_api_key, settings.mediastack_api_key,
@@ -45,23 +44,25 @@ async def lifespan(app: FastAPI):
             settings.freenewsapi_key,
         ]
         if not any(provider_keys):
-            msg = (
-                "[Startup Validation] At least one news provider API key must be configured "
-                "(NEWS_API_KEY, GNEWS_API_KEY, NEWSDATA_API_KEY, etc.)."
+            logger.info(
+                "[Startup Validation] No commercial news provider keys configured. "
+                "Operating with free GDELT/RSS feeds and in-memory/seed intelligence."
             )
-            logger.error(msg)
-            raise RuntimeError(msg)
+        else:
+            logger.info("[Startup Validation] Configured news provider API keys detected.")
 
-        # Verify Redis connectivity
+        # Verify Redis connectivity (warn and continue in-memory if offline)
         try:
             import redis.asyncio as aioredis
             conn = aioredis.from_url(settings.redis_url, socket_timeout=3.0)
             await conn.ping()
             await conn.aclose()
+            logger.info(f"[Startup Validation] Redis connected successfully at {settings.redis_url}.")
         except Exception as e:
-            msg = f"[Startup Validation] Redis is unreachable at {settings.redis_url}: {e}"
-            logger.error(msg)
-            raise RuntimeError(msg)
+            logger.warning(
+                f"[Startup Validation] Redis is unreachable at {settings.redis_url}: {e}. "
+                "Continuing in graceful in-memory fallback mode."
+            )
 
     # Run DB initializations
     await create_tables()
